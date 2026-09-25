@@ -16,7 +16,7 @@ import { dirname } from "node:path";
 import { Plugin } from "@opencode/plugin";
 import { hasSecret, resolveConfig, shouldHandlePermissionEvents, shouldRegisterEvaluate } from "./config.js";
 import { createLogger, errorMessage, maskId } from "./logger.js";
-import { SetupGuard } from "./lifecycle.js";
+import { acquireProcessGuard, releaseProcessGuard } from "./lifecycle.js";
 import { OwnerPolicy } from "./security/allowlist.js";
 import { ReplayGuard, signApproval, verifyApproval } from "./security/token.js";
 import { startGateway } from "./feishu/gateway.js";
@@ -29,9 +29,6 @@ import { parseSessionCardValue } from "./feishu/session-cards.js";
 import { ApprovalManager, decideEffect, type ReplyInput } from "./permission.js";
 import { SessionCommands } from "./session-commands.js";
 import type { IncomingMessage, PermissionRepliedLike, PermissionRequestLike, StorageLike } from "./types.js";
-
-/** 进程级单例：同一进程内只真正启动一次 gateway/订阅。 */
-const setupGuard = new SetupGuard();
 
 export default Plugin.define({
   id: "feishu",
@@ -61,7 +58,7 @@ export default Plugin.define({
       hasAppSecret: hasSecret(config.appSecret),
     });
 
-    if (!setupGuard.acquire()) {
+    if (!acquireProcessGuard()) {
       // 同进程重复 setup（opencode 按 location 加载全局插件）：只跳过，绝不能碰第一份的资源。
       log.debug("检测到同进程重复 setup，跳过启动（仅首个实例生效）");
       logSink?.close();
@@ -72,7 +69,7 @@ export default Plugin.define({
       return await start(ctx, config, log, logSink);
     } catch (err) {
       // 启动失败时释放占用，允许后续重试。
-      setupGuard.release();
+      releaseProcessGuard();
       logSink?.close();
       throw err;
     }
@@ -282,7 +279,7 @@ async function start(
     }
     gateway.stop();
     logSink?.close();
-    setupGuard.release();
+    releaseProcessGuard();
   };
 }
 

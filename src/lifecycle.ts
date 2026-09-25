@@ -34,3 +34,36 @@ export class SetupGuard {
     return this.active;
   }
 }
+
+/**
+ * 进程级共享槽位。
+ *
+ * opencode 按 location 加载插件时，同一进程内会出现**多个模块实例**，
+ * 模块级 `new SetupGuard()` 各持一份状态、挡不住重复 setup。用 `Symbol.for`
+ * 把状态挂到 `globalThis`（同一 realm 内共享），跨模块实例生效。
+ *
+ * 若运行环境没有 `globalThis`（极老运行时），退化为模块级实例。
+ */
+const GUARD_SLOT = Symbol.for("opencode-feishu-v2/setup-guard");
+
+interface GuardSlot {
+  active: boolean;
+}
+
+export function acquireProcessGuard(): boolean {
+  const g = globalThis as unknown as Record<symbol, GuardSlot | undefined>;
+  let slot = g[GUARD_SLOT];
+  if (!slot) {
+    slot = { active: false };
+    g[GUARD_SLOT] = slot;
+  }
+  if (slot.active) return false;
+  slot.active = true;
+  return true;
+}
+
+export function releaseProcessGuard(): void {
+  const g = globalThis as unknown as Record<symbol, GuardSlot | undefined>;
+  const slot = g[GUARD_SLOT];
+  if (slot) slot.active = false;
+}
