@@ -157,7 +157,12 @@ export default Plugin.define({
     async function handleEvent(event: { type: string; data: unknown }): Promise<void> {
       switch (event.type) {
         case "permission.asked":
-          await approvals?.onAsked(event.data as PermissionRequestLike);
+          // 发卡是网络 IO，不能阻塞事件流（否则会拖慢后续 text.delta）。
+          if (approvals) {
+            void approvals
+              .onAsked(event.data as PermissionRequestLike)
+              .catch((err) => log.warn("处理 permission.asked 失败", { error: errorMessage(err) }));
+          }
           break;
         case "permission.replied":
           approvals?.onReplied(event.data as PermissionRepliedLike);
