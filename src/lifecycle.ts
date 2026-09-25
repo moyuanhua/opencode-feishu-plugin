@@ -67,3 +67,9 @@ export function releaseProcessGuard(): void {
   const slot = g[GUARD_SLOT];
   if (slot) slot.active = false;
 }
+
+/** 仅供诊断日志：当前 realm 是否已被占用。 */
+export function isProcessGuardActive(): boolean {
+  const g = globalThis as unknown as Record<symbol, GuardSlot | undefined>;
+  return g[GUARD_SLOT]?.active === true;
+}
