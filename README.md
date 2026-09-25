@@ -14,6 +14,7 @@
 | 单聊对话 | 飞书单聊消息 → 映射/新建 OpenCode session → `ctx.session.prompt` |
 | 流式回复 | 订阅 `session.text.delta`，把 assistant 文本增量以**原地更新的飞书卡片**回填（节流 ≥400ms） |
 | 卡片审批 | `permission.evaluate` 降级为 `ask` → 发审批卡（允许一次 / 始终允许 / 拒绝）→ 点击后 `permission.reply` 闭环 |
+| 会话管理 | 一个飞书单聊可绑定**多个** opencode 会话：`/new` `/sessions` `/use` `/current` `/stop`，以及会话列表卡片按钮切换 |
 
 ---
 
@@ -200,7 +201,62 @@ denyTools / lockdown → deny                            │
 
 ---
 
-## 五、故障排查
+## 五、会话管理（多会话）
+
+一个飞书单聊不再只映射一个 opencode 会话，而是维护**一个会话列表 + 一个当前会话**。
+在私聊里发送以 `/` 开头的文本即触发命令，**命令不会作为 prompt 发给模型**。
+
+### 命令
+
+| 命令 | 说明 |
+| --- | --- |
+| `/new [标题]` | 新建 opencode 会话并设为当前；缺省标题为时间戳 |
+| `/sessions`（别名 `/ls`） | 发送**会话列表卡片**（见下） |
+| `/use <序号\|会话id前缀>` | 切换当前会话，例如 `/use 2`、`/use ses_abc` |
+| `/current` | 查看当前会话（标题 + id + 会话总数） |
+| `/stop` | 中断当前会话正在跑的任务（`ctx.session.interrupt`） |
+| `/help` | 命令列表 |
+| 未知 `/xxx` | 回复帮助提示，**不**发给模型 |
+
+> 没有显式建过会话时，**第一条普通消息**仍会自动新建会话并绑定（向后兼容旧行为）。
+
+### 会话卡片
+
+`/sessions` 或点击卡片按钮均可与会话列表交互：
+
+```
+🧩 OpenCode 会话
+1. 会话标题一（ses_aaa…） ← 当前
+2. 会话标题二（ses_bbb…）
+
+[切换 1] [切换 2] [➕ 新建会话]
+```
+
+- 每个会话一行（序号 + 标题 + 短 id + 是否为当前），带一个「切换 N」按钮；当前会话按钮高亮。
+- 「➕ 新建会话」= `/new`（缺省标题）。
+- 点击后：校验 `operator.open_id` 在白名单 → 切换/新建 → 返回 toast → **原地更新卡片**为最新列表。
+- 与审批卡共用 `card.action.trigger` 链路，靠按钮 value 路由（会话卡 `{cmd}` / 审批卡 `{t,d}`）。
+- 回调必须 **3 秒内**返回：校验同步完成，`create/switch/patch` 全部 fire-and-forget。
+
+### 持久化与迁移
+
+| key | 结构 | 说明 |
+| --- | --- | --- |
+| `feishu:v2:chat:<chatId>:sessions` | `{ sessions: [{sessionID,title,updatedAt}], active? }` | **新**多会话结构 |
+| `feishu:v2:chat:<chatId>` | `{ sessionID, openId }` | **旧**单值，仅向后兼容读取；读到即迁移到新结构并删除 |
+| `feishu:v2:session:<sid>` | `{ chatId, openId }` | 不变；权限路由（`resolveBySession`/`hasSession`）依赖它 |
+
+> 迁移是无损的：旧记录会变成新结构的第一个会话并设为当前，同时补齐 `session:<sid>` 索引。
+
+### 进程级幂等
+
+opencode 会按 location 多次加载全局插件，导致同一进程内 `setup` 被调用多次（起两个长连接 → 重复回复/重复发卡）。
+插件用模块级 `SetupGuard` 保证**同一进程只真正启动一次** gateway/事件订阅：
+第二次 setup 只打一条 debug 日志并返回 no-op cleanup，**不会**影响第一个实例的资源；第一个实例的 cleanup 仍能正常关闭并在之后允许重新 setup。
+
+---
+
+## 六、故障排查
 
 | 现象 | 可能原因 / 处理 |
 | --- | --- |
@@ -215,11 +271,14 @@ denyTools / lockdown → deny                            │
 | 回复卡片不更新 | `stream: false`；或日志里 `流式卡片更新失败`（检查 `im:message:send_as_bot` 是否开通） |
 | 卡片内容被截断 | 飞书卡片上限 ~30KB，插件截断到 28KB 并标注「已截断」 |
 | 想临时关闭审批 | 把 `permissionGate` 设为 `off` |
+| `/sessions`、`/use` 等命令没反应 | 命令仅识别**以 `/` 开头的单聊文本**；确认是 p2p 且发送者在白名单内。未知命令会回帮助提示 |
+| 切换会话后再发消息仍进旧会话 | `/use` 成功会回执「已切换」；也可用 `/current` 复核。切换只改变当前会话，历史消息不受影响 |
+| 重复回复 / 重复发卡 | 旧版本因 opencode 多次 setup 起了两个长连接；现已用进程级 `SetupGuard` 修复（debug 日志「检测到同进程重复 setup」） |
 | 想看详细日志 | 把 `logLevel` 设为 `debug`（日志只打 secret 存在性，绝不含明文） |
 
 ---
 
-## 六、安全边界（三重保险）
+## 七、安全边界（三重保险）
 
 1. **平台层**：应用可用范围 = 仅本人，其他人无法与机器人建立单聊。
 2. **scope 层**：只申请 p2p 读权限，不申请任何群权限，群消息物理收不到。
@@ -229,7 +288,7 @@ denyTools / lockdown → deny                            │
 
 ---
 
-## 七、开发
+## 八、开发
 
 ```bash
 npm install
@@ -243,9 +302,11 @@ npm run dev         # tsup --watch
 
 ```
 src/
-  index.ts              # Plugin.define，装配所有部件
+  index.ts              # Plugin.define，装配所有部件 + 进程级幂等守卫
   config.ts             # 配置解析/校验（options > plugins/feishu.json > 环境变量，永不抛异常）
+  lifecycle.ts          # SetupGuard：同进程 setup 只真正启动一次
   permission.ts         # permission.evaluate 策略 + 审批卡闭环 + reply
+  session-commands.ts   # 会话命令编排（文本命令 + 会话卡片按钮）
   logger.ts             # 结构化 stderr 日志（secret 脱敏）
   types.ts
   security/
@@ -255,17 +316,20 @@ src/
     gateway.ts          # WSClient 长连接 + EventDispatcher
     events.ts           # 飞书事件 → 归一化模型（纯函数）
     cards.ts            # 审批卡 / 流式卡 / 结果卡构建（纯函数）
+    session-cards.ts    # 会话列表卡片构建 + 按钮 value 解析（纯函数）
+    commands.ts         # 会话命令解析 / 匹配 / 文案（纯函数）
     sender.ts           # im.message.create/patch/delete 薄封装
-    session-map.ts      # chat ↔ session 映射（ctx.storage 持久化）
+    session-map.ts      # chat ↔ 多会话映射（ctx.storage 持久化 + 旧格式迁移）
     streaming.ts        # 流式卡片节流控制器
 test/                   # vitest 纯逻辑单测
 ```
 
 ---
 
-## 八、已知限制（P0 范围外）
+## 九、已知限制（P0 范围外）
 
 - 只处理**单聊文本**（含富文本 post）；图片/文件/音视频只给出文字占位描述，不下载。
+- 会话管理提供 `/new` `/sessions` `/use` `/current` `/stop`；`removeSession` / `renameSession` API 已就绪但暂无对应命令。
 - 只处理从飞书发起的会话的审批；TUI 会话不接管（避免挂起）。
 - 未做「问答卡 / question」审批，仅 `permission`。
 - 未申请群相关能力，故不支持群聊（未来按 `APP_MODE_SCOPES.md` 的 T1–T6 逐档扩展）。

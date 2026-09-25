@@ -8,8 +8,11 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
 import type { LogLevel, PermissionGate, RawOptions } from "./types.js";
+
+/** 默认日志文件（相对 configDir）：`<configDir>/plugins/feishu.log`。 */
+const LOG_FILE_RELATIVE = ["plugins", "feishu.log"] as const;
 
 export interface ResolvedConfig {
   readonly enabled: boolean;
@@ -30,6 +33,12 @@ export interface ResolvedConfig {
   readonly stream: boolean;
   readonly streamThrottleMs: number;
   readonly logLevel: LogLevel;
+  /**
+   * 日志同时追加写入的文件全路径；`undefined` = 只写 stderr。
+   * 因为 opencode 以服务方式运行时插件 stderr 会被丢弃，调试必须落文件。
+   * 配置为 `true` 时默认 `<configDir>/plugins/feishu.log`。secret 始终脱敏。
+   */
+  readonly logFile: string | undefined;
   /** 审批 token / 卡片有效期。 */
   readonly approvalTtlMs: number;
   /** HMAC 密钥；未显式配置时从 appSecret 派生（不落盘、不打印）。 */
@@ -89,6 +98,7 @@ export function resolveConfig(
   const approvalTtlMs = clamp(asNumber(merged.approvalTtlMs, 10 * 60 * 1000), 30_000, 24 * 60 * 60 * 1000);
   const maxResourcesShown = clamp(asNumber(merged.maxResourcesShown, 8), 1, 50);
   const domain = merged.domain === "lark" ? "lark" : "feishu";
+  const logFile = resolveLogFile(merged.logFile, env, deps);
 
   const signSecretRaw = expandEnv(asString(merged.signSecret), env);
   const signSecret =
@@ -118,6 +128,7 @@ export function resolveConfig(
     stream,
     streamThrottleMs: throttle,
     logLevel,
+    logFile,
     approvalTtlMs,
     signSecret,
     maxResourcesShown,
@@ -179,6 +190,26 @@ function resolveConfigDir(env: NodeJS.ProcessEnv, explicit: string | undefined):
   const fromEnv = asString(env.OPENCODE_CONFIG_DIR).trim();
   if (fromEnv) return fromEnv;
   return join(homedir(), ".config", "opencode");
+}
+
+/**
+ * 解析日志文件路径。
+ * - `false` / 未设置 → undefined（只写 stderr）
+ * - `true` → `<configDir>/plugins/feishu.log`
+ * - 字符串 → 展开 `~` 与 `${ENV}`；相对路径按 configDir 解析
+ */
+export function resolveLogFile(
+  raw: unknown,
+  env: NodeJS.ProcessEnv,
+  deps: ResolveConfigDeps,
+): string | undefined {
+  if (raw === true) return join(resolveConfigDir(env, deps.configDir), ...LOG_FILE_RELATIVE);
+  if (typeof raw !== "string") return undefined;
+  const expanded = expandEnv(raw.trim(), env);
+  if (!expanded) return undefined;
+  if (expanded === "true") return join(resolveConfigDir(env, deps.configDir), ...LOG_FILE_RELATIVE);
+  if (expanded.startsWith("~/")) return join(homedir(), expanded.slice(2));
+  return isAbsolute(expanded) ? expanded : join(resolveConfigDir(env, deps.configDir), expanded);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

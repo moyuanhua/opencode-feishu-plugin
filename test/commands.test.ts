@@ -1,0 +1,108 @@
+import { describe, expect, test } from "vitest";
+import {
+  defaultSessionTitle,
+  helpText,
+  isCommand,
+  matchSession,
+  parseCommand,
+  sessionLine,
+  shortSessionId,
+  useErrorText,
+} from "../src/feishu/commands.js";
+import type { SessionEntry } from "../src/feishu/session-map.js";
+
+const entries: SessionEntry[] = [
+  { sessionID: "ses_aaa111", title: "一", updatedAt: 1 },
+  { sessionID: "ses_bbb222", title: "二", updatedAt: 2 },
+  { sessionID: "ses_abc999", title: "", updatedAt: 3 },
+];
+
+describe("parseCommand", () => {
+  test("非命令返回 undefined", () => {
+    expect(parseCommand("hello")).toBeUndefined();
+    expect(parseCommand("")).toBeUndefined();
+    expect(parseCommand("你好 /new")).toBeUndefined();
+  });
+
+  test("/new 带标题 / 不带标题", () => {
+    expect(parseCommand("/new")).toEqual({ name: "new", args: "", raw: "new" });
+    expect(parseCommand("/new 我的标题")).toEqual({ name: "new", args: "我的标题", raw: "new" });
+  });
+
+  test("别名 /ls 与大小写", () => {
+    expect(parseCommand("/ls")?.name).toBe("sessions");
+    expect(parseCommand("/SESSIONS")?.name).toBe("sessions");
+    expect(parseCommand("/Use 2")).toEqual({ name: "use", args: "2", raw: "Use" });
+  });
+
+  test("/use 序号或 id 前缀", () => {
+    expect(parseCommand("/use 2")).toEqual({ name: "use", args: "2", raw: "use" });
+    expect(parseCommand("/use ses_abc")).toEqual({ name: "use", args: "ses_abc", raw: "use" });
+  });
+
+  test("未知命令标记 unknown，空命令视为 help", () => {
+    expect(parseCommand("/frobnicate x")?.name).toBe("unknown");
+    expect(parseCommand("/")?.name).toBe("help");
+  });
+
+  test("isCommand 只看前导 /", () => {
+    expect(isCommand("/new")).toBe(true);
+    expect(isCommand("  /new")).toBe(true);
+    expect(isCommand("你好")).toBe(false);
+    expect(isCommand("[图片]")).toBe(false);
+  });
+});
+
+describe("matchSession", () => {
+  test("数字序号按 1-based", () => {
+    expect(matchSession("1", entries)).toEqual({ ok: true, entry: entries[0] });
+    expect(matchSession("3", entries)).toEqual({ ok: true, entry: entries[2] });
+    expect(matchSession("4", entries)).toEqual({ ok: false, reason: "not_found" });
+  });
+
+  test("id 前缀唯一命中", () => {
+    const result = matchSession("ses_bbb", entries);
+    expect(result.ok && result.entry.sessionID).toBe("ses_bbb222");
+  });
+
+  test("前缀歧义 / 未命中 / 空", () => {
+    expect(matchSession("ses_", entries)).toEqual({ ok: false, reason: "ambiguous" });
+    expect(matchSession("ses_zzz", entries)).toEqual({ ok: false, reason: "not_found" });
+    expect(matchSession("   ", entries)).toEqual({ ok: false, reason: "empty" });
+  });
+
+  test("大小写不敏感前缀", () => {
+    const result = matchSession("SES_BBB", entries);
+    expect(result.ok && result.entry.sessionID).toBe("ses_bbb222");
+  });
+});
+
+describe("文案与展示", () => {
+  test("defaultSessionTitle 由时间戳决定", () => {
+    const title = defaultSessionTitle(0);
+    expect(title).toContain("1970-01-01");
+    expect(defaultSessionTitle(1_700_000_000_000)).not.toBe(title);
+  });
+
+  test("shortSessionId 截断", () => {
+    expect(shortSessionId("ses_abc")).toBe("ses_abc");
+    expect(shortSessionId("ses_aaaaaaaaaaaaaaaa")).toMatch(/…$/);
+  });
+
+  test("sessionLine 标记当前", () => {
+    expect(sessionLine(entries[0]!, 0, "ses_aaa111")).toContain("← 当前");
+    expect(sessionLine(entries[2]!, 2)).toContain("(未命名)");
+  });
+
+  test("useErrorText 三种提示", () => {
+    expect(useErrorText("empty")).toContain("/use");
+    expect(useErrorText("ambiguous")).toContain("多个");
+    expect(useErrorText("not_found")).toContain("未找到");
+  });
+
+  test("helpText 覆盖全部命令", () => {
+    for (const cmd of ["/new", "/sessions", "/use", "/current", "/stop", "/help"]) {
+      expect(helpText()).toContain(cmd);
+    }
+  });
+});
