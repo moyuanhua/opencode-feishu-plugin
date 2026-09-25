@@ -55,30 +55,89 @@
 
 ---
 
-## 三、OpenCode 配置
+## 三、部署
 
-在 `~/.config/opencode/opencode.json` 的 `plugins` 中加入（**对象形式**才能传 `options`）：
+本插件通过 opencode 的 **plugins 目录自动加载**：
+
+```
+~/.config/opencode/plugins/
+  feishu/          # 插件本体（目录内需 package.json + main 入口）
+  feishu.json      # 插件配置（可选；建议权限 600）
+```
+
+### 1. 放入插件目录
+
+**方式 A：拷贝构建产物**
+
+```bash
+cd /path/to/opencode-feishu-v2
+npm install && npm run build
+mkdir -p ~/.config/opencode/plugins/feishu
+cp -r dist package.json ~/.config/opencode/plugins/feishu/
+```
+
+> 构建产物 `dist/index.js` 已自包含飞书 SDK，运行时无需额外 `node_modules`。
+
+**方式 B：npm 安装到该目录**（未发布公共 registry 时用本地 tarball / 私有 registry）
+
+```bash
+cd ~/.config/opencode/plugins/feishu
+npm init -y
+npm install /path/to/opencode-feishu-v2-0.1.0.tgz
+```
+
+放入后执行 `opencode reload` 即时生效（插件目录内必须有 `package.json`，且 `main` 指向入口）。
+
+> ⚠️ **不要**在 `~/.config/opencode/opencode.json` 的 `plugins` 数组里写**本地路径**（如 `"./plugins/feishu"` 或绝对路径）——实测**无效**。
+> 写成包名（`"opencode-feishu-v2"`）则会触发 `npm install`，私有包会 **404**。
+> 正确做法就是上面把插件放进 `plugins/<name>/` 目录，**无需**在 `plugins` 数组里引用它。
+
+### 2. 配置：`<configDir>/plugins/feishu.json`
+
+配置文件字段与 `options` **完全一致**，并支持 `${ENV}` / `{env:ENV}` 展开。
+`configDir` 取 `OPENCODE_CONFIG_DIR`（若设置），否则 `~/.config/opencode`：
+
+```bash
+install -m 600 /dev/null ~/.config/opencode/plugins/feishu.json
+cat > ~/.config/opencode/plugins/feishu.json <<'JSON'
+{
+  "appId": "{env:FEISHU_APP_ID}",
+  "appSecret": "{env:FEISHU_APP_SECRET}",
+  "allowUsers": ["ou_你的open_id"],
+  "permissionGate": "gate",
+  "allowTools": ["read", "glob", "grep", "webfetch"],
+  "stream": true,
+  "streamThrottleMs": 400
+}
+JSON
+chmod 600 ~/.config/opencode/plugins/feishu.json
+```
+
+**优先级（字段级）**：`options` > `<configDir>/plugins/feishu.json` > 环境变量。
+
+- 环境变量兜底仅针对 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，便于**零配置**运行：把插件放进目录后，只在服务进程里设置这两个变量即可。
+- **配置错误永不导致 opencode 崩溃**：文件缺失 / 非法 JSON / 顶层非对象 / 读取失败都只 `warn` 并退回下一优先级；最终缺 `appId`/`appSecret` 时**禁用插件**（不抛异常）。
+- App Secret **永远不写入日志**，配置告警文案也不会回显 secret 明文。
+
+> 🔐 建议 `feishu.json` 权限设为 `600`（`chmod 600`），避免同机其他用户读取 App Secret。
+
+### 3. `opencode.json` 的 `options`（可选）
+
+仅当你把此包发布到可解析的 registry 时，才在 `~/.config/opencode/opencode.json` 用**对象形式**传 `options`：
 
 ```jsonc
 {
   "plugins": [
     {
       "package": "opencode-feishu-v2",
-      "options": {
-        "appId": "{env:FEISHU_APP_ID}",
-        "appSecret": "{env:FEISHU_APP_SECRET}",
-        "allowUsers": ["ou_你的open_id"],   // 空 = 仅应用 owner（首个发消息者绑定并持久化）
-        "permissionGate": "gate",           // off | notify | gate | lockdown
-        "allowTools": ["read", "glob", "grep", "webfetch"],
-        "stream": true,
-        "streamThrottleMs": 400
-      }
+      "options": { "appId": "{env:FEISHU_APP_ID}", "appSecret": "{env:FEISHU_APP_SECRET}" }
     }
   ]
 }
 ```
 
-> `{env:FEISHU_APP_ID}` 由 OpenCode 在服务进程内解析。本插件也会兜底解析 `{env:NAME}` / `${NAME}`。
+> 目录部署 + `feishu.json` 已能满足配置，**通常不需要**这一节；若同时存在，`options` 优先级最高。
+> `{env:FEISHU_APP_ID}` 由 OpenCode 在服务进程内解析，本插件也会兜底解析 `{env:NAME}` / `${NAME}`。
 > **App Secret 永远不会写入日志**——日志里只记录 `hasAppSecret: true/false`。
 
 ### 配置字段
@@ -145,7 +204,10 @@ denyTools / lockdown → deny                            │
 
 | 现象 | 可能原因 / 处理 |
 | --- | --- |
-| 日志出现「飞书插件未启用」 | `appId`/`appSecret` 缺失或 `{env:...}` 未解析；检查环境变量是否在 **opencode 服务进程**内可见 |
+| 日志出现「飞书插件未启用」 | `appId`/`appSecret` 缺失或 `{env:...}` 未解析；检查 `plugins/feishu.json` 与 **opencode 服务进程**内的环境变量 |
+| 改了 `feishu.json` 不生效 | 配置目录取 `OPENCODE_CONFIG_DIR` 或 `~/.config/opencode`；确认文件位于 `<configDir>/plugins/feishu.json`，改完执行 `opencode reload` |
+| 日志出现「不是合法 JSON / 顶层必须是 JSON 对象」 | 配置文件格式有误，插件会**忽略该文件并退回环境变量**（不会崩溃）；修正 JSON 后 reload |
+| 把本地路径写进 `opencode.json` 的 `plugins` 数组没反应 | 该写法无效；写成包名会触发 npm install（私有包 404）。请把插件放进 `plugins/<name>/` 目录 |
 | 飞书发消息机器人无反应 | ① 应用未发布 / 可用范围没勾选你；② 事件订阅误选 Webhook 而非长连接；③ `im.message.p2p_msg:readonly` 未开通 |
 | 只有单聊可用是预期的吗 | 是。**故意不申请群权限**，机器人收不到群消息 |
 | 审批卡收不到 | 该 session 不是从飞书发起的（无 chat↔session 映射），插件按安全设计不降级为 ask |
@@ -182,7 +244,7 @@ npm run dev         # tsup --watch
 ```
 src/
   index.ts              # Plugin.define，装配所有部件
-  config.ts             # 配置解析/校验（永不抛异常）
+  config.ts             # 配置解析/校验（options > plugins/feishu.json > 环境变量，永不抛异常）
   permission.ts         # permission.evaluate 策略 + 审批卡闭环 + reply
   logger.ts             # 结构化 stderr 日志（secret 脱敏）
   types.ts

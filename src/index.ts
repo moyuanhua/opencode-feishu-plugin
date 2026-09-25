@@ -27,6 +27,7 @@ export default Plugin.define({
   async setup(ctx) {
     const config = resolveConfig(ctx.options);
     const log = createLogger({ level: config.logLevel });
+    for (const warning of config.warnings) log.warn(warning);
 
     if (!config.enabled) {
       // 配置缺失只禁用插件，不抛异常，绝不把用户的 opencode 弄挂。

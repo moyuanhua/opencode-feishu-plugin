@@ -6,12 +6,17 @@
  * - 只记录 secret 的「存在性」，绝不记录值。
  */
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type { LogLevel, PermissionGate, RawOptions } from "./types.js";
 
 export interface ResolvedConfig {
   readonly enabled: boolean;
   /** enabled=false 时说明原因（不含敏感值）。 */
   readonly disabledReason?: string;
+  /** 配置解析中的非致命告警（绝不含 secret），由调用方决定是否 warn。 */
+  readonly warnings: readonly string[];
   readonly appId: string;
   readonly appSecret: string;
   readonly domain: "feishu" | "lark";
@@ -38,23 +43,54 @@ const GENESIS_SECRET_SALT = "opencode-feishu-v2/approval/v1";
 const VALID_GATES: readonly PermissionGate[] = ["off", "notify", "gate", "lockdown"];
 const VALID_LOG_LEVELS: readonly LogLevel[] = ["debug", "info", "warn", "error"];
 
-export function resolveConfig(raw: RawOptions | undefined, env: NodeJS.ProcessEnv = process.env): ResolvedConfig {
+/** 配置文件相对 configDir 的位置：`<configDir>/plugins/feishu.json`。 */
+const CONFIG_FILE_RELATIVE = ["plugins", "feishu.json"] as const;
+
+/** 读取配置文件的依赖注入点（测试可注入 configDir / readFile）。 */
+export interface ResolveConfigDeps {
+  /** 显式覆盖 configDir；默认取 `OPENCODE_CONFIG_DIR` 或 `~/.config/opencode`。 */
+  readonly configDir?: string;
+  /** 读取文本文件；默认 `fs.readFileSync(path, "utf8")`。 */
+  readonly readFile?: (path: string) => string;
+}
+
+/**
+ * 解析插件配置。
+ *
+ * 优先级（字段级）：`options` > `<configDir>/plugins/feishu.json` > 环境变量
+ * （`FEISHU_APP_ID` / `FEISHU_APP_SECRET`，仅这两个字段兜底）。
+ *
+ * 红线：**永不抛异常**。文件缺失/非法 JSON/不可读只产生 warning 并退回下一优先级；
+ * 最终缺少 appId/appSecret 时禁用插件，绝不把用户的 opencode 弄挂。
+ * warning / disabledReason 中**永不包含 secret 明文**。
+ */
+export function resolveConfig(
+  raw: RawOptions | undefined,
+  env: NodeJS.ProcessEnv = process.env,
+  deps: ResolveConfigDeps = {},
+): ResolvedConfig {
+  const warnings: string[] = [];
   const options = raw ?? {};
 
-  const appId = expandEnv(asString(options.appId), env);
-  const appSecret = expandEnv(asString(options.appSecret), env);
-  const allowUsers = asStringArray(options.allowUsers);
-  const allowTools = normalizeToolList(options.allowTools, DEFAULT_ALLOW_TOOLS);
-  const denyTools = normalizeToolList(options.denyTools, []);
-  const gate = asGate(options.permissionGate);
-  const logLevel = asLogLevel(options.logLevel);
-  const stream = asBoolean(options.stream, true);
-  const throttle = clamp(asNumber(options.streamThrottleMs, 400), 400, 60_000);
-  const approvalTtlMs = clamp(asNumber(options.approvalTtlMs, 10 * 60 * 1000), 30_000, 24 * 60 * 60 * 1000);
-  const maxResourcesShown = clamp(asNumber(options.maxResourcesShown, 8), 1, 50);
-  const domain = options.domain === "lark" ? "lark" : "feishu";
+  // options 优先，配置文件补足缺失字段。
+  const fileConfig = loadConfigFile(env, deps, warnings);
+  const merged = mergeRaw(fileConfig, options);
 
-  const signSecretRaw = expandEnv(asString(options.signSecret), env);
+  const appId = expandEnv(asString(merged.appId), env) || asString(env.FEISHU_APP_ID).trim();
+  const appSecret =
+    expandEnv(asString(merged.appSecret), env) || asString(env.FEISHU_APP_SECRET).trim();
+  const allowUsers = asStringArray(merged.allowUsers);
+  const allowTools = normalizeToolList(merged.allowTools, DEFAULT_ALLOW_TOOLS);
+  const denyTools = normalizeToolList(merged.denyTools, []);
+  const gate = asGate(merged.permissionGate);
+  const logLevel = asLogLevel(merged.logLevel);
+  const stream = asBoolean(merged.stream, true);
+  const throttle = clamp(asNumber(merged.streamThrottleMs, 400), 400, 60_000);
+  const approvalTtlMs = clamp(asNumber(merged.approvalTtlMs, 10 * 60 * 1000), 30_000, 24 * 60 * 60 * 1000);
+  const maxResourcesShown = clamp(asNumber(merged.maxResourcesShown, 8), 1, 50);
+  const domain = merged.domain === "lark" ? "lark" : "feishu";
+
+  const signSecretRaw = expandEnv(asString(merged.signSecret), env);
   const signSecret =
     signSecretRaw && signSecretRaw.length > 0 ? signSecretRaw : deriveSignSecret(appSecret);
 
@@ -71,6 +107,7 @@ export function resolveConfig(raw: RawOptions | undefined, env: NodeJS.ProcessEn
   return {
     enabled,
     ...(disabledReason ? { disabledReason } : {}),
+    warnings,
     appId,
     appSecret,
     domain,
@@ -85,6 +122,77 @@ export function resolveConfig(raw: RawOptions | undefined, env: NodeJS.ProcessEn
     signSecret,
     maxResourcesShown,
   };
+}
+
+/**
+ * 读取 `<configDir>/plugins/feishu.json`。
+ *
+ * - 文件缺失（ENOENT）是正常路径：静默返回 `{}`。
+ * - 不可读 / 非法 JSON / 非对象：只 warning 并返回 `{}`（退回环境变量/默认值），绝不抛异常。
+ * - warning 文案不包含文件内容，避免 secret 泄漏到日志。
+ */
+function loadConfigFile(env: NodeJS.ProcessEnv, deps: ResolveConfigDeps, warnings: string[]): RawOptions {
+  const configDir = resolveConfigDir(env, deps.configDir);
+  const filePath = join(configDir, ...CONFIG_FILE_RELATIVE);
+  const read = deps.readFile ?? ((path: string): string => readFileSync(path, "utf8"));
+
+  let text: string;
+  try {
+    text = read(filePath);
+  } catch (err) {
+    if (!isNotFound(err)) {
+      warnings.push(`读取 ${CONFIG_FILE_RELATIVE.join("/")} 失败，已忽略：${errorCode(err) ?? "unknown"}`);
+    }
+    return {};
+  }
+
+  if (!text.trim()) return {};
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // 刻意不回显 JSON.parse 的报错（可能内嵌原文，存在泄漏 secret 的风险）。
+    warnings.push(`${CONFIG_FILE_RELATIVE.join("/")} 不是合法 JSON，已忽略`);
+    return {};
+  }
+
+  if (!isPlainObject(parsed)) {
+    warnings.push(`${CONFIG_FILE_RELATIVE.join("/")} 顶层必须是 JSON 对象，已忽略`);
+    return {};
+  }
+  return parsed;
+}
+
+/** options 覆盖 base（配置文件）；未显式提供的字段不覆盖。 */
+function mergeRaw(base: RawOptions, override: RawOptions): RawOptions {
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(override)) {
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
+/** configDir：显式依赖 > `OPENCODE_CONFIG_DIR` > `~/.config/opencode`。 */
+function resolveConfigDir(env: NodeJS.ProcessEnv, explicit: string | undefined): string {
+  if (explicit && explicit.trim()) return explicit.trim();
+  const fromEnv = asString(env.OPENCODE_CONFIG_DIR).trim();
+  if (fromEnv) return fromEnv;
+  return join(homedir(), ".config", "opencode");
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNotFound(err: unknown): boolean {
+  return errorCode(err) === "ENOENT";
+}
+
+function errorCode(err: unknown): string | undefined {
+  if (typeof err !== "object" || err === null) return undefined;
+  const code = (err as { code?: unknown }).code;
+  return typeof code === "string" ? code : undefined;
 }
 
 /**
