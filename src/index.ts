@@ -1,11 +1,13 @@
 /**
  * opencode-feishu-v2 — OpenCode V2 飞书插件入口。
  *
- * 能力（P0/P2）：
+ * 能力（P0/P2/P3）：
  * 1. 飞书**长连接**（WSClient）接收单聊文本 → 映射/新建 opencode session → prompt；
- * 2. 订阅服务器事件，把 assistant 文本增量以飞书**流式卡片**回填；
- * 3. `permission.evaluate` hook + `permission.asked` 事件 + 卡片按钮 → `permission.reply` 审批闭环；
- * 4. 会话管理：`/new`、`/sessions`、`/use`、`/current`、`/stop`、`/help` + 会话卡片切换。
+ * 2. 每条消息**先**发一张运行卡片，把工具调用与 assistant 文本增量以飞书**流式卡片**回填；
+ * 3. `delivery:"steer"|"queue"` 原生排队（按 session execution 态决策）；
+ * 4. `permission.evaluate` hook + `permission.asked` 事件 + 卡片按钮 → `permission.reply` 审批闭环；
+ * 5. 会话管理：`/new`、`/sessions`、`/use`、`/current`、`/stop`、`/help` + 会话卡片切换；
+ * 6. 按 messageId 经 `ctx.storage` 跨实例去重。
  *
  * 边界：只处理 p2p + 单人白名单；只申请 p2p 读 + send_as_bot；不监听端口。
  * 进程级幂等：opencode 会随不同 location 多次 setup，这里用 `SetupGuard` 保证只启动一份。
@@ -22,7 +24,10 @@ import { ReplayGuard, signApproval, verifyApproval } from "./security/token.js";
 import { startGateway } from "./feishu/gateway.js";
 import { createFeishuSender } from "./feishu/sender.js";
 import { SessionMap } from "./feishu/session-map.js";
-import { createStreamingController } from "./feishu/streaming.js";
+import { MessageDedup } from "./feishu/dedup.js";
+import { decideDelivery, ExecutionTracker, type Delivery } from "./feishu/delivery.js";
+import { createRunController } from "./feishu/run-controller.js";
+import type { RunEvent } from "./feishu/run-state.js";
 import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand } from "./feishu/commands.js";
 import { parseSessionCardValue } from "./feishu/session-cards.js";
@@ -99,12 +104,16 @@ async function start(
 
   await owner.load().catch((err) => log.warn("owner 读取失败", { error: errorMessage(err) }));
 
-  const streaming = createStreamingController({
+  // 跨实例共享的去重（messageId）；同实例内存快路径在 MessageDedup 内部。
+  const dedup = new MessageDedup(storage, log);
+  // per-session 执行态，用于原生排队决策。
+  const executions = new ExecutionTracker();
+
+  const runs = createRunController({
     sender,
     log,
     enabled: config.stream,
     throttleMs: config.streamThrottleMs,
-    getLink: (sessionID) => sessionMap.resolveBySession(sessionID),
   });
 
   // ── 会话管理（文本命令 + 会话卡片按钮） ──────────────────────────────
@@ -168,6 +177,12 @@ async function start(
     }
     if (!message.text) return;
 
+    // 跨实例去重兜底：命中则直接丢弃（get-then-set 非原子，见 dedup.ts 注释）。
+    if (!(await dedup.claim(message.messageId))) {
+      log.debug("忽略重复消息", { messageId: message.messageId });
+      return;
+    }
+
     // 命令优先拦截：绝不把 `/xxx` 当 prompt 发给模型。
     if (isCommand(message.text)) {
       const handled = await commands.handleText(message);
@@ -184,7 +199,20 @@ async function start(
       log.info("新建 opencode 会话", { sessionID: created.id, chatId: message.chatId });
     }
 
-    await ctx.session.prompt({ sessionID: active.sessionID, text: message.text });
+    // 原生排队：该 session 正在跑 execution 就 queue，否则 steer。
+    const delivery: Delivery = decideDelivery(executions.isRunning(active.sessionID));
+
+    // 关键顺序：**先**发回执卡（含状态页脚），再发起 prompt。
+    const receipt = await runs.beginRun({ sessionID: active.sessionID, chatId: message.chatId, delivery });
+    if (!receipt.ok) log.warn("回执卡未发送，仍继续 prompt", { sessionID: active.sessionID, delivery });
+
+    try {
+      await promptSession(ctx, active.sessionID, message.text, delivery);
+    } catch (err) {
+      log.warn("prompt 发送失败", { sessionID: active.sessionID, error: errorMessage(err) });
+      // 卡片收尾为失败态，避免页脚永久停在「思考中」。
+      runs.apply(active.sessionID, { type: "execution.failed", error: errorMessage(err) });
+    }
   }
 
   const gateway = startGateway({
@@ -228,27 +256,87 @@ async function start(
         break;
       case "session.text.started": {
         const data = event.data as { sessionID: string; assistantMessageID?: string };
-        streaming.onStarted(data.sessionID, data.assistantMessageID);
+        runs.apply(data.sessionID, {
+          type: "text.started",
+          ...(data.assistantMessageID ? { assistantMessageID: data.assistantMessageID } : {}),
+        });
         break;
       }
       case "session.text.delta": {
-        const data = event.data as { sessionID: string; delta: string };
-        streaming.onDelta(data.sessionID, data.delta);
+        const data = event.data as { sessionID: string; delta: string; assistantMessageID?: string };
+        runs.apply(data.sessionID, {
+          type: "text.delta",
+          delta: data.delta,
+          ...(data.assistantMessageID ? { assistantMessageID: data.assistantMessageID } : {}),
+        });
         break;
       }
       case "session.text.ended": {
-        const data = event.data as { sessionID: string; text: string };
-        streaming.onEnded(data.sessionID, data.text);
+        const data = event.data as { sessionID: string; text?: string; assistantMessageID?: string };
+        runs.apply(data.sessionID, {
+          type: "text.ended",
+          ...(data.text ? { text: data.text } : {}),
+          ...(data.assistantMessageID ? { assistantMessageID: data.assistantMessageID } : {}),
+        });
         break;
       }
-      case "session.idle": {
+      case "session.tool.input.started": {
+        const data = event.data as { sessionID: string; id: string; name: string; assistantMessageID?: string };
+        runs.apply(data.sessionID, {
+          type: "tool.input.started",
+          id: data.id,
+          name: data.name,
+          ...(data.assistantMessageID ? { assistantMessageID: data.assistantMessageID } : {}),
+        });
+        break;
+      }
+      case "session.tool.input.ended": {
+        const data = event.data as { sessionID: string; id: string; input?: unknown };
+        runs.apply(data.sessionID, { type: "tool.input.ended", id: data.id, input: data.input });
+        break;
+      }
+      case "session.tool.success": {
+        const data = event.data as { sessionID: string; id: string; content?: unknown };
+        runs.apply(data.sessionID, {
+          type: "tool.success",
+          id: data.id,
+          output: contentToText(data.content),
+        });
+        break;
+      }
+      case "session.tool.error": {
+        const data = event.data as { sessionID: string; id: string; content?: unknown; error?: unknown };
+        runs.apply(data.sessionID, {
+          type: "tool.error",
+          id: data.id,
+          output: extractErrorText(data.error ?? data.content),
+        });
+        break;
+      }
+      case "session.execution.started": {
         const data = event.data as { sessionID: string };
-        streaming.onIdle(data.sessionID);
+        executions.markStarted(data.sessionID);
+        runs.apply(data.sessionID, { type: "execution.started" });
+        break;
+      }
+      case "session.execution.succeeded": {
+        const data = event.data as { sessionID: string };
+        executions.markEnded(data.sessionID);
+        runs.apply(data.sessionID, { type: "execution.succeeded" });
         break;
       }
       case "session.execution.failed": {
         const data = event.data as { sessionID: string; error: unknown };
+        executions.markEnded(data.sessionID);
+        runs.apply(data.sessionID, { type: "execution.failed", error: extractErrorText(data.error) });
         void notifyFailure(data.sessionID, data.error);
+        break;
+      }
+      case "session.idle": {
+        // 兜底收尾：某些路径可能没有 execution.succeeded，避免页脚悬挂。
+        const data = event.data as { sessionID: string };
+        executions.markEnded(data.sessionID);
+        runs.apply(data.sessionID, { type: "execution.succeeded" });
         break;
       }
       default:
@@ -272,7 +360,8 @@ async function start(
     log.info("飞书插件卸载中");
     abort.abort();
     await subscription.catch(() => undefined);
-    streaming.dispose();
+    runs.dispose();
+    executions.clear();
     approvals?.dispose();
     if (evaluateRegistration) {
       await evaluateRegistration.dispose().catch((err) => log.warn("evaluate hook 释放失败", { error: errorMessage(err) }));
@@ -337,10 +426,50 @@ async function replyPermission(ctx: Plugin.Context, input: ReplyInput): Promise<
 function extractErrorText(error: unknown): string {
   if (!error) return "unknown";
   if (typeof error === "string") return error.slice(0, 300);
+  if (Array.isArray(error)) return contentToText(error).slice(0, 300) || "unknown";
   if (typeof error === "object") {
     const record = error as Record<string, unknown>;
     if (typeof record.message === "string") return record.message.slice(0, 300);
     if (typeof record.type === "string") return record.type;
   }
   return "unknown";
+}
+
+/** 工具事件里的 `content` 可能是字符串 / 对象 / `[{type:"text",text}]` 数组。 */
+function contentToText(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") return item;
+        if (item && typeof item === "object" && typeof (item as { text?: unknown }).text === "string") {
+          return (item as { text: string }).text;
+        }
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n");
+  }
+  if (content && typeof content === "object" && typeof (content as { text?: unknown }).text === "string") {
+    return (content as { text: string }).text;
+  }
+  return "";
+}
+
+/**
+ * 发起 prompt，带原生排队 `delivery`。
+ * V2 的 promise 客户端类型对 `delivery` 的声明不稳定，这里做一次收敛的形状转换。
+ */
+async function promptSession(
+  ctx: Plugin.Context,
+  sessionID: string,
+  text: string,
+  delivery: Delivery,
+): Promise<void> {
+  const api = ctx.session.prompt as unknown as (input: {
+    sessionID: string;
+    text: string;
+    delivery: Delivery;
+  }) => Promise<unknown>;
+  await api({ sessionID, text, delivery });
 }

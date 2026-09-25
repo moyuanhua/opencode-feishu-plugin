@@ -15,6 +15,10 @@
 | 流式回复 | 订阅 `session.text.delta`，把 assistant 文本增量以**原地更新的飞书卡片**回填（节流 ≥400ms） |
 | 卡片审批 | `permission.evaluate` 降级为 `ask` → 发审批卡（允许一次 / 始终允许 / 拒绝）→ 点击后 `permission.reply` 闭环 |
 | 会话管理 | 一个飞书单聊可绑定**多个** opencode 会话：`/new` `/sessions` `/use` `/current` `/stop`，以及会话列表卡片按钮切换 |
+| 立即回执 | 收到消息**先**发一张运行卡片（思考中 / 已排队）再发起 prompt |
+| 原生排队 | session 正在执行时用 `delivery:"queue"` 排队，空闲时 `delivery:"steer"` |
+| 工具可见 | 工具调用以折叠面板回填卡片（≥3 自动折叠，最新一个展开） |
+| 跨实例去重 | 按 `messageId` 经 `ctx.storage` 去重，防重复投递导致双处理 |
 
 ---
 
@@ -256,7 +260,52 @@ opencode 会按 location 多次加载全局插件，导致同一进程内 `setup
 
 ---
 
-## 六、故障排查
+## 六、卡片交互（回执 / 原生排队 / 工具可见 / 流式）
+
+收到私聊文本后，插件**先**发一张「运行卡片」再发起 prompt；随后所有事件都回填到这张卡上。
+
+```
+你：帮我看看这个 bug
+
+🤖 OpenCode            （蓝色 = 运行中 / 绿色 = 完成 / 红色 = 失败）
+已收到，思考中…
+🧰 正在调用工具…
+  ▸ 🔧 bash — npm test
+  ▸ ✅ read — /home/me/app.ts
+✍️ 正在输出…
+```
+
+| 能力 | 行为 |
+| --- | --- |
+| 立即回执 | 收到消息**先**发卡（`已收到，思考中…` / `已排队`），再 `session.prompt`，避免「无反馈」 |
+| 原生排队 | 该 session 有正在跑的 execution（`session.execution.started` 置位，`succeeded/failed` 清除）→ `delivery:"queue"` + 卡片显示「已排队」；空闲则 `delivery:"steer"` |
+| 工具可见 | `session.tool.input.started` 加工具块（🔧 名称，running）；`input.ended` 附输入（截断）；`tool.success` 标 ✅ + 结果首行；`tool.error` 标 ❌ 红框 |
+| 工具折叠 | 连续工具 ≥ 3 折叠为一个摘要面板（**只留名称行**，防 30KB 超限），运行中最新一个展开、历史折叠；终态整体折叠 |
+| 流式回复 | `text.started/delta/ended` 增量更新正文块，卡片 patch 节流 ≥ 400ms |
+| 状态页脚 | 思考中 / 正在调用工具 / 正在输出 / 已排队，随事件切换；`execution.succeeded` 收尾（清页脚、卡片转绿） |
+| 失败收尾 | `execution.failed` 清页脚、卡片转红并附错误摘要，同时补发一条文本提示 |
+
+### 去重（跨实例）
+
+插件会被实例化两次（独立 VM context，进程内单例无效），飞书可能重复投递；因此按 `messageId` 去重：
+
+| key | 值 | TTL |
+| --- | --- | --- |
+| `feishu:v2:msg:<messageId>` | `{ at: <ms> }` | 10 分钟 |
+
+- 同实例走内存快路径；跨实例用共享 `ctx.storage` 兜底，命中即打 debug 日志并丢弃。
+- ⚠️ **已知限制**：`get-then-set` **非原子**，极端并发（两实例几乎同时处理同一消息）下可能双处理（storage 无 CAS）；单实例顺序执行不受影响。
+
+### 状态与实现（纯函数，可单测）
+
+- `src/feishu/run-state.ts` — **纯 reducer**：文本块 / 工具块 / 页脚 / 终态，按 `assistantMessageID` 区分 step。
+- `src/feishu/run-renderer.ts` — 卡片 JSON 2.0 渲染 + 工具折叠 + 体积保护（超 30KB 时逐级截断、必要时丢弃最旧元素）。
+- `src/feishu/run-controller.ts` — 回执卡发送、per-session active/queued 卡片、节流 patch、终态强制 flush。
+- `src/feishu/dedup.ts` / `src/feishu/delivery.ts` — messageId 去重 与 排队决策 / 执行态跟踪。
+
+---
+
+## 七、故障排查
 
 | 现象 | 可能原因 / 处理 |
 | --- | --- |
@@ -268,8 +317,10 @@ opencode 会按 location 多次加载全局插件，导致同一进程内 `setup
 | 只有单聊可用是预期的吗 | 是。**故意不申请群权限**，机器人收不到群消息 |
 | 审批卡收不到 | 该 session 不是从飞书发起的（无 chat↔session 映射），插件按安全设计不降级为 ask |
 | 点了按钮没反应 / 提示凭证无效 | token 过期（默认 10 分钟）；或点击者不在 `allowUsers` |
-| 回复卡片不更新 | `stream: false`；或日志里 `流式卡片更新失败`（检查 `im:message:send_as_bot` 是否开通） |
-| 卡片内容被截断 | 飞书卡片上限 ~30KB，插件截断到 28KB 并标注「已截断」 |
+| 回复卡片不更新 | `stream: false`；或日志里 `运行卡片更新失败`（检查 `im:message:send_as_bot` 是否开通） |
+| 卡片内容被截断 | 飞书卡片上限 ~30KB，插件截断到 28KB 并标注「已截断」；极端超长时会丢弃卡片上最旧的块 |
+| 卡片一直显示「已排队」 | 当前 execution 尚未结束，或服务端未发出下一次 `session.execution.started`；可用 `/stop` 中断后重试 |
+| 同一条消息被处理两次 | 去重为 `get-then-set` 非原子，极端并发下可能双处理；日志搜 `忽略重复消息` 确认去重是否命中 |
 | 想临时关闭审批 | 把 `permissionGate` 设为 `off` |
 | `/sessions`、`/use` 等命令没反应 | 命令仅识别**以 `/` 开头的单聊文本**；确认是 p2p 且发送者在白名单内。未知命令会回帮助提示 |
 | 切换会话后再发消息仍进旧会话 | `/use` 成功会回执「已切换」；也可用 `/current` 复核。切换只改变当前会话，历史消息不受影响 |
@@ -278,7 +329,7 @@ opencode 会按 location 多次加载全局插件，导致同一进程内 `setup
 
 ---
 
-## 七、安全边界（三重保险）
+## 八、安全边界（三重保险）
 
 1. **平台层**：应用可用范围 = 仅本人，其他人无法与机器人建立单聊。
 2. **scope 层**：只申请 p2p 读权限，不申请任何群权限，群消息物理收不到。
@@ -288,7 +339,7 @@ opencode 会按 location 多次加载全局插件，导致同一进程内 `setup
 
 ---
 
-## 八、开发
+## 九、开发
 
 ```bash
 npm install
@@ -320,19 +371,27 @@ src/
     commands.ts         # 会话命令解析 / 匹配 / 文案（纯函数）
     sender.ts           # im.message.create/patch/delete 薄封装
     session-map.ts      # chat ↔ 多会话映射（ctx.storage 持久化 + 旧格式迁移）
-    streaming.ts        # 流式卡片节流控制器
-test/                   # vitest 纯逻辑单测
+    run-state.ts        # 运行卡片纯 reducer（文本/工具/页脚/终态）
+    run-renderer.ts     # 运行卡片 JSON 2.0 渲染 + 工具折叠 + 体积保护（纯函数）
+    run-controller.ts   # 回执卡 + per-session active/queued + 节流 patch
+    dedup.ts            # messageId 跨实例去重（ctx.storage + 内存快路径）
+    delivery.ts         # 排队决策 + execution 态跟踪
+    streaming.ts        # [deprecated] 早期独立流式卡片（已由 run-* 取代，保留单测参考）
+  test/                   # vitest 纯逻辑单测
 ```
 
 ---
 
-## 九、已知限制（P0 范围外）
+## 十、已知限制（P0 范围外）
 
 - 只处理**单聊文本**（含富文本 post）；图片/文件/音视频只给出文字占位描述，不下载。
 - 会话管理提供 `/new` `/sessions` `/use` `/current` `/stop`；`removeSession` / `renameSession` API 已就绪但暂无对应命令。
 - 只处理从飞书发起的会话的审批；TUI 会话不接管（避免挂起）。
 - 未做「问答卡 / question」审批，仅 `permission`。
 - 未申请群相关能力，故不支持群聊（未来按 `APP_MODE_SCOPES.md` 的 T1–T6 逐档扩展）。
+- **messageId 去重非原子**：`ctx.storage` 无 CAS，两个实例极端并发处理同一条消息时理论上可能双处理（详见「六、卡片交互」）。
+- 排队卡片依赖 `session.execution.started` 晋升；若服务端在排队任务开始时未发出该事件，卡片会停留在「已排队」（可用 `/stop` 或重新发消息兜底）。
+- 运行卡片体积保护会**丢弃最旧**的 body 元素（保证 ≤30KB），超长会话早期内容可能不出现在卡片上；完整内容仍在日志/会话里。
 
 ## 许可证
 

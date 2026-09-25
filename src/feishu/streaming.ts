@@ -1,6 +1,10 @@
 /**
  * 流式回复卡片：把 assistant 文本增量以「原地更新一张卡片」的方式回填到飞书。
  *
+ * @deprecated P3 起，文本流式回填已统一到 `run-controller.ts` + `run-renderer.ts`
+ * 的「一张运行卡片」模型（回执 / 工具 / 文本 / 终态同卡）。本模块保留为独立实现与
+ * 单测参考，不再被 `index.ts` 使用。
+ *
  * 策略：
  * - 懒开卡：首个增量到达才发消息，避免空卡垃圾消息；
  * - 节流 ≥ streamThrottleMs（默认 400ms），并用串行 promise 链保证 patch 顺序；

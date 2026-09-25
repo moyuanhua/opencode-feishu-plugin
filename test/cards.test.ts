@@ -23,7 +23,7 @@ describe("buildApprovalCard", () => {
     expect(card.schema).toBe("2.0");
     expect((card.config as Record<string, unknown>).update_multi).toBe(true);
     const elements = (card.body as { elements: Array<Record<string, unknown>> }).elements;
-        const buttons = (card.body.elements as Array<Record<string, unknown>>).filter((e) => e.tag === "button");
+    const buttons = elements.filter((e) => e.tag === "button");
     expect(buttons).toHaveLength(3);
     const values = buttons.map((b) => (b.behaviors as Array<{ value: Record<string, unknown> }>)[0]!.value);
     expect(values.map((v) => v.d)).toEqual(["once", "always", "reject"]);
