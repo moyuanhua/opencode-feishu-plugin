@@ -7,6 +7,29 @@ import type * as Lark from "@larksuiteoapi/node-sdk";
 import { errorMessage } from "../logger.js";
 import type { Logger } from "../types.js";
 
+/**
+ * 提取飞书 SDK 错误里的真实诊断信息。
+ *
+ * axios 抛错时 `err.message` 只有 "Request failed with status code 400"，
+ * 真正的 `code` / `msg`（如 230099 卡片内容非法）在 `err.response.data` 里。
+ * 只提取结构与错误码，**绝不回显请求内容**（可能含 secret）。
+ */
+export function describeLarkError(err: unknown): string {
+  const base = errorMessage(err);
+  const data = (err as { response?: { data?: unknown } } | undefined)?.response?.data;
+  if (data && typeof data === "object") {
+    const d = data as Record<string, unknown>;
+    const parts: string[] = [];
+    if (d.code !== undefined) parts.push(`code=${String(d.code)}`);
+    if (typeof d.msg === "string") parts.push(`msg=${d.msg}`);
+    const error = d.error as Record<string, unknown> | undefined;
+    if (error && typeof error.message === "string") parts.push(`detail=${error.message}`);
+    if (parts.length > 0) return `${base} [${parts.join(" ")}]`;
+  }
+  if (typeof data === "string" && data.length > 0) return `${base} [${data.slice(0, 300)}]`;
+  return base;
+}
+
 export interface SendCardResult {
   readonly ok: boolean;
   readonly messageId?: string;
@@ -42,8 +65,8 @@ export function createFeishuSender(client: LarkClient, log: Logger): FeishuSende
         const messageId = res?.data?.message_id ?? "";
         return messageId ? { ok: true, messageId } : { ok: false, error: "missing message_id" };
       } catch (err) {
-        log.warn("发送卡片异常", { chatId, error: errorMessage(err) });
-        return { ok: false, error: errorMessage(err) };
+        log.warn("发送卡片异常", { chatId, error: describeLarkError(err) });
+        return { ok: false, error: describeLarkError(err) };
       }
     },
 
@@ -60,8 +83,8 @@ export function createFeishuSender(client: LarkClient, log: Logger): FeishuSende
         }
         return { ok: true };
       } catch (err) {
-        log.warn("更新卡片异常", { messageId, error: errorMessage(err) });
-        return { ok: false, error: errorMessage(err) };
+        log.warn("更新卡片异常", { messageId, error: describeLarkError(err) });
+        return { ok: false, error: describeLarkError(err) };
       }
     },
 
@@ -82,7 +105,7 @@ export function createFeishuSender(client: LarkClient, log: Logger): FeishuSende
         const messageId = res?.data?.message_id ?? "";
         return messageId ? { ok: true, messageId } : { ok: true };
       } catch (err) {
-        return { ok: false, error: errorMessage(err) };
+        return { ok: false, error: describeLarkError(err) };
       }
     },
 

@@ -40,7 +40,7 @@ export interface ApprovalOutcome {
 export function buildStreamingCard(markdown: string, opts: { readonly title?: string; readonly template?: CardTemplate } = {}): object {
   return {
     schema: "2.0",
-    config: { update_multi: true, wide_screen_mode: true },
+    config: { update_multi: true },
     header: {
       title: { tag: "plain_text", content: opts.title ?? "OpenCode" },
       template: opts.template ?? "blue",
@@ -72,7 +72,7 @@ export function buildApprovalCard(input: ApprovalCardInput): object {
 
   return {
     schema: "2.0",
-    config: { update_multi: true, wide_screen_mode: true },
+    config: { update_multi: true },
     header: {
       title: { tag: "plain_text", content: "🔐 OpenCode 权限请求" },
       template: "orange",
@@ -80,14 +80,9 @@ export function buildApprovalCard(input: ApprovalCardInput): object {
     body: {
       elements: [
         { tag: "markdown", content: truncateCardContent(lines.join("\n")) },
-        {
-          tag: "action",
-          actions: [
-            button("✅ 允许一次", "primary", { t: input.token, d: "once" }),
-            button(alwaysLabel, "default", { t: input.token, d: "always" }),
-            button("❌ 拒绝", "danger", { t: input.token, d: "reject" }),
-          ],
-        },
+        button("✅ 允许一次", "primary", { t: input.token, d: "once" }),
+        button(alwaysLabel, "default", { t: input.token, d: "always" }),
+        button("❌ 拒绝", "danger", { t: input.token, d: "reject" }),
       ],
     },
   };
@@ -102,7 +97,7 @@ export function buildResolvedCard(input: ApprovalCardInput, outcome: ApprovalOut
 
   return {
     schema: "2.0",
-    config: { update_multi: true, wide_screen_mode: true },
+    config: { update_multi: true },
     header: { title: { tag: "plain_text", content: label }, template },
     body: {
       elements: [
@@ -117,12 +112,19 @@ export function buildResolvedCard(input: ApprovalCardInput, outcome: ApprovalOut
   };
 }
 
+/**
+ * 飞书卡片 JSON 2.0 按钮。
+ *
+ * 2.0 **不再支持** 1.0 的 `tag:"action"` / `actions` 容器（会直接 400），
+ * 按钮必须直接放进 `body.elements`；回调数据用 `behaviors:[{type:"callback", value}]`
+ * 且 `value` 必须是对象（事件里 `action.value` 原样带回）。
+ */
 function button(text: string, type: "primary" | "default" | "danger", value: Record<string, unknown>): object {
   return {
     tag: "button",
     text: { tag: "plain_text", content: text },
     type,
-    value: JSON.stringify(value),
+    behaviors: [{ type: "callback", value }],
   };
 }
 

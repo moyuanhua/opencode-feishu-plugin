@@ -61,8 +61,10 @@ const REQUEST = {
 
 function tokenFrom(sender: FakeSender): string {
   const card = sender.sent[0]?.card as { body: { elements: Array<Record<string, unknown>> } };
-  const actionEl = card.body.elements.find((e) => e.tag === "action") as { actions: Array<Record<string, unknown>> };
-  const value = JSON.parse(actionEl.actions[0]!.value as string) as { t: string };
+  const btn = (card.body.elements as Array<Record<string, unknown>>).find((e) => e.tag === "button") as {
+    behaviors: Array<{ value: { t: string } }>;
+  };
+  const value = btn.behaviors[0]!.value;
   return value.t;
 }
 

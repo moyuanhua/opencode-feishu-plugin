@@ -9,8 +9,7 @@ const entries: SessionEntry[] = [
 
 function buttonsOf(card: object): Array<Record<string, unknown>> {
   const elements = (card as { body: { elements: Array<Record<string, unknown>> } }).body.elements;
-  const actions = elements.filter((e) => e.tag === "action");
-  return actions.flatMap((e) => (e.actions as Array<Record<string, unknown>>) ?? []);
+  return elements.filter((e) => e.tag === "button");
 }
 
 describe("buildSessionListCard", () => {
@@ -22,7 +21,7 @@ describe("buildSessionListCard", () => {
 
     const buttons = buttonsOf(card);
     expect(buttons).toHaveLength(3);
-    const values = buttons.map((b) => parseSessionCardValue(JSON.parse(b.value as string)));
+    const values = buttons.map((b) => parseSessionCardValue((b.behaviors as Array<{ value: unknown }>)[0]!.value));
     expect(values).toEqual([
       { cmd: "use", sessionID: "ses_aaa", chatId: "oc_1" },
       { cmd: "use", sessionID: "ses_bbb", chatId: "oc_1" },

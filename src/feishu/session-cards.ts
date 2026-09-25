@@ -22,12 +22,13 @@ export type SessionCardValue =
   | { readonly cmd: "use"; readonly sessionID: string; readonly chatId: string }
   | { readonly cmd: "new"; readonly chatId: string };
 
+/** 飞书卡片 JSON 2.0 按钮：回调数据走 behaviors，value 为对象；2.0 不支持 tag:"action" 容器。 */
 function button(text: string, type: "primary" | "default" | "danger", value: Record<string, unknown>): object {
   return {
     tag: "button",
     text: { tag: "plain_text", content: text },
     type,
-    value: JSON.stringify(value),
+    behaviors: [{ type: "callback", value }],
   };
 }
 
@@ -46,13 +47,14 @@ export function buildSessionListCard(input: SessionListCardInput): object {
   );
 
   const elements: object[] = [{ tag: "markdown", content: truncateCardContent(lines) }];
-  if (switchButtons.length > 0) elements.push({ tag: "action", actions: switchButtons });
-  elements.push({ tag: "action", actions: [button("➕ 新建会话", "default", { cmd: "new", c: input.chatId })] });
+  // 2.0：按钮直接放进 elements（不能包在 tag:"action" 里）
+  elements.push(...switchButtons);
+  elements.push(button("➕ 新建会话", "default", { cmd: "new", c: input.chatId }));
 
   const template: CardTemplate = "blue";
   return {
     schema: "2.0",
-    config: { update_multi: true, wide_screen_mode: true },
+    config: { update_multi: true },
     header: {
       title: { tag: "plain_text", content: input.title ?? "🧩 OpenCode 会话" },
       template,
