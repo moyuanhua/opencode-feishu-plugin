@@ -1,4 +1,5 @@
 import { describe, expect, test } from "vitest";
+import { homedir } from "node:os";
 import {
   deriveSignSecret,
   expandEnv,
@@ -79,7 +80,7 @@ describe("resolveConfig", () => {
     expect(cfg.streamThrottleMs).toBe(400);
     expect(cfg.domain).toBe("feishu");
     expect(cfg.threadRouting).toBe(true);
-    expect(cfg.allowedRoots).toEqual(["/home/ubuntu"]);
+    expect(cfg.allowedRoots).toEqual([homedir()]);
     expect(cfg.recentDirsLimit).toBe(5);
     expect(cfg.recentModelsLimit).toBe(5);
     expect(cfg.warnings).toEqual([]);
@@ -95,7 +96,7 @@ describe("resolveConfig", () => {
     expect(cfg.recentModelsLimit).toBe(20); // 夹到上限
     // 非法（非绝对路径）根被过滤，全部非法则回退默认。
     const bad = resolve({ appId: "a", appSecret: "s", allowedRoots: ["relative/path"] }, {});
-    expect(bad.allowedRoots).toEqual(["/home/ubuntu"]);
+    expect(bad.allowedRoots).toEqual([homedir()]);
     const lower = resolve({ appId: "a", appSecret: "s", recentDirsLimit: 0 }, {});
     expect(lower.recentDirsLimit).toBe(1); // 夹到下限
   });
