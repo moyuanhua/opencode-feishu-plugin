@@ -50,7 +50,7 @@ export interface ResolvedConfig {
    *
    * 背景：opencode 按 location 加载全局插件，每个 location 是独立 VM context，
    * 会各起一份 WS 客户端与事件订阅 → 同一事件被多个实例重复渲染成多张卡片。
-   * 指定本机工作目录（如 `/home/ubuntu`）即可收敛为唯一实例。
+   * 指定本机工作目录（如 `/home/you/projects`）即可收敛为唯一实例。
    */
   readonly gatewayLocation: string | undefined;
   /** 审批 token / 卡片有效期。 */
@@ -60,7 +60,7 @@ export interface ResolvedConfig {
   /** 审批卡最多展示的 resource 行数。 */
   readonly maxResourcesShown: number;
   /**
-   * 允许作为会话工作目录的根目录白名单（P6）。默认 `["/home/ubuntu"]`。
+   * 允许作为会话工作目录的根目录白名单（P6）。默认 = 当前用户家目录（`os.homedir()`）。
    * 目录必须位于其中之一之下；`/`、家目录根、系统目录会被单独拒绝。
    */
   readonly allowedRoots: readonly string[];

@@ -125,7 +125,7 @@ export function buildDirCard(input: { readonly recent: readonly string[]; readon
     lines.push(`允许的根目录：${input.allowedRoots.map((r) => `\`${r}\``).join("、")}`);
     lines.push("");
   }
-  lines.push("✍️ **手动输入**：发送 `/dir <绝对路径>`（例如 `/dir /home/ubuntu/work/my-app`）。");
+  lines.push("✍️ **手动输入**：发送 `/dir <绝对路径>`（例如 `/dir /home/you/work/my-app`）。");
   if (recent.length > 0) {
     lines.push("", "**最近使用：**");
     recent.forEach((dir, i) => lines.push(`${i + 1}. \`${dir}\``));
