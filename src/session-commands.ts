@@ -24,10 +24,9 @@ import type {
 } from "./types.js";
 import type { FeishuSender } from "./feishu/sender.js";
 import type { SessionMap } from "./feishu/session-map.js";
-import { buildSessionListCard, buildSessionReadyCard, parseSessionCardValue, type SessionCardValue } from "./feishu/session-cards.js";
+import { buildSessionListCard, buildSessionCreatedCard, buildSessionReadyCard, parseSessionCardValue, type SessionCardValue } from "./feishu/session-cards.js";
 import {
   buildConfirmCard,
-  buildDirCard,
   buildModelCard,
   buildPermCard,
   buildSetupDoneCard,
@@ -204,7 +203,7 @@ export class SessionCommands {
       case "cancel":
         return this.cmdCancel(message);
       case "form":
-        return this.cmdForm(message);
+        return this.cmdForm(message, parsed.args);
       case "unknown":
         return this.reply(message, `未知命令 \`/${parsed.raw}\`\n\n${helpText(scope)}`);
       case "help":
@@ -213,12 +212,16 @@ export class SessionCommands {
     }
   }
 
-  // ── 建会话向导（主聊天流） ────────────────────────────────────────────
+  // ── 建会话（主聊天流） ────────────────────────────────────────────────
 
-  /** `/new`：threadRouting=false 时沿用旧行为；否则起向导并发送目录选择卡。 */
+  /**
+   * `/new`：与 `/form` **完全等价**，直接发建会话表单卡（不再走目录→模型→权限→确认分步卡）。
+   * 带标题时写入向导状态，表单提交后作为会话标题。
+   */
   private async cmdNew(message: IncomingMessage, args: string): Promise<void> {
     const title = args.trim() || undefined;
     if (!this.threadRouting) {
+      // 回退模式（threadRouting=false）：没有话题，沿用 P3 旧行为直接建会话。
       const finalTitle = title ?? defaultSessionTitle(this.now());
       const created = await this.deps.createSession({
         title: finalTitle,
@@ -228,23 +231,58 @@ export class SessionCommands {
       await this.reply(message, `✅ 已新建并切换到会话「${finalTitle}」\n\`${created.id}\``);
       return;
     }
-    const state = await this.deps.wizard.start(message.chatId, title, message.messageId);
-    await this.sendDirCard(message.chatId);
+    await this.openSetupForm(message, title);
   }
 
-  /** `/dir <path>`：设置目录 → 进模型步。 */
+  /**
+   * `/form [标题]`：直接打开发建会话表单卡。
+   * 与 `/new [标题]` 走同一入口，二者完全等价。
+   */
+  private async cmdForm(message: IncomingMessage, args: string): Promise<void> {
+    await this.openSetupForm(message, args.trim() || undefined);
+  }
+
+  /**
+   * `/new` / `/form` 共同入口：发（或复用）建会话表单卡。
+   * 已有向导状态时保留 `/dir` `/model` `/perm` 预填的字段；带标题则更新标题。
+   */
+  private async openSetupForm(message: IncomingMessage, title?: string): Promise<void> {
+    if (message.threadId) {
+      await this.reply(message, threadForbiddenText("form"));
+      return;
+    }
+    if (!this.threadRouting) {
+      await this.reply(message, "当前为回退模式（`threadRouting=false`），不支持表单建会话，请用 `/new`。");
+      return;
+    }
+    let state = await this.deps.wizard.get(message.chatId);
+    if (!state) {
+      state = await this.deps.wizard.start(message.chatId, title, message.messageId);
+    } else if (title !== undefined) {
+      state = { ...state, title };
+      await this.deps.wizard.set(message.chatId, state);
+    }
+    const card = await this.renderFormCard(state);
+    const res = await this.deps.sender.sendCard(message.chatId, card);
+    if (!res.ok) this.deps.log.warn("表单卡发送失败", { chatId: message.chatId, error: res.error ?? "unknown" });
+  }
+
+  /**
+   * `/dir <path>`：目录只作表单**预填**（不再是必经步骤）。
+   * 目录容错：留空 = 允许根目录；不存在则自动创建（仍在 allowedRoots 之下）。
+   */
   private async cmdDir(message: IncomingMessage, args: string): Promise<void> {
     if (message.threadId) {
       await this.reply(message, threadForbiddenText("dir"));
       return;
     }
-    if (!(await this.deps.wizard.get(message.chatId))) {
-      await this.deps.wizard.start(message.chatId, undefined, message.messageId);
-    }
     const validation = this.deps.validateDir(args);
     if (!validation.ok) {
       await this.reply(message, validation.message);
       return;
+    }
+    if (!(await this.deps.wizard.get(message.chatId))) {
+      await this.deps.wizard.start(message.chatId, undefined, message.messageId);
     }
     const state = await this.deps.wizard.apply(message.chatId, { type: "setDir", dir: validation.path });
     await this.deps.recent.addDir(validation.path);
@@ -252,10 +290,11 @@ export class SessionCommands {
       await this.reply(message, "向导状态已丢失，请重新发送 `/new` 开始。");
       return;
     }
-    await this.sendModelCard(message.chatId, state);
+    // 分步卡已下线：把目录作为表单预填项，直接回一张新的表单卡。
+    await this.deps.sender.sendCard(message.chatId, await this.renderFormCard(state));
   }
 
-  /** `/model [关键词]`：向导内选模型；话题内切换当前会话模型。 */
+  /** `/model [关键词]`：向导内选模型（仅预填表单）；话题内切换当前会话模型。 */
   private async cmdModel(message: IncomingMessage, args: string, scope: CommandScope): Promise<void> {
     if (scope === "thread") {
       const sessionID = await this.threadSessionID(message);
@@ -279,17 +318,12 @@ export class SessionCommands {
       return;
     }
 
-    const state = await this.deps.wizard.get(message.chatId);
-    if (!state) {
-      await this.reply(message, "请先发送 `/new [标题]` 开始建会话向导并选择目录。");
-      return;
+    if (!(await this.deps.wizard.get(message.chatId))) {
+      await this.deps.wizard.start(message.chatId, undefined, message.messageId);
     }
     if (!args.trim()) {
-      await this.sendModelCard(message.chatId, state);
-      return;
-    }
-    if (!state.dir) {
-      await this.reply(message, "请先发送 `/dir <绝对路径>` 选择工作目录。");
+      const state = await this.deps.wizard.get(message.chatId);
+      await this.deps.sender.sendCard(message.chatId, await this.renderFormCard(state));
       return;
     }
     const models = await this.loadModels();
@@ -301,10 +335,11 @@ export class SessionCommands {
     const next = await this.deps.wizard.apply(message.chatId, { type: "setModel", model: matched.model });
     await this.deps.recent.addModel(matched.model);
     if (!next) return;
-    await this.sendPermCard(message.chatId, next);
+    // 分步卡已下线：模型作为表单预填项。
+    await this.deps.sender.sendCard(message.chatId, await this.renderFormCard(next));
   }
 
-  /** `/perm [档位]`：向导内选权限；话题内修改当前会话权限。 */
+  /** `/perm [档位]`：向导内选权限（仅预填表单）；话题内修改当前会话权限。 */
   private async cmdPerm(message: IncomingMessage, args: string, scope: CommandScope): Promise<void> {
     const arg = args.trim();
     if (scope === "thread") {
@@ -326,29 +361,28 @@ export class SessionCommands {
       return;
     }
 
-    const state = await this.deps.wizard.get(message.chatId);
-    if (!state) {
-      await this.reply(message, "请先发送 `/new [标题]` 开始建会话向导。");
-      return;
+    if (!(await this.deps.wizard.get(message.chatId))) {
+      await this.deps.wizard.start(message.chatId, undefined, message.messageId);
     }
     if (!arg) {
-      await this.sendPermCard(message.chatId, state);
+      const state = await this.deps.wizard.get(message.chatId);
+      await this.deps.sender.sendCard(message.chatId, await this.renderFormCard(state));
       return;
     }
     if (!isPermissionPreset(arg)) {
       await this.reply(message, permUsageText());
       return;
     }
-    if (!state.dir) {
-      await this.reply(message, "请先发送 `/dir <绝对路径>` 选择工作目录。");
-      return;
-    }
     const next = await this.deps.wizard.apply(message.chatId, { type: "setPerm", perm: arg });
     if (!next) return;
-    await this.sendConfirmCard(message.chatId, next);
+    // 分步卡已下线：权限作为表单预填项。
+    await this.deps.sender.sendCard(message.chatId, await this.renderFormCard(next));
   }
 
-  /** `/cd <path>`：话题内移动当前会话目录。 */
+  /**
+   * `/cd <path>`：话题内移动当前会话目录。
+   * 目录容错：留空 = 回到允许根目录；不存在则自动创建（仍在 allowedRoots 之下）。
+   */
   private async cmdCd(message: IncomingMessage, args: string): Promise<void> {
     if (!message.threadId) {
       await this.reply(message, "`/cd` 只能在话题内使用（用于移动该话题会话的工作目录）。");
@@ -376,24 +410,7 @@ export class SessionCommands {
       return;
     }
     await this.deps.wizard.cancel(message.chatId);
-    await this.reply(message, "✖️ 已取消建会话向导。发送 `/new [标题]` 可重新开始。");
-  }
-
-  /** `/form`：主聊天流直接打开建会话表单卡（P6.1）。 */
-  private async cmdForm(message: IncomingMessage): Promise<void> {
-    if (message.threadId) {
-      await this.reply(message, threadForbiddenText("form"));
-      return;
-    }
-    if (!this.threadRouting) {
-      await this.reply(message, "当前为回退模式（`threadRouting=false`），不支持表单建会话，请用 `/new`。");
-      return;
-    }
-    let state = await this.deps.wizard.get(message.chatId);
-    if (!state) state = await this.deps.wizard.start(message.chatId, undefined, message.messageId);
-    const card = await this.renderFormCard(state);
-    const res = await this.deps.sender.sendCard(message.chatId, card);
-    if (!res.ok) this.deps.log.warn("表单卡发送失败", { chatId: message.chatId, error: res.error ?? "unknown" });
+    await this.reply(message, "✖️ 已取消建会话表单。发送 `/new [标题]` 可重新开始。");
   }
 
   // ── 既有会话管理 ──────────────────────────────────────────────────────
@@ -610,7 +627,12 @@ export class SessionCommands {
     }
   }
 
-  /** 确认卡「✅ 创建」：读向导 → 走统一创建路径。 */
+  /**
+   * 确认卡「✅ 创建」：读向导 → 走统一创建路径。
+   *
+   * @deprecated `/new` 已不再发确认卡；仅当用户点击**历史遗留**的确认卡时才会走到这里。
+   * 新流程见 `applySetupFormSubmit`（表单提交）。
+   */
   private async confirmSetup(chatId: string, action: CardAction): Promise<void> {
     const state = await this.deps.wizard.get(chatId);
     if (!state || state.step !== "confirm" || !state.dir || !state.perm) {
@@ -661,12 +683,13 @@ export class SessionCommands {
       return;
     }
     const title = state.title?.trim() || defaultSessionTitle(this.now());
-    const preserved: SetupFormValuesInput = {
+    let preserved: SetupFormValuesInput = {
       dir: values.dir,
       ...(values.model ? { model: values.model } : {}),
       ...(values.perm ? { perm: values.perm } : {}),
     };
 
+    // 保留诊断日志：字段解析。
     this.deps.log.info("表单字段解析", {
       dir: values.dir,
       model: values.model ? `${values.model.providerID}/${values.model.id}` : undefined,
@@ -675,6 +698,7 @@ export class SessionCommands {
     });
     const validation = this.deps.validateDir(values.dir);
     if (!validation.ok) {
+      // 目录留空/不存在都由 validateDir 处理：留空 → 允许根目录；不存在 → 自动创建。
       this.deps.log.warn("目录校验失败", { dir: values.dir, reason: validation.message });
       await this.patchCard(
         action.messageId,
@@ -682,6 +706,8 @@ export class SessionCommands {
       );
       return;
     }
+    // 目录留空 → 用解析出的实际路径回写，便于后续展示/错误回显。
+    preserved = { ...preserved, dir: validation.path };
 
     if (!values.perm) {
       this.deps.log.warn("权限档位缺失", { dir: validation.path });
@@ -705,7 +731,6 @@ export class SessionCommands {
       dir: validation.path,
       perm: values.perm,
       ...(model ? { model } : {}),
-      ...(state?.anchorMessageId ? { anchorMessageId: state.anchorMessageId } : {}),
     });
   }
 
@@ -754,15 +779,14 @@ export class SessionCommands {
       perm: presetLabel(perm),
     });
 
-    // 用一条**独立**消息作为话题锚点：
-    // 不复用会被 patchCard 改写的卡片（否则同一张卡既是话题根又被改写，视觉上会重复）。
-    const anchorText = await this.deps.sender.sendText(chatId, `🗂 已为「${title}」创建会话，话题已开好 👇`);
-    const anchorId = anchorText.messageId ?? opts.anchorMessageId ?? action.messageId;
+    // 话题锚点 = 用户提交的建会话表单卡这条消息本身：
+    // 对它 `reply_in_thread` 发就绪卡，表单消息即成为话题根；不再发独立的锚点文本。
+    const anchorId = action.messageId || opts.anchorMessageId || "";
     const res = await this.deps.sender.replyCard(anchorId, readyCard, { replyInThread: true });
     this.deps.log.info("创建会话并开话题", {
       sessionID: created.id,
       anchorMessageId: anchorId,
-      anchorFromText: Boolean(anchorText.messageId),
+      anchorFromFormCard: Boolean(action.messageId),
       replyOk: res.ok,
       replyMessageId: res.messageId,
       replyThreadId: res.threadId,
@@ -772,16 +796,20 @@ export class SessionCommands {
       this.deps.log.warn("一键开话题失败", { error: res.error ?? "unknown" });
       await this.patchCard(
         action.messageId,
-        buildSetupDoneCard("✅ 会话已创建", [
-          `「${title}」\`${created.id}\``,
-          "",
-          "⚠️ 自动开话题失败：请在 `/sessions` 的会话卡上手动「创建话题」，或在主聊天流用 `/use` 切换后继续。",
-        ]),
+        buildSessionCreatedCard({
+          title,
+          sessionID: created.id,
+          dir,
+          ...(model ? { model: modelLabel(model) } : {}),
+          perm: presetLabel(perm),
+          note: "⚠️ 自动开话题失败：请在 `/sessions` 的会话卡上手动「创建话题」，或在主聊天流用 `/use` 切换后继续。",
+        }),
       );
       return;
     }
 
-    await this.deps.sessionMap.bindRoot(res.messageId, created.id);
+    // 表单消息即话题根。
+    await this.deps.sessionMap.bindRoot(anchorId, created.id);
     const meta = res.threadId ? undefined : await this.deps.sender.getMessageMeta(res.messageId);
     const threadId = res.threadId ?? meta?.threadId;
     if (threadId) {
@@ -790,33 +818,25 @@ export class SessionCommands {
       this.deps.log.warn("一键开话题后未读到 thread_id，该会话暂无法自动路由", { messageId: res.messageId });
     }
 
+    // 把表单卡改写成成功卡：标题 `✅ 已创建 · <会话标题>`，作为话题显示名。
     await this.patchCard(
       action.messageId,
-      buildSetupDoneCard(
-        "✅ 会话已创建",
-        [
-          `会话「${title}」已就绪（\`${created.id}\`）`,
-          ...(threadId ? ["", "已开好话题 👆 点进话题后直接发消息即可。"] : ["", "（未拿到话题 ID，若话题未出现请在会话卡上手动创建）"]),
-        ],
-        "green",
-      ),
+      buildSessionCreatedCard({
+        title,
+        sessionID: created.id,
+        dir,
+        ...(model ? { model: modelLabel(model) } : {}),
+        perm: presetLabel(perm),
+        ...(threadId ? {} : { note: "（未拿到话题 ID，若话题未出现请在会话卡上手动创建。）" }),
+      }),
     );
   }
 
   // ── 卡片渲染辅助 ──────────────────────────────────────────────────────
 
-  private async sendDirCard(chatId: string): Promise<void> {
-    const card = buildDirCard({
-      recent: await this.deps.recent.listDirs(),
-      ...(this.deps.allowedRoots ? { allowedRoots: this.deps.allowedRoots } : {}),
-    });
-    await this.deps.sender.sendCard(chatId, card);
-  }
-
-  private async sendModelCard(chatId: string, state: WizardStateLike): Promise<void> {
-    const card = await this.renderModelCard(state);
-    await this.deps.sender.sendCard(chatId, card);
-  }
+  // 说明：`/new` 已改为直接发建会话表单卡，以下分步卡的发送方法已不再使用（已移除）。
+  // 分步卡的**构建函数**（buildDirCard/buildModelCard/buildPermCard/buildConfirmCard）与
+  // 对应卡片回调分支仍保留，用于兼容旧卡片与单测（标注 @deprecated）。
 
   private async renderModelCard(state: WizardStateLike, pageOverride?: number): Promise<object> {
     const models = await this.loadModels();
@@ -831,28 +851,28 @@ export class SessionCommands {
     });
   }
 
-  private async sendPermCard(chatId: string, state: WizardStateLike): Promise<void> {
-    await this.deps.sender.sendCard(chatId, buildPermCard({ ...(state.perm ? { current: state.perm } : {}) }));
-  }
-
-  private async sendConfirmCard(chatId: string, state: WizardStateLike): Promise<void> {
-    await this.deps.sender.sendCard(chatId, buildConfirmCard(confirmInput(state)));
-  }
-
-  /** 渲染建会话表单卡（P6.1）：最近模型 + 常用模型 + 默认预选，供 `patch`/`send` 复用。 */
+  /**
+   * 渲染建会话表单卡（P6.1）：最近模型 + 常用模型 + 默认预选。
+   * P6.2：目录/权限也从向导状态预填（`/dir` `/perm` 的能力，不再是必经步骤）。
+   */
   private async renderFormCard(
     state: WizardStateLike | undefined,
     over?: { readonly error?: string; readonly values?: SetupFormValuesInput },
   ): Promise<object> {
     const models = await this.loadModels();
     const recent = await this.deps.recent.listModels();
+    const values: SetupFormValuesInput =
+      over?.values ?? {
+        ...(state?.dir ? { dir: state.dir } : {}),
+        ...(state?.perm ? { perm: state.perm } : {}),
+      };
     return buildSetupFormCard({
       models,
       recent,
       ...(state?.model ? { defaultModel: state.model } : {}),
       ...(this.deps.allowedRoots ? { allowedRoots: this.deps.allowedRoots } : {}),
       ...(over?.error ? { error: over.error } : {}),
-      ...(over?.values ? { values: over.values } : {}),
+      values,
     });
   }
 

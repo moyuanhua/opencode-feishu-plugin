@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { buildSessionListCard, buildSessionReadyCard, parseSessionCardValue } from "../src/feishu/session-cards.js";
+import { buildSessionListCard, buildSessionReadyCard, buildSessionCreatedCard, parseSessionCardValue } from "../src/feishu/session-cards.js";
 import type { SessionEntry } from "../src/feishu/session-map.js";
 
 const entries: SessionEntry[] = [
@@ -53,6 +53,40 @@ describe("buildSessionReadyCard", () => {
 
   test("空标题回退 (未命名)", () => {
     expect(JSON.stringify(buildSessionReadyCard({ title: "  ", sessionID: "s" }))).toContain("(未命名)");
+  });
+});
+
+describe("buildSessionCreatedCard（话题根成功卡）", () => {
+  test("标题为 `✅ 已创建 · <标题>`，正文含 id/目录/模型/权限与直接发消息指引", () => {
+    const card = buildSessionCreatedCard({
+      title: "我的项目",
+      sessionID: "ses_new_1",
+      dir: "/home/ubuntu/work/app",
+      model: "Claude Sonnet 4",
+      perm: "可编辑",
+    }) as { header: { title: { content: string } } };
+    expect(card.header.title.content).toBe("✅ 已创建 · 我的项目");
+    const text = JSON.stringify(card);
+    expect(text).toContain("ses_new_1");
+    expect(text).toContain("/home/ubuntu/work/app");
+    expect(text).toContain("Claude Sonnet 4");
+    expect(text).toContain("可编辑");
+    expect(text).toContain("点进本话题直接发消息即可");
+    expect(buttonsOf(card)).toHaveLength(0);
+  });
+
+  test("失败分支：标题仍是成功卡，附手动创建话题指引", () => {
+    const card = buildSessionCreatedCard({
+      title: "T",
+      sessionID: "s",
+      note: "⚠️ 自动开话题失败：请在 `/sessions` 的会话卡上手动「创建话题」",
+    });
+    expect(JSON.stringify(card)).toContain("自动开话题失败");
+    expect(JSON.stringify(card)).toContain("✅ 已创建 · T");
+  });
+
+  test("空标题回退 (未命名)", () => {
+    expect(JSON.stringify(buildSessionCreatedCard({ title: "  ", sessionID: "s" }))).toContain("✅ 已创建 · (未命名)");
   });
 });
 

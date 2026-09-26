@@ -1,17 +1,17 @@
 /**
  * 工作目录校验（P6，纯逻辑 + 可注入 fs，便于单测）。
  *
- * 规则（用户已批准）：
+ * 规则（用户已批准，2026-09-26 调整目录容错）：
+ * - 输入为空 → 使用**允许根目录** `allowedRoots[0]`（默认用户家目录），不视为错误；
  * - 必须是**绝对路径**；
- * - 必须存在且是**目录**；
- * - 必须在 `allowedRoots` 之下（默认 `[os.homedir()]`）；
- * - 拒绝 `/`、家目录根、常见系统目录（`/etc` `/usr` `/bin` …）。
+ * - 目录**不存在时自动创建**（`mkdir -p`），但仍必须落在 `allowedRoots` 之下；
+ * - 拒绝 `/`、文件系统根与常见系统目录（`/etc` `/usr` `/bin` …）；
+ * - `realpath` 校验放在**创建之后**，避免符号链接逃逸出 allowedRoots。
  *
- * 安全：若可获得 `realpath`，会以**真实路径**再校验一次，避免符号链接逃逸出 allowedRoots。
+ * 安全：`allowedRoots` 是唯一目录边界。空值与不存在目录都不会绕过它；
  * 本模块不做任何 IO 之外的动作，也不打印路径内容；调用方负责日志脱敏。
  */
-import { realpathSync, statSync } from "node:fs";
-import { homedir as osHomedir } from "node:os";
+import { mkdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
 
 /** 常见系统目录：命中（含其子目录）即拒绝。 */
@@ -38,7 +38,8 @@ export type DirInvalidReason =
   | "system"
   | "outside_allowed"
   | "not_found"
-  | "not_dir";
+  | "not_dir"
+  | "create_failed";
 
 export interface DirValidationOk {
   readonly ok: true;
@@ -58,6 +59,7 @@ export type DirValidation = DirValidationOk | DirValidationErr;
 export interface DirValidationDeps {
   readonly statSync?: (path: string) => { isDirectory(): boolean };
   readonly realpathSync?: (path: string) => string;
+  readonly mkdirSync?: (path: string, opts: { recursive: true }) => unknown;
   readonly homedir?: () => string;
 }
 
@@ -72,61 +74,81 @@ function isSystemPath(path: string): boolean {
   return SYSTEM_DIRS.some((dir) => isUnder(path, dir));
 }
 
-/** 校验路径是否可作工作目录。 */
+/**
+ * 校验路径是否可作工作目录。
+ *
+ * - `rawPath` 为空/空白 → 回退到 `allowedRoots[0]`；
+ * - 不存在的绝对路径会在 allowedRoots 之下 `mkdir -p` 后继续校验（创建失败 → `create_failed`）；
+ * - 逻辑路径与创建后的 `realpath` 都要通过禁区 + allowedRoots 校验。
+ */
 export function validateDirectory(
   rawPath: string,
   allowedRoots: readonly string[],
   deps: DirValidationDeps = {},
 ): DirValidation {
   const raw = rawPath.trim();
-  if (!raw) return err("empty", "请提供目录路径，例如 `/dir /home/ubuntu/work/my-project`。");
-  if (!isAbsolute(raw)) return err("not_absolute", "目录必须是**绝对路径**（以 `/` 开头）。");
+  const roots = allowedRoots.map((r) => resolve(r)).filter((r) => r && r !== "");
+  if (roots.length === 0) {
+    return err("empty", "未配置允许的工作目录根（`allowedRoots`），无法确定默认目录。");
+  }
+
+  let target: string;
+  if (!raw) {
+    // 目录留空 = 使用允许根目录（默认 allowedRoots[0]，通常为用户家目录），不是错误。
+    target = roots[0]!;
+  } else {
+    if (!isAbsolute(raw)) return err("not_absolute", "目录必须是**绝对路径**（以 `/` 开头）。");
+    target = resolve(raw);
+  }
 
   const stat = deps.statSync ?? statSync;
   const realpath = deps.realpathSync ?? realpathSync;
-  const homedir = deps.homedir ?? osHomedir;
+  const mkdir = deps.mkdirSync ?? mkdirSync;
 
-  const resolved = resolve(raw);
-  const home = resolve(homedir());
-
-  // 先对逻辑路径做禁区判定，给出更明确的提示。
-  const blocked = forbiddenReason(resolved, home);
+  // 先对逻辑路径做禁区 + 白名单判定，给出更明确的提示（创建前不得越界）。
+  const blocked = forbiddenReason(target);
   if (blocked) return blocked;
-
-  let statResult: { isDirectory(): boolean };
-  let real = resolved;
-  try {
-    statResult = stat(resolved);
-  } catch {
-    return err("not_found", `目录不存在或不可访问：\`${resolved}\``);
-  }
-  if (!statResult.isDirectory()) return err("not_dir", `不是目录：\`${resolved}\``);
-  try {
-    real = realpath(resolved);
-  } catch {
-    real = resolved;
+  if (!roots.some((root) => isUnder(target, root))) {
+    return err("outside_allowed", outsideMessage(roots));
   }
 
-  // 真实路径可能经符号链接逃逸，需再次做禁区与白名单校验。
-  const blockedReal = forbiddenReason(real, home);
+  // 不存在则创建（mkdir -p）；存在但不是目录 → 拒绝。
+  let exists = true;
+  try {
+    if (!stat(target).isDirectory()) return err("not_dir", `不是目录：\`${target}\``);
+  } catch {
+    exists = false;
+  }
+  if (!exists) {
+    try {
+      mkdir(target, { recursive: true });
+    } catch {
+      return err("create_failed", `目录不存在且无法创建：\`${target}\`。请检查路径与权限。`);
+    }
+  }
+
+  // realpath 校验放在创建之后：真实路径可能经符号链接逃逸，需再次做禁区 + 白名单校验。
+  let real = target;
+  try {
+    real = realpath(target);
+  } catch {
+    real = target;
+  }
+  const blockedReal = forbiddenReason(real);
   if (blockedReal) return blockedReal;
-
-  const roots = allowedRoots.map((r) => resolve(r));
   if (!roots.some((root) => isUnder(real, root))) {
-    return err(
-      "outside_allowed",
-      `目录不在允许范围内。允许的根目录：${roots.map((r) => `\`${r}\``).join("、")}。`,
-    );
+    return err("outside_allowed", outsideMessage(roots));
   }
   return { ok: true, path: real };
 }
 
-/** `/`、家目录根、系统目录 → 拒绝原因；其它返回 undefined。 */
-function forbiddenReason(path: string, home: string): DirValidationErr | undefined {
+function outsideMessage(roots: readonly string[]): string {
+  return `目录不在允许范围内。允许的根目录：${roots.map((r) => `\`${r}\``).join("、")}。`;
+}
+
+/** `/`、文件系统根、系统目录 → 拒绝原因；其它返回 undefined。 */
+function forbiddenReason(path: string): DirValidationErr | undefined {
   if (path === sep) return err("forbidden", "不能使用根目录 `/`，请选择具体的项目子目录。");
-  if (path === home) {
-    return err("forbidden", `不能直接使用家目录根 \`${home}\`，请选择其下的项目子目录。`);
-  }
   if (isSystemPath(path)) return err("system", `系统目录不可作为工作目录：\`${path}\`。`);
   return undefined;
 }

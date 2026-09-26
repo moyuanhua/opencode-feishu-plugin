@@ -112,3 +112,40 @@ export function buildSessionReadyCard(input: {
   };
 }
 
+export interface SessionCreatedCardInput {
+  readonly title: string;
+  readonly sessionID: string;
+  readonly dir?: string;
+  readonly model?: string;
+  readonly perm?: string;
+  /** 额外说明（如自动开话题失败时的手动创建指引）。 */
+  readonly note?: string;
+}
+
+/**
+ * 建会话成功后的**话题根卡**（P6.2）：把用户提交的建会话表单卡就地改写成这张卡。
+ *
+ * 因为这张卡同时是话题的根消息，标题会成为话题的显示名，所以标题固定为
+ * `✅ 已创建 · <会话标题>` —— 让人一眼看出这是一个已成功创建会话的话题。
+ * 正文包含会话 ID / 目录 / 模型 / 权限与「点进话题直接发消息即可」的指引。
+ */
+export function buildSessionCreatedCard(input: SessionCreatedCardInput): object {
+  const title = input.title.trim() || "(未命名)";
+  const lines = [`会话「${title}」已创建：\`${input.sessionID}\``];
+  const setup: string[] = [];
+  if (input.dir) setup.push(`- 目录：\`${input.dir}\``);
+  if (input.model) setup.push(`- 模型：${input.model}`);
+  if (input.perm) setup.push(`- 权限：${input.perm}`);
+  if (setup.length > 0) lines.push("", ...setup);
+  lines.push("", "点进本话题直接发消息即可，OpenCode 就在这个会话里干活。");
+  if (input.note) lines.push("", input.note);
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    header: { title: { tag: "plain_text", content: `✅ 已创建 · ${title}` }, template: "green" },
+    body: {
+      elements: [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }],
+    },
+  };
+}
+

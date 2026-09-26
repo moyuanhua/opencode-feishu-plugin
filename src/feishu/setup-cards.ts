@@ -100,7 +100,12 @@ function dedupeRefs(refs: readonly ModelRef[]): ModelRef[] {
   return out;
 }
 
-/** 目录选择卡：最近目录按钮 + 手动输入提示。 */
+/**
+ * 目录选择卡：最近目录按钮 + 手动输入提示。
+ *
+ * @deprecated `/new` 已改为直接发建会话表单卡（与 `/form` 等价），本分步卡不再从 `/new` 路径发出。
+ * 仅保留给旧版卡片回调的兼容处理与单测参考，后续版本可移除。
+ */
 export function buildDirCard(input: { readonly recent: readonly string[]; readonly allowedRoots?: readonly string[] }): object {
   const recent = input.recent.slice(0, 10);
   const lines = ["请选择 OpenCode 会话的工作目录。", ""];
@@ -121,7 +126,12 @@ export function buildDirCard(input: { readonly recent: readonly string[]; readon
   return headerCard("📁 选择工作目录", "blue", elements);
 }
 
-/** 模型选择卡：当前/最近按钮 + 「更多」分页 + 手动输入提示。 */
+/**
+ * 模型选择卡：当前/最近按钮 + 「更多」分页 + 手动输入提示。
+ *
+ * @deprecated `/new` 已改为直接发建会话表单卡（与 `/form` 等价），本分步卡不再从 `/new` 路径发出；
+ * 话题内 `/model` 仍会发带 `sid` 的模型操作卡（复用本函数）。
+ */
 export function buildModelCard(input: ModelCardInput): object {
   const lines: string[] = [];
   if (input.current) lines.push(`当前模型：**${modelLabel(input.current)}**`);
@@ -165,7 +175,12 @@ export function buildModelCard(input: ModelCardInput): object {
   return headerCard("🧠 选择模型", "blue", elements);
 }
 
-/** 权限选择卡：四档按钮 + 每档一句话说明。 */
+/**
+ * 权限选择卡：四档按钮 + 每档一句话说明。
+ *
+ * @deprecated `/new` 已改为直接发建会话表单卡（与 `/form` 等价），本分步卡不再从 `/new` 路径发出；
+ * 话题内 `/perm` 仍会发带 `sid` 的权限操作卡（复用本函数）。
+ */
 export function buildPermCard(input: PermCardInput): object {
   const lines = ["请选择权限档位（影响本会话的工具审批）：", ""];
   for (const info of PERMISSION_PRESETS) {
@@ -179,7 +194,12 @@ export function buildPermCard(input: PermCardInput): object {
   return headerCard("🔐 选择权限档位", "orange", elements);
 }
 
-/** 确认卡：目录/模型/权限汇总 + 创建/取消。 */
+/**
+ * 确认卡：目录/模型/权限汇总 + 创建/取消。
+ *
+ * @deprecated `/new` 已改为直接发建会话表单卡（与 `/form` 等价），本分步卡不再从 `/new` 路径发出。
+ * 仅保留给旧版卡片回调的兼容处理与单测参考，后续版本可移除。
+ */
 export function buildConfirmCard(input: ConfirmCardInput): object {
   const lines = [
     "**即将创建会话：**",
@@ -263,8 +283,12 @@ export function buildSetupFormCard(input: SetupFormCardInput): object {
   }));
 
   const lines = ["一次填好，点「创建会话」即可自动开话题。"];
+  lines.push("", "目录留空 = 使用允许根目录；目录不存在会自动创建。");
   if (input.allowedRoots && input.allowedRoots.length > 0) {
-    lines.push("", `目录需为**绝对路径**且在允许范围内：${input.allowedRoots.map((r) => `\`${r}\``).join("、")}`);
+    lines.push(
+      "",
+      `目录需为**绝对路径**且落在允许范围内：${input.allowedRoots.map((r) => `\`${r}\``).join("、")}（留空则用第一个）。`,
+    );
   }
 
   const formElements: object[] = [];
@@ -276,11 +300,11 @@ export function buildSetupFormCard(input: SetupFormCardInput): object {
     {
       tag: "input",
       name: SETUP_FORM_FIELDS.dir,
-      required: true,
+      required: false,
       width: "fill",
       placeholder: {
         tag: "plain_text",
-        content: "工作目录（绝对路径），例如 /home/ubuntu/work/my-app",
+        content: "工作目录（绝对路径，可留空 = 允许根目录；不存在会自动创建）",
       },
       default_value: dirValue,
     },

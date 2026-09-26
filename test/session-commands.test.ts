@@ -75,12 +75,18 @@ function message(text: string, extra: Partial<IncomingMessage> = {}): IncomingMe
 const threadMsg = (text: string, extra: Partial<IncomingMessage> = {}) =>
   message(text, { messageId: "om_t", threadId: "omt_1", rootId: "om_root", parentId: "om_root", ...extra });
 
-/** 假目录校验：仅允许 /home/ubuntu/work 之下（且存在）的目录。 */
+/**
+ * 假目录校验（模拟 dirs.ts 的目录容错规则）：
+ * - 留空 → 允许根目录 `/home/ubuntu`；
+ * - `/home/ubuntu` 或其下（含不存在，视为自动创建）→ 允许；
+ * - 其它 → 越界拒绝。
+ */
 function fakeValidate(path: string): DirValidation {
-  if (!path.startsWith("/home/ubuntu/work")) {
-    return { ok: false, reason: "outside_allowed", message: `目录不在允许范围内：${path}` };
+  const p = path.trim() || "/home/ubuntu";
+  if (p === "/home/ubuntu" || p.startsWith("/home/ubuntu/")) {
+    return { ok: true, path: p };
   }
-  return { ok: true, path };
+  return { ok: false, reason: "outside_allowed", message: `目录不在允许范围内：${path}` };
 }
 
 function setup(over: { allowed?: boolean; threadRouting?: boolean } = {}) {
@@ -141,27 +147,44 @@ describe("SessionCommands.handleText（主聊天流）", () => {
     expect(createSession).not.toHaveBeenCalled();
   });
 
-  test("/new 起向导：发送目录卡但**不**建会话", async () => {
+  test("/new 直接发建会话表单卡（与 /form 等价）、不建会话、标题写入向导", async () => {
     const { commands, sender, createSession, wizard } = setup();
     expect(await commands.handleText(message("/new 我的标题"))).toBe(true);
     expect(createSession).not.toHaveBeenCalled();
     expect(sender.cards).toHaveLength(1);
-    expect(JSON.stringify(sender.cards[0]!.card)).toContain("选择工作目录");
+    const roots = (sender.cards[0]!.card as { body: { elements: Array<Record<string, unknown>> } }).body.elements;
+    expect(roots[0]!.tag).toBe("form");
+    expect(JSON.stringify(sender.cards[0]!.card)).toContain("setup_submit");
     const state = await wizard.get("oc_1");
-    expect(state?.step).toBe("dir");
     expect(state?.title).toBe("我的标题");
     expect(state?.anchorMessageId).toBe("om_in");
   });
 
-  test("/dir 合法：进入模型步、写最近目录、发模型卡", async () => {
+  test("/new 与 /form 等价：都直接发表单卡，且 /new <标题> 预填标题", async () => {
+    const { commands, sender, wizard } = setup();
+    await commands.handleText(message("/new 标题A"));
+    const newCard = JSON.stringify(sender.cards.at(-1)!.card);
+    await commands.handleText(message("/form"));
+    const formCard = JSON.stringify(sender.cards.at(-1)!.card);
+    expect(newCard).toContain("setup_form");
+    expect(formCard).toContain("setup_form");
+    // /form 复用已有向导状态 → 标题仍保留
+    expect((await wizard.get("oc_1"))?.title).toBe("标题A");
+    // /new 后再 /new <新标题> 覆盖标题
+    await commands.handleText(message("/new 标题B"));
+    expect((await wizard.get("oc_1"))?.title).toBe("标题B");
+  });
+
+  test("/dir 合法：写最近目录 + 目录作为表单预填（不再进分步模型卡）", async () => {
     const { commands, sender, wizard, recent } = setup();
     await commands.handleText(message("/new"));
     await commands.handleText(message("/dir /home/ubuntu/work/my-app"));
     const state = await wizard.get("oc_1");
-    expect(state?.step).toBe("model");
     expect(state?.dir).toBe("/home/ubuntu/work/my-app");
     expect(await recent.listDirs()).toEqual(["/home/ubuntu/work/my-app"]);
-    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("选择模型");
+    const roots = (sender.cards.at(-1)!.card as { body: { elements: Array<Record<string, unknown>> } }).body.elements;
+    expect(roots[0]!.tag).toBe("form");
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("/home/ubuntu/work/my-app");
   });
 
   test("/dir 非法：回复错误且不改步骤", async () => {
@@ -169,19 +192,36 @@ describe("SessionCommands.handleText（主聊天流）", () => {
     await commands.handleText(message("/new"));
     await commands.handleText(message("/dir /etc"));
     expect(sender.texts.join("\n")).toContain("不在允许范围内");
-    expect((await wizard.get("oc_1"))?.step).toBe("dir");
+    // 校验失败不应写入目录
+    expect((await wizard.get("oc_1"))?.dir).toBeUndefined();
   });
 
-  test("/model 唯一命中：进入权限步并发权限卡", async () => {
+  test("/dir 留空 → 使用允许根目录（不报错，作为表单预填）", async () => {
+    const { commands, sender, wizard } = setup();
+    await commands.handleText(message("/new"));
+    await commands.handleText(message("/dir"));
+    const state = await wizard.get("oc_1");
+    expect(state?.dir).toBe("/home/ubuntu");
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("/home/ubuntu");
+  });
+
+  test("/dir 不存在 → 目录容错：允许（视为自动创建）并预填", async () => {
+    const { commands, wizard, sender } = setup();
+    await commands.handleText(message("/new"));
+    await commands.handleText(message("/dir /home/ubuntu/work/brand-new"));
+    expect((await wizard.get("oc_1"))?.dir).toBe("/home/ubuntu/work/brand-new");
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("/home/ubuntu/work/brand-new");
+  });
+
+  test("/model 唯一命中：写入向导并发表单卡预填模型", async () => {
     const { commands, sender, wizard, recent } = setup();
     await commands.handleText(message("/new"));
     await commands.handleText(message("/dir /home/ubuntu/work/app"));
     await commands.handleText(message("/model claude"));
     const state = await wizard.get("oc_1");
-    expect(state?.step).toBe("perm");
     expect(state?.model?.id).toBe("claude-sonnet-4");
     expect((await recent.listModels())[0]?.id).toBe("claude-sonnet-4");
-    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("选择权限档位");
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("claude-sonnet-4");
   });
 
   test("/model 歧义：列出候选且不改步骤", async () => {
@@ -201,16 +241,15 @@ describe("SessionCommands.handleText（主聊天流）", () => {
     expect(sender.texts.join("\n")).toContain("没有匹配的模型");
   });
 
-  test("/perm <档位>：进入确认步并发确认卡", async () => {
+  test("/perm <档位>：写入向导并发表单卡预填权限", async () => {
     const { commands, sender, wizard } = setup();
     await commands.handleText(message("/new 标题"));
     await commands.handleText(message("/dir /home/ubuntu/work/app"));
     await commands.handleText(message("/model claude"));
     await commands.handleText(message("/perm edit"));
     const state = await wizard.get("oc_1");
-    expect(state?.step).toBe("confirm");
     expect(state?.perm).toBe("edit");
-    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("确认创建会话");
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain('"initial_option":"edit"');
   });
 
   test("/perm 非法档位提示可用档位", async () => {
@@ -229,10 +268,11 @@ describe("SessionCommands.handleText（主聊天流）", () => {
     expect(sender.texts.join("\n")).toContain("已取消");
   });
 
-  test("/model 在向导缺失时提示先 /new", async () => {
-    const { commands, sender } = setup();
+  test("/model 在向导缺失时自动起向导并发表单卡（不再报错）", async () => {
+    const { commands, sender, wizard } = setup();
     await commands.handleText(message("/model claude"));
-    expect(sender.texts.join("\n")).toContain("先发送 `/new");
+    expect((await wizard.get("oc_1"))?.model?.id).toBe("claude-sonnet-4");
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("setup_form");
   });
 
   test("/sessions 发送会话卡片", async () => {
@@ -364,6 +404,23 @@ describe("SessionCommands 话题内命令矩阵（P5.2 白名单）", () => {
     expect(sender.replies.at(-1)!.text).toContain("不在允许范围内");
   });
 
+  test("话题内 /cd 留空 → 回到允许根目录", async () => {
+    const { commands, sessionMap, moveSessionDir, recent } = setup();
+    await sessionMap.addSession("oc_1", "ses_t", "t", "ou_1", { setActive: false });
+    await sessionMap.bindThread("omt_1", "ses_t", "oc_1", "ou_1", "om_root");
+    await commands.handleText(threadMsg("/cd"));
+    expect(moveSessionDir).toHaveBeenCalledWith("ses_t", "/home/ubuntu");
+    expect(await recent.listDirs()).toContain("/home/ubuntu");
+  });
+
+  test("话题内 /cd 不存在 → 目录容错：允许（视为自动创建）", async () => {
+    const { commands, sessionMap, moveSessionDir } = setup();
+    await sessionMap.addSession("oc_1", "ses_t", "t", "ou_1", { setActive: false });
+    await sessionMap.bindThread("omt_1", "ses_t", "oc_1", "ou_1", "om_root");
+    await commands.handleText(threadMsg("/cd /home/ubuntu/work/created-now"));
+    expect(moveSessionDir).toHaveBeenCalledWith("ses_t", "/home/ubuntu/work/created-now");
+  });
+
   test("话题内 /stop 中断本话题会话；/current 展示 dir/model/perm", async () => {
     const { commands, sender, sessionMap, interruptSession } = setup();
     await sessionMap.addSession("oc_1", "ses_t", "话题会话", "ou_1", { setActive: false });
@@ -390,7 +447,7 @@ describe("SessionCommands 话题内命令矩阵（P5.2 白名单）", () => {
 });
 
 describe("SessionCommands 向导卡片回调", () => {
-  test("确认卡创建：createSession 带 dir/model/permissions/perm/gateMode + reply_in_thread + 绑定", async () => {
+  test("（deprecated）确认卡创建：createSession 带 dir/model/permissions/perm/gateMode + reply_in_thread + 绑定", async () => {
     const { commands, sender, wizard, createSession, sessionMap } = setup();
     sender.threadIdFor = (id) => (id === "om_ready" ? "omt_new" : undefined);
     await commands.handleText(message("/new 我的项目"));
@@ -416,16 +473,18 @@ describe("SessionCommands 向导卡片回调", () => {
     expect(input.permissions).toEqual(
       expect.arrayContaining([{ action: "edit", resource: "*", effect: "allow" }]),
     );
-    // 一键开话题：先发独立锚点文本，再对它 reply_in_thread（不再复用会被改写的卡片）
-    expect(sender.texts.some((x) => x.includes("话题已开好"))).toBe(true);
+    // 话题锚点 = 触发消息本身（不再发独立锚点文本）
+    expect(sender.texts).toHaveLength(0);
     expect(sender.repliedCards).toHaveLength(1);
-    expect(sender.repliedCards[0]!.messageId).toBe("om_text");
+    expect(sender.repliedCards[0]!.messageId).toBe("om_confirm");
     expect(sender.repliedCards[0]!.replyInThread).toBe(true);
     const ready = JSON.stringify(sender.repliedCards[0]!.card);
     expect(ready).toContain("我的项目");
     expect(ready).toContain("Claude Sonnet 4");
     expect((await sessionMap.resolveByThread("omt_new"))?.sessionID).toBe("ses_new_1");
-    expect((await sessionMap.resolveByRoot("om_ready"))?.sessionID).toBe("ses_new_1");
+    expect((await sessionMap.resolveByRoot("om_confirm"))?.sessionID).toBe("ses_new_1");
+    // 触发卡被改写为「已创建」成功卡
+    expect(JSON.stringify(sender.patched.at(-1)!.card)).toContain("✅ 已创建 · 我的项目");
     // 向导清空
     expect(await wizard.get("oc_1")).toBeUndefined();
   });
@@ -584,12 +643,14 @@ describe("SessionCommands 建会话表单（P6.1）", () => {
     expect(sender.replies.at(-1)!.text).toContain("主聊天流");
   });
 
-  test("/new 首卡含「一次填完」表单入口按钮", async () => {
+  test("/new 直接就是表单卡（form 在根节点），不再是目录选择卡", async () => {
     const { commands, sender } = setup();
     await commands.handleText(message("/new 标题"));
+    const roots = rootElements(sender.cards[0]!.card);
+    expect(roots[0]!.tag).toBe("form");
     const text = JSON.stringify(sender.cards[0]!.card);
-    expect(text).toContain("一次填完");
-    expect(text).toContain('"wizard":"form"');
+    expect(text).toContain("setup_submit");
+    expect(text).not.toContain("选择工作目录");
   });
 
   test("点「一次填完」把当前卡 patch 成表单卡", async () => {
@@ -632,13 +693,17 @@ describe("SessionCommands 建会话表单（P6.1）", () => {
     expect(input.permissions).toEqual(
       expect.arrayContaining([{ action: "edit", resource: "*", effect: "allow" }]),
     );
-    // 独立锚点文本 + reply_in_thread 开话题
-    expect(sender.texts.some((x) => x.includes("话题已开好"))).toBe(true);
+    // 话题锚点 = 表单卡消息本身；不再发送独立锚点文本
+    expect(sender.texts).toHaveLength(0);
     expect(sender.repliedCards).toHaveLength(1);
-    expect(sender.repliedCards[0]!.messageId).toBe("om_text");
+    expect(sender.repliedCards[0]!.messageId).toBe("om_form");
     expect(sender.repliedCards[0]!.replyInThread).toBe(true);
     expect((await sessionMap.resolveByThread("omt_new"))?.sessionID).toBe("ses_new_1");
-    expect((await sessionMap.resolveByRoot("om_ready"))?.sessionID).toBe("ses_new_1");
+    expect((await sessionMap.resolveByRoot("om_form"))?.sessionID).toBe("ses_new_1");
+    // 表单卡被改写为话题根成功卡（标题 = ✅ 已创建 · <标题>）
+    const createdCard = sender.patched.at(-1)!;
+    expect(createdCard.messageId).toBe("om_form");
+    expect(JSON.stringify(createdCard.card)).toContain("✅ 已创建 · 我的项目");
     expect(await wizard.get("oc_1")).toBeUndefined();
   });
 
@@ -677,6 +742,37 @@ describe("SessionCommands 建会话表单（P6.1）", () => {
     expect(text).toContain("/etc"); // 保留已填目录
     expect(text).toContain("trust"); // 保留已选权限
     expect(rootElements(patched.card)[0]!.tag).toBe("form");
+  });
+
+  test("表单目录留空 → 使用允许根目录建会话（不报错）", async () => {
+    const { commands, createSession, sender } = setup();
+    await commands.handleText(message("/new 空目录"));
+    commands.handleCardAction({
+      rawValue: { cmd: "setup.form" },
+      formValue: { perm: "edit" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await flush();
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(createSession.mock.calls[0]![0].directory).toBe("/home/ubuntu");
+    expect(JSON.stringify(sender.patched.at(-1)!.card)).toContain("/home/ubuntu");
+  });
+
+  test("表单目录不存在 → 目录容错：视为自动创建后建会话", async () => {
+    const { commands, createSession } = setup();
+    await commands.handleText(message("/new 新目录"));
+    commands.handleCardAction({
+      rawValue: { cmd: "setup.form" },
+      formValue: { dir: "/home/ubuntu/work/created-now", perm: "readonly" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await flush();
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(createSession.mock.calls[0]![0].directory).toBe("/home/ubuntu/work/created-now");
   });
 
   test("表单失效后重复提交不再建会话（防重复）", async () => {

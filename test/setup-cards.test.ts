@@ -175,7 +175,7 @@ describe("buildSetupFormCard（P6.1 表单卡）", () => {
     expect((card as { config: { update_multi: boolean } }).config.update_multi).toBe(true);
   });
 
-  test("交互组件 name 全局唯一 + input 必填 + 提交按钮带提交行为", () => {
+  test("交互组件 name 全局唯一 + input 可留空 + 提交按钮带提交行为", () => {
     const card = buildSetupFormCard({ models: MODELS, recent: MODELS.slice(0, 3) });
     const form = formRoot(card);
     const els = collectFormElements(form.elements as Record<string, unknown>[]);
@@ -184,7 +184,9 @@ describe("buildSetupFormCard（P6.1 表单卡）", () => {
     expect(names).toEqual(expect.arrayContaining(Object.values(SETUP_FORM_FIELDS)));
 
     const input = els.find((e) => e.tag === "input")!;
-    expect(input.required).toBe(true);
+    // 目录留空 = 使用允许根目录，故不再必填。
+    expect(input.required).toBe(false);
+    expect(JSON.stringify(input)).toContain("留空");
 
     const submit = els.find((e) => e.form_action_type === "submit")!;
     expect(submit).toBeTruthy();
@@ -192,6 +194,14 @@ describe("buildSetupFormCard（P6.1 表单卡）", () => {
     const behaviors = submit.behaviors as Array<{ type: string; value: { cmd: string } }>;
     expect(behaviors[0]!.type).toBe("callback");
     expect(behaviors[0]!.value.cmd).toBe("setup.form");
+  });
+
+  test("表单文案说明目录容错（留空=允许根目录；不存在自动创建）", () => {
+    const card = buildSetupFormCard({ models: MODELS, recent: [], allowedRoots: ["/home/ubuntu"] });
+    const text = json(card);
+    expect(text).toContain("留空");
+    expect(text).toContain("自动创建");
+    expect(text).toContain("允许根目录");
   });
 
   test("不含 1.0 的 tag:action 容器", () => {

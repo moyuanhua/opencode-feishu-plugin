@@ -15,9 +15,9 @@ Bring [OpenCode](https://opencode.ai) into Feishu/Lark: **one Feishu topic = one
 |---|---|
 | 🔐 **Minimal permissions** | Only 2 scopes (read p2p messages + send as bot). **No group scopes at all** — the bot physically cannot receive group messages |
 | 💬 **Topics as sessions** | Each Feishu topic maps to one OpenCode session. The main chat is a management console; work happens inside topics |
-| 🚀 **One-tap entry** | `/new` makes the bot create a topic under your message automatically |
-| 🧭 **Setup wizard** | Directory → model → permissions → confirm. Directory is validated against an allowlist |
-| 📝 **One-shot form** | `/form`, or tap "one-shot form" on the first `/new` card, to fill directory + model + permissions and submit in one go. **Zero new permissions** |
+| 🚀 **One-tap entry** | `/new` opens the setup form directly; on submit the bot creates a topic under your message automatically |
+| 📝 **One-shot form** | `/new` and `/form` are **fully equivalent**: fill directory + model + permissions once and submit. **Zero new permissions** |
+| 🗂 **Directory tolerance** | Empty directory = the allowed root; a non-existent one is created automatically (still constrained by the `allowedRoots` allowlist) |
 | ✅ **In-card approvals** | Permission requests become Feishu cards (allow once / always / reject) with signed, replay-proof buttons |
 | 🪜 **Permission presets** | Read-only / Editable / Ask-on-risky / Trust — pick once per session instead of approving every call |
 | 📊 **Live visibility** | Instant ack card, live tool calls (auto-collapsed when ≥3), streaming text, current model in the footer |
@@ -117,12 +117,16 @@ The main chat is management-only; plain text never enters a session.
 
 | Command | Purpose |
 |---|---|
-| `/new [title]` | Start the **setup wizard**: directory → model → permissions → confirm → auto-creates a topic |
-| `/form` | Open a single **form** to fill directory + model + permissions and submit at once (auto-creates a topic) |
+| `/new [title]` | **Open the setup form directly**; submit to create the session and auto-open a topic (equivalent to `/form`; the title becomes the session title) |
+| `/form [title]` | Same as `/new` — an equivalent entry point |
 | `/sessions` (`/ls`) | Session list card (switch / create) |
 | `/use <n\|id-prefix>` | Switch current session |
 | `/current` | Show current session |
 | `/stop` | Interrupt the running task in the current session |
+| `/dir <path>` | **Pre-fill** the form's working directory (empty = allowed root; a missing path is auto-created) |
+| `/model [query]` | **Pre-fill** the form's model (also switches the current session's model inside a topic) |
+| `/perm [preset]` | **Pre-fill** the form's permission preset (also changes the current session inside a topic) |
+| `/cancel` | Discard an un-submitted form |
 | `/help` | Command list |
 
 ### Inside a topic (work)
@@ -133,35 +137,50 @@ One topic = one session. **Plain text inside a topic is a prompt to the agent**;
 |---|---|
 | `/model` | Switch the model for this session |
 | `/perm` | Change the permission preset for this session |
-| `/cd <abs path>` | Move this session's working directory |
+| `/cd <path>` | Move this session's working directory (empty = allowed root; a missing path is auto-created) |
 | `/current` `/stop` `/help` | Same as main chat, scoped to this topic's session |
 
-### Setup wizard
+### Creating a session (`/new` and `/form` are fully equivalent)
 
 ```
-/new fix the login bug
+/new fix the login bug        (or /form fix the login bug)
   ↓
-📁 directory  ← recent-dir buttons, or /dir /path/to/project
+📝 setup form card
+   directory: may be empty (= allowed root); auto-created if missing
+   model:     dropdown (defaults to the current/most recent)
+   permissions: pick one of four presets
+  ↓ tap "Create"
+The form message itself becomes the topic root: the bot replies to it with
+`reply_in_thread` to post the "session ready" card inside the topic
   ↓
-🧠 model      ← recent buttons / "more" pagination, or /model <query>
+The form card is rewritten in place into a success card titled
+`✅ Created · <session title>` (this title becomes the topic name)
   ↓
-🔐 permissions← four presets, each with a one-line explanation
-  ↓
-✅ confirm    ← summary of directory/model/permissions → tap Create
-  ↓
-the bot opens a topic under your message; the session card lands inside it
+Jump into the topic and just send a message
 ```
 
-`/cancel` aborts the wizard at any step.
+- `/new` and `/form` share **one entry point** and post the setup form directly; the old directory → model → permissions → confirm step cards are **gone**.
+- `/dir` `/model` `/perm` still work, but only as **form pre-fill** (no longer required steps): each replies with a new pre-filled form card.
+- Submission consumes the wizard state first (prevents double-click duplicates); an invalid directory **never creates a session** and returns the form with an error while keeping your input.
+- Send `/cancel` to discard an un-submitted form.
+
+### Directory tolerance rules
+
+| Input | Behaviour |
+|---|---|
+| Empty | Uses the **allowed root** `allowedRoots[0]` (the user's home by default); not an error |
+| Non-existent absolute path | Auto-created with `mkdir -p`, but **must still be under `allowedRoots`** |
+| Outside the roots / system dir / `/` | Rejected, nothing is created |
+| Symlinks | Re-checked with `realpath` after creation; escaping `allowedRoots` or landing in a system dir → rejected |
+
+`/cd` follows **exactly the same** rules.
 
 ### One-shot form (`/form`)
 
-Prefer filling everything at once?
-
-- Send `/form` to open the form card directly, or tap **"one-shot form"** on the first `/new` card to turn it into the form in place.
-- The form collects: **working directory** (required text input, absolute path), **model** (dropdown of recent + popular, defaulting to the current/most recent model) and **permission preset** (dropdown, four presets with descriptions). Tap **Create** to submit.
-- Submission follows the **exact same creation path as the wizard's confirm step**: `session.create` → auto-open a topic → bind, and you can start working in the new topic.
-- **Relationship to the wizard**: they coexist as a fast path and a step-by-step path. The form reuses the wizard's title/anchor (e.g. `/new my title` then tapping the form keeps the title).
+- Send `/form` (or `/new` — they are equivalent) to open the form card.
+- Fill in one go: **directory** (optional text input), **model** (dropdown of recent + popular, defaulting to the current/most recent model) and **permission preset** (dropdown, four presets with descriptions). Tap **Create** to submit.
+- On submit: `session.create` → `reply_in_thread` on the **form card message** posts the ready card (the form message becomes the topic root) → bind, and you can start working in the new topic.
+- With `/new <title>`, the title is stored in the wizard state and becomes the session title on submit.
 - **Zero new permissions**: form submission reuses the `card.action.trigger` callback (permission requirement: None) — **no new scope, no app re-release**.
 - An invalid directory **never creates a session**: the bot returns the form with an error and keeps your filled-in directory/model/permissions so you can fix and resubmit.
 
@@ -191,7 +210,7 @@ The preset is written to a **session-scoped** ruleset and can be changed any tim
 | `permissionGate` | `off`\|`notify`\|`gate`\|`lockdown` | `gate` | Global approval gate |
 | `allowTools` | string[] | `["read","glob","grep","webfetch"]` | Auto-allow list; supports `prefix*` |
 | `denyTools` | string[] | `[]` | Hard deny (takes precedence) |
-| `allowedRoots` | string[] | `[homedir]` | Roots allowed as session working directories; `/`, home root and system dirs are always rejected |
+| `allowedRoots` | string[] | `[homedir]` | Roots allowed as session working directories (the default directory is `allowedRoots[0]`); `/`, the filesystem root and system dirs are always rejected; an empty directory falls back to the first root and a non-existent one is auto-created |
 | `stream` | boolean | `true` | Stream replies into the card |
 | `streamThrottleMs` | number | `400` | Min card update interval (floor 400ms; Feishu limit is 5 QPS) |
 | `threadRouting` | boolean | `true` | Topic routing master switch; `false` restores the legacy behaviour |
@@ -242,8 +261,9 @@ otherwise (per session preset) → ask ─────────────�
 | No approval cards | The session did not originate from Feishu (no mapping); by design the plugin does not take it over |
 | "Invalid credentials" on button tap | Token expired (default 10 min) or the tapper is not allow-listed |
 | Card content truncated | Feishu card limit is ~30KB; the plugin truncates and marks it. Very long sessions drop the oldest blocks from the card (full content stays in the session) |
-| Form submit does nothing / errors | Client too old (`select_static` needs ≥ V3.7.0), or the card is stale (wizard consumed/cancelled) — send `/form` again for a fresh form |
-| Form submitted but no session | An invalid directory returns an error card and **does not create a session**; fix the directory and resubmit |
+| Form submit does nothing / errors | Client too old (`select_static` needs ≥ V3.7.0), or the card is stale (form consumed/cancelled) — send `/form` or `/new` again for a fresh form |
+| Form submitted but no session | A directory outside the allowlist or in a system dir returns an error card and **does not create a session**; fix it and resubmit. Empty / non-existent in-scope dirs are auto-created and never fail |
+| No topic after creating a session | If auto-opening the topic fails, the form card is rewritten to "✅ Created · …" with manual-topic guidance; you can also create a topic manually from the `/sessions` card |
 | No plugin logs | Plugin stderr is discarded in service mode; set `logFile: true` and read `<configDir>/plugins/feishu.log` |
 | Main chat replies with a hint card | Expected: the main chat is management-only. Use `/new` and work inside a topic; set `threadRouting: false` to revert |
 
@@ -278,10 +298,10 @@ This plugin targets **OpenCode V2 only** (`@opencode/plugin`, `Plugin.define`). 
 - Only approvals for **Feishu-originated** sessions are handled. Local TUI sessions are untouched by design.
 - Message dedup is `get-then-set` (not atomic): under extreme concurrency a duplicate is theoretically possible.
 - Deleted topics leave stale mappings (lazily ignored).
-- Setup ships two paths: a **step-by-step wizard** (buttons) and a **one-shot form** (`/form`); both are driven by slash commands and cards, not free text.
+- There is a single main path for creating sessions: the **`/new` / `/form` setup form card**; `/dir` `/model` `/perm` only pre-fill the form. The old directory/model/permissions/confirm step cards are retired from `/new` (their builders and compatibility callbacks remain, marked deprecated).
 - The form is JSON 2.0 (`form` at the root of `body.elements`, globally unique interactive `name`s, a submit button with `form_action_type:"submit"`); some older clients require `select_static` ≥ V3.7.0.
 
-- **A topic's first message may omit `thread_id`**: Feishu sometimes delivers the event without `thread_id` (it is assigned afterwards). If you send a main-chat-only command such as `/new` at that moment, it runs as a main-chat command (e.g. the wizard card lands in the main chat). Just continue inside the topic with a normal message.
+- **A topic's first message may omit `thread_id`**: Feishu sometimes delivers the event without `thread_id` (it is assigned afterwards). If you send a main-chat-only command such as `/new` at that moment, it runs as a main-chat command (e.g. the form card lands in the main chat). Just continue inside the topic with a normal message.
 
 ## License
 
