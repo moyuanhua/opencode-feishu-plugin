@@ -281,6 +281,8 @@ This plugin targets **OpenCode V2 only** (`@opencode/plugin`, `Plugin.define`). 
 - Setup ships two paths: a **step-by-step wizard** (buttons) and a **one-shot form** (`/form`); both are driven by slash commands and cards, not free text.
 - The form is JSON 2.0 (`form` at the root of `body.elements`, globally unique interactive `name`s, a submit button with `form_action_type:"submit"`); some older clients require `select_static` ≥ V3.7.0.
 
+- **A topic's first message may omit `thread_id`**: Feishu sometimes delivers the event without `thread_id` (it is assigned afterwards). If you send a main-chat-only command such as `/new` at that moment, it runs as a main-chat command (e.g. the wizard card lands in the main chat). Just continue inside the topic with a normal message.
+
 ## License
 
 MIT
