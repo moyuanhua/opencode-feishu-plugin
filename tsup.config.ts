@@ -11,8 +11,8 @@ export default defineConfig({
   splitting: false,
   treeshake: true,
   minify: false,
-  // @opencode/plugin is provided by the host opencode process.
-  external: ["@opencode/plugin", "ws"],
-  // Bundle the Feishu SDK so the published plugin is self-contained.
-  noExternal: ["@larksuiteoapi/node-sdk"],
+  // 全部打包：opencode 的 Bun 加载器不跟随 node_modules 符号链接，
+  // 外部依赖会导致 "Cannot find package"。自包含最稳。
+  noExternal: [/.*/],
+  external: [],
 });
