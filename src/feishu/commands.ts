@@ -18,6 +18,7 @@ export type CommandName =
   | "perm"
   | "cd"
   | "cancel"
+  | "form"
   | "unknown";
 
 export interface ParsedCommand {
@@ -43,6 +44,7 @@ const ALIASES: Readonly<Record<string, CommandName>> = {
   permission: "perm",
   permissions: "perm",
   cancel: "cancel",
+  form: "form",
 };
 
 /** 是否是命令（以 `/` 开头）。 */
@@ -130,12 +132,13 @@ export function helpText(scope: "main" | "thread" = "main"): string {
       "`/cd <绝对路径>` — 切换本话题会话的工作目录",
       "`/help` — 显示本帮助",
       "",
-      "建会话与会话管理（`/new` `/sessions` `/use` `/dir` `/cancel`）请回到**主聊天流**操作。",
+      "建会话与会话管理（`/new` `/form` `/sessions` `/use` `/dir` `/cancel`）请回到**主聊天流**操作。",
     ].join("\n");
   }
   return [
     "**OpenCode 会话命令**",
     "`/new [标题]` — 开始建会话向导（目录 → 模型 → 权限 → 确认，自动开话题）",
+    "`/form` — 用一张表单一次填完（目录 + 模型 + 权限），提交即建会话",
     "`/dir <绝对路径>` — 向导内设置工作目录",
     "`/model [关键词]` — 向导内选模型；话题内切换当前会话模型",
     "`/perm [档位]` — 向导内选权限；话题内修改当前会话权限",
@@ -167,7 +170,7 @@ export function isCommandAllowedInThread(name: CommandName): boolean {
 /** 话题内敲了被禁命令时的提示文案（引导去主聊天流）。 */
 export function threadForbiddenText(raw: string): string {
   const name = raw ? `\`/${raw}\`` : "该命令";
-  return `话题内不支持 ${name}。\n\n建会话/会话管理请回到**主聊天流**操作（\`/new\`、\`/sessions\`、\`/use\`、\`/dir\`、\`/cancel\`）。`;
+  return `话题内不支持 ${name}。\n\n建会话/会话管理请回到**主聊天流**操作（\`/new\`、\`/form\`、\`/sessions\`、\`/use\`、\`/dir\`、\`/cancel\`）。`;
 }
 
 /** 话题会话标题：取首条消息摘要，如 `话题: 帮我看看这个 bug`。 */

@@ -33,7 +33,7 @@ import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js
 import { decideRoute } from "./feishu/routing.js";
 import { buildConsoleHintCard } from "./feishu/cards.js";
 import { parseSessionCardValue } from "./feishu/session-cards.js";
-import { parseSetupCardValue } from "./feishu/setup-cards.js";
+import { isSetupFormAction, parseSetupCardValue } from "./feishu/setup-cards.js";
 import { validateDirectory } from "./feishu/dirs.js";
 import { WizardStore } from "./feishu/wizard.js";
 import { RecentStore } from "./feishu/recent.js";
@@ -415,9 +415,16 @@ async function start(
     logLevel: config.logLevel,
     onMessage: (message) => handleMessage(message),
     onCardAction: (action) => {
-      // 会话卡 / 向导卡优先；其余交给审批卡（value 里带 `cmd` / `wizard` 的才是管理操作）。
+      // 会话卡 / 向导卡 / 表单提交优先；其余交给审批卡（value 里带 `cmd` / `wizard` 的才是管理操作）。
       const value = action.rawValue;
-      if (parseSessionCardValue(value) || parseSetupCardValue(value)) return commands.handleCardAction(action);
+      if (
+        action.formValue !== undefined ||
+        isSetupFormAction(value) ||
+        parseSessionCardValue(value) ||
+        parseSetupCardValue(value)
+      ) {
+        return commands.handleCardAction(action);
+      }
       return approvals.handleCardAction(action);
     },
   });

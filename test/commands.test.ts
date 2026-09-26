@@ -57,6 +57,10 @@ describe("parseCommand", () => {
     expect(parseCommand("/cancel")?.name).toBe("cancel");
   });
 
+  test("P6.1 /form 命令", () => {
+    expect(parseCommand("/form")).toEqual({ name: "form", args: "", raw: "form" });
+  });
+
   test("isCommand 只看前导 /", () => {
     expect(isCommand("/new")).toBe(true);
     expect(isCommand("  /new")).toBe(true);
@@ -113,7 +117,7 @@ describe("文案与展示", () => {
   });
 
   test("helpText 覆盖全部命令", () => {
-    for (const cmd of ["/new", "/dir", "/model", "/perm", "/cancel", "/sessions", "/use", "/current", "/stop", "/help"]) {
+    for (const cmd of ["/new", "/form", "/dir", "/model", "/perm", "/cancel", "/sessions", "/use", "/current", "/stop", "/help"]) {
       expect(helpText()).toContain(cmd);
     }
   });
@@ -144,6 +148,7 @@ describe("文案与展示", () => {
     expect(isCommandAllowedInThread("use")).toBe(false);
     expect(isCommandAllowedInThread("dir")).toBe(false);
     expect(isCommandAllowedInThread("cancel")).toBe(false);
+    expect(isCommandAllowedInThread("form")).toBe(false);
   });
 
   test("threadForbiddenText 指向主聊天流", () => {

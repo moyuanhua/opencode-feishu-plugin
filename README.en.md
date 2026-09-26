@@ -17,6 +17,7 @@ Bring [OpenCode](https://opencode.ai) into Feishu/Lark: **one Feishu topic = one
 | 💬 **Topics as sessions** | Each Feishu topic maps to one OpenCode session. The main chat is a management console; work happens inside topics |
 | 🚀 **One-tap entry** | `/new` makes the bot create a topic under your message automatically |
 | 🧭 **Setup wizard** | Directory → model → permissions → confirm. Directory is validated against an allowlist |
+| 📝 **One-shot form** | `/form`, or tap "one-shot form" on the first `/new` card, to fill directory + model + permissions and submit in one go. **Zero new permissions** |
 | ✅ **In-card approvals** | Permission requests become Feishu cards (allow once / always / reject) with signed, replay-proof buttons |
 | 🪜 **Permission presets** | Read-only / Editable / Ask-on-risky / Trust — pick once per session instead of approving every call |
 | 📊 **Live visibility** | Instant ack card, live tool calls (auto-collapsed when ≥3), streaming text, current model in the footer |
@@ -117,6 +118,7 @@ The main chat is management-only; plain text never enters a session.
 | Command | Purpose |
 |---|---|
 | `/new [title]` | Start the **setup wizard**: directory → model → permissions → confirm → auto-creates a topic |
+| `/form` | Open a single **form** to fill directory + model + permissions and submit at once (auto-creates a topic) |
 | `/sessions` (`/ls`) | Session list card (switch / create) |
 | `/use <n\|id-prefix>` | Switch current session |
 | `/current` | Show current session |
@@ -151,6 +153,17 @@ the bot opens a topic under your message; the session card lands inside it
 ```
 
 `/cancel` aborts the wizard at any step.
+
+### One-shot form (`/form`)
+
+Prefer filling everything at once?
+
+- Send `/form` to open the form card directly, or tap **"one-shot form"** on the first `/new` card to turn it into the form in place.
+- The form collects: **working directory** (required text input, absolute path), **model** (dropdown of recent + popular, defaulting to the current/most recent model) and **permission preset** (dropdown, four presets with descriptions). Tap **Create** to submit.
+- Submission follows the **exact same creation path as the wizard's confirm step**: `session.create` → auto-open a topic → bind, and you can start working in the new topic.
+- **Relationship to the wizard**: they coexist as a fast path and a step-by-step path. The form reuses the wizard's title/anchor (e.g. `/new my title` then tapping the form keeps the title).
+- **Zero new permissions**: form submission reuses the `card.action.trigger` callback (permission requirement: None) — **no new scope, no app re-release**.
+- An invalid directory **never creates a session**: the bot returns the form with an error and keeps your filled-in directory/model/permissions so you can fix and resubmit.
 
 ### Permission presets
 
@@ -229,6 +242,8 @@ otherwise (per session preset) → ask ─────────────�
 | No approval cards | The session did not originate from Feishu (no mapping); by design the plugin does not take it over |
 | "Invalid credentials" on button tap | Token expired (default 10 min) or the tapper is not allow-listed |
 | Card content truncated | Feishu card limit is ~30KB; the plugin truncates and marks it. Very long sessions drop the oldest blocks from the card (full content stays in the session) |
+| Form submit does nothing / errors | Client too old (`select_static` needs ≥ V3.7.0), or the card is stale (wizard consumed/cancelled) — send `/form` again for a fresh form |
+| Form submitted but no session | An invalid directory returns an error card and **does not create a session**; fix the directory and resubmit |
 | No plugin logs | Plugin stderr is discarded in service mode; set `logFile: true` and read `<configDir>/plugins/feishu.log` |
 | Main chat replies with a hint card | Expected: the main chat is management-only. Use `/new` and work inside a topic; set `threadRouting: false` to revert |
 
@@ -247,7 +262,7 @@ npm run dev         # tsup --watch
 **Architecture**: `src/index.ts` wires everything; the Feishu interaction layer lives in `src/feishu/` (event parsing, card builders, topic routing, wizard state machine, streaming-card reducer — mostly **pure functions** for testability); `src/security/` holds token signing and the allowlist.
 
 **Implementation notes**
-- Cards are **JSON 2.0** (buttons directly in `body.elements`, callbacks via `behaviors`; the 1.0 `tag:"action"` container returns HTTP 400 on 2.0).
+- Cards are **JSON 2.0** (buttons directly in `body.elements`, callbacks via `behaviors`; the 1.0 `tag:"action"` container returns HTTP 400 on 2.0). Form cards add: `form` must sit at the root of `body.elements`, interactive `name`s must be globally unique, and at least one button must carry `form_action_type:"submit"`.
 - Card updates are throttled to ≥400ms; ≥3 consecutive tool calls collapse into one summary panel (names only) to stay under the 30KB limit.
 - Run-card state is maintained by a **pure reducer** (text blocks / tool blocks / footer / terminal state), keyed per `assistantMessageID`.
 
@@ -263,7 +278,8 @@ This plugin targets **OpenCode V2 only** (`@opencode/plugin`, `Plugin.define`). 
 - Only approvals for **Feishu-originated** sessions are handled. Local TUI sessions are untouched by design.
 - Message dedup is `get-then-set` (not atomic): under extreme concurrency a duplicate is theoretically possible.
 - Deleted topics leave stale mappings (lazily ignored).
-- The wizard's first version does not rely on card form submission; free text goes through `/dir` and `/model`.
+- Setup ships two paths: a **step-by-step wizard** (buttons) and a **one-shot form** (`/form`); both are driven by slash commands and cards, not free text.
+- The form is JSON 2.0 (`form` at the root of `body.elements`, globally unique interactive `name`s, a submit button with `form_action_type:"submit"`); some older clients require `select_static` ≥ V3.7.0.
 
 ## License
 

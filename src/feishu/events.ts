@@ -130,7 +130,8 @@ export function parseIncomingMessage(data: unknown): IncomingMessage | undefined
 
 /**
  * 解析 `card.action.trigger` 载荷。
- * `action.value` 可能是对象（新版）或 JSON 字符串（旧版）。
+ * `action.value` 可能是对象（新版）或 JSON 字符串（旧版）；
+ * 表单提交时还会带 `action.form_value`（键 = 组件 name），一并读取（P6.1）。
  */
 export function parseCardAction(data: unknown): CardAction | undefined {
   if (!isRecord(data)) return undefined;
@@ -152,9 +153,12 @@ export function parseCardAction(data: unknown): CardAction | undefined {
     }
   }
 
+  const formValue = isRecord(action.form_value) ? action.form_value : undefined;
+
   const callbackToken = str(data.token);
   return {
     rawValue,
+    ...(formValue ? { formValue } : {}),
     messageId,
     chatId,
     operatorOpenId,

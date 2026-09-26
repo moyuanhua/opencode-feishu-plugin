@@ -543,7 +543,7 @@ describe("SessionCommands 会话卡片回调", () => {
   });
 });
 
-describe("最近使用记录（RecentStore）", () => {
+describe("SessionCommands 最近使用记录（RecentStore）", () => {
   test("LRU 去重 + 限长", async () => {
     const storage = new FakeStorage();
     const recent = new RecentStore(storage, log, { dirs: 2, models: 2 });
@@ -558,5 +558,156 @@ describe("最近使用记录（RecentStore）", () => {
     expect((await recent.listModels()).map((m) => m.id)).toEqual(["m1", "m2"]);
     expect(storage.raw(RECENT_DIRS_KEY)).toEqual(["/c", "/a"]);
     expect(Array.isArray(storage.raw(RECENT_MODELS_KEY))).toBe(true);
+  });
+});
+
+describe("SessionCommands 建会话表单（P6.1）", () => {
+  const rootElements = (card: object): Array<Record<string, unknown>> =>
+    (card as { body: { elements: Array<Record<string, unknown>> } }).body.elements;
+
+  test("/form 主聊天流直接发表单卡（form 在根节点）", async () => {
+    const { commands, sender, wizard } = setup();
+    await commands.handleText(message("/form"));
+    expect(sender.cards).toHaveLength(1);
+    const roots = rootElements(sender.cards[0]!.card);
+    expect(roots[0]!.tag).toBe("form");
+    expect(JSON.stringify(sender.cards[0]!.card)).toContain("setup_submit");
+    // 顺带起向导（用于保留标题/锚点）
+    expect(await wizard.get("oc_1")).toBeDefined();
+  });
+
+  test("/form 在话题内被拒（提示去主聊天流）", async () => {
+    const { commands, sender } = setup();
+    await commands.handleText(threadMsg("/form"));
+    expect(sender.cards).toHaveLength(0);
+    expect(sender.replies.at(-1)!.text).toContain("主聊天流");
+  });
+
+  test("/new 首卡含「一次填完」表单入口按钮", async () => {
+    const { commands, sender } = setup();
+    await commands.handleText(message("/new 标题"));
+    const text = JSON.stringify(sender.cards[0]!.card);
+    expect(text).toContain("一次填完");
+    expect(text).toContain('"wizard":"form"');
+  });
+
+  test("点「一次填完」把当前卡 patch 成表单卡", async () => {
+    const { commands, sender } = setup();
+    await commands.handleText(message("/new"));
+    const res = commands.handleCardAction({
+      rawValue: { wizard: "form" },
+      messageId: "om_setup",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { type: string } };
+    expect(res.toast.type).toBe("info");
+    await flush();
+    const patched = sender.patched.at(-1)!;
+    expect(patched.messageId).toBe("om_setup");
+    expect(rootElements(patched.card)[0]!.tag).toBe("form");
+  });
+
+  test("表单提交：校验目录 → 建会话(dir/model/perm/gateMode) + 开话题 + 绑定", async () => {
+    const { commands, sender, createSession, sessionMap, wizard } = setup();
+    sender.threadIdFor = (id) => (id === "om_ready" ? "omt_new" : undefined);
+    await commands.handleText(message("/new 我的项目"));
+
+    const res = commands.handleCardAction({
+      rawValue: { cmd: "setup.form" },
+      formValue: { dir: "/home/ubuntu/work/app", model: "anthropic/claude-sonnet-4", perm: "edit" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { type: string } };
+    expect(res.toast.type).toBe("success");
+    await flush();
+
+    expect(createSession).toHaveBeenCalledTimes(1);
+    const input = createSession.mock.calls[0]![0];
+    expect(input.directory).toBe("/home/ubuntu/work/app");
+    expect(input.model?.id).toBe("claude-sonnet-4");
+    expect(input.perm).toBe("edit");
+    expect(input.gateMode).toBe("gate");
+    expect(input.permissions).toEqual(
+      expect.arrayContaining([{ action: "edit", resource: "*", effect: "allow" }]),
+    );
+    // 锚点到 /new 那条消息并 reply_in_thread 开话题
+    expect(sender.repliedCards).toHaveLength(1);
+    expect(sender.repliedCards[0]!.messageId).toBe("om_in");
+    expect(sender.repliedCards[0]!.replyInThread).toBe(true);
+    expect((await sessionMap.resolveByThread("omt_new"))?.sessionID).toBe("ses_new_1");
+    expect((await sessionMap.resolveByRoot("om_ready"))?.sessionID).toBe("ses_new_1");
+    expect(await wizard.get("oc_1")).toBeUndefined();
+  });
+
+  test("仅 form_value（无 value）也能路由并建会话", async () => {
+    const { commands, createSession } = setup();
+    await commands.handleText(message("/form"));
+    commands.handleCardAction({
+      rawValue: undefined,
+      formValue: { dir: "/home/ubuntu/work/fresh", perm: "readonly" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await flush();
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(createSession.mock.calls[0]![0].perm).toBe("readonly");
+    expect(createSession.mock.calls[0]![0].model).toBeUndefined();
+  });
+
+  test("非法目录：不建会话，回带错误说明并保留已填项的卡片", async () => {
+    const { commands, sender, createSession } = setup();
+    await commands.handleText(message("/new"));
+    commands.handleCardAction({
+      rawValue: { cmd: "setup.form" },
+      formValue: { dir: "/etc", model: "openai/gpt-5", perm: "trust" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await flush();
+    expect(createSession).not.toHaveBeenCalled();
+    const patched = sender.patched.at(-1)!;
+    expect(patched.messageId).toBe("om_form");
+    const text = JSON.stringify(patched.card);
+    expect(text).toContain("不在允许范围内");
+    expect(text).toContain("/etc"); // 保留已填目录
+    expect(text).toContain("trust"); // 保留已选权限
+    expect(rootElements(patched.card)[0]!.tag).toBe("form");
+  });
+
+  test("表单失效后重复提交不再建会话（防重复）", async () => {
+    const { commands, sender, createSession } = setup();
+    await commands.handleText(message("/form"));
+    const submit = () => ({
+      rawValue: { cmd: "setup.form" },
+      formValue: { dir: "/home/ubuntu/work/dup", perm: "edit" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    commands.handleCardAction(submit());
+    await flush();
+    expect(createSession).toHaveBeenCalledTimes(1);
+    // 向导已消费 → 第二次提交视为失效，不再建会话
+    commands.handleCardAction(submit());
+    await flush();
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(JSON.stringify(sender.patched.at(-1)!.card)).toContain("表单已失效");
+  });
+
+  test("非白名单用户表单提交被拒，无副作用", async () => {
+    const { commands, createSession } = setup({ allowed: false });
+    const res = commands.handleCardAction({
+      rawValue: { cmd: "setup.form" },
+      formValue: { dir: "/home/ubuntu/work/x", perm: "edit" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { type: string } };
+    expect(res.toast.type).toBe("error");
+    await tick();
+    expect(createSession).not.toHaveBeenCalled();
   });
 });

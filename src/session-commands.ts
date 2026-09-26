@@ -31,7 +31,11 @@ import {
   buildModelCard,
   buildPermCard,
   buildSetupDoneCard,
+  buildSetupFormCard,
+  isSetupFormAction,
   parseSetupCardValue,
+  parseSetupFormValues,
+  type SetupFormValuesInput,
   type SetupCardValue,
 } from "./feishu/setup-cards.js";
 import {
@@ -140,9 +144,21 @@ export class SessionCommands {
 
   /**
    * 卡片按钮点击：同步返回飞书回调响应（toast），重活在后台完成。
-   * 校验：仅白名单用户可操作。会话卡 / 向导卡分别路由。
+   * 校验：仅白名单用户可操作。表单提交 / 会话卡 / 向导卡分别路由。
    */
   handleCardAction(action: CardAction): object {
+    // P6.1：表单提交（`action.form_value` 存在，或 value 带 `{cmd:"setup.form"}`）。
+    if (isSetupFormAction(action.rawValue) || parseSetupFormValues(action.formValue)) {
+      if (!this.deps.isAllowed(action.operatorOpenId)) {
+        this.deps.log.warn("拒绝非白名单用户的表单提交", { operator: action.operatorOpenId.slice(0, 8) });
+        return toast("error", "无操作权限");
+      }
+      void this.applySetupFormSubmit(action).catch((err) => {
+        this.deps.log.warn("表单提交处理失败", { error: errorMessage(err) });
+      });
+      return toast("success", "正在创建会话…");
+    }
+
     const sessionValue = parseSessionCardValue(action.rawValue);
     const setupValue = sessionValue ? undefined : parseSetupCardValue(action.rawValue);
     if (!sessionValue && !setupValue) return toast("error", "无法识别的操作");
@@ -187,6 +203,8 @@ export class SessionCommands {
         return this.cmdCd(message, parsed.args);
       case "cancel":
         return this.cmdCancel(message);
+      case "form":
+        return this.cmdForm(message);
       case "unknown":
         return this.reply(message, `未知命令 \`/${parsed.raw}\`\n\n${helpText(scope)}`);
       case "help":
@@ -361,6 +379,23 @@ export class SessionCommands {
     await this.reply(message, "✖️ 已取消建会话向导。发送 `/new [标题]` 可重新开始。");
   }
 
+  /** `/form`：主聊天流直接打开建会话表单卡（P6.1）。 */
+  private async cmdForm(message: IncomingMessage): Promise<void> {
+    if (message.threadId) {
+      await this.reply(message, threadForbiddenText("form"));
+      return;
+    }
+    if (!this.threadRouting) {
+      await this.reply(message, "当前为回退模式（`threadRouting=false`），不支持表单建会话，请用 `/new`。");
+      return;
+    }
+    let state = await this.deps.wizard.get(message.chatId);
+    if (!state) state = await this.deps.wizard.start(message.chatId, undefined, message.messageId);
+    const card = await this.renderFormCard(state);
+    const res = await this.deps.sender.sendCard(message.chatId, card);
+    if (!res.ok) this.deps.log.warn("表单卡发送失败", { chatId: message.chatId, error: res.error ?? "unknown" });
+  }
+
   // ── 既有会话管理 ──────────────────────────────────────────────────────
 
   private async cmdSessions(message: IncomingMessage): Promise<void> {
@@ -498,6 +533,11 @@ export class SessionCommands {
       await this.patchCard(action.messageId, buildSetupDoneCard("✖️ 已取消", ["建会话向导已取消。发送 `/new` 重新开始。"]));
       return;
     }
+    if (value.kind === "form") {
+      const state = (await this.deps.wizard.get(chatId)) ?? (await this.deps.wizard.start(chatId, undefined, action.messageId));
+      await this.patchCard(action.messageId, await this.renderFormCard(state));
+      return;
+    }
 
     // 已存在会话的操作卡（话题内 `/model` `/perm`）
     if (value.kind !== "dir" && value.sid) {
@@ -570,7 +610,7 @@ export class SessionCommands {
     }
   }
 
-  /** 确认卡「✅ 创建」：建会话 → 自动开话题 → 绑定 → 复原卡片。 */
+  /** 确认卡「✅ 创建」：读向导 → 走统一创建路径。 */
   private async confirmSetup(chatId: string, action: CardAction): Promise<void> {
     const state = await this.deps.wizard.get(chatId);
     if (!state || state.step !== "confirm" || !state.dir || !state.perm) {
@@ -580,8 +620,87 @@ export class SessionCommands {
     // 立即消费向导，防止确认按钮被连点造成重复建会话。
     await this.deps.wizard.cancel(chatId);
     const title = state.title?.trim() || defaultSessionTitle(this.now());
-    const perm = state.perm;
-    const model = state.model;
+    await this.createSessionFromSetup(chatId, action, {
+      title,
+      dir: state.dir,
+      perm: state.perm,
+      ...(state.model ? { model: state.model } : {}),
+      ...(state.anchorMessageId ? { anchorMessageId: state.anchorMessageId } : {}),
+    });
+  }
+
+  /**
+   * 表单提交（P6.1）：与按钮向导**共用创建路径**。
+   * 目录先用 `validateDir` 校验（失败 → 回带错误说明的表单卡并保留已填项，不建会话）。
+   */
+  private async applySetupFormSubmit(action: CardAction): Promise<void> {
+    const values = parseSetupFormValues(action.formValue);
+    if (!values) {
+      await this.patchCard(action.messageId, buildSetupDoneCard("⚠️ 表单数据缺失", ["请重新发送 `/form` 填写。"]));
+      return;
+    }
+    const state = await this.deps.wizard.get(action.chatId);
+    if (!state) {
+      // 与按钮确认一致：向导状态已消费/失效 → 视为过期提交，不再建会话（防重放/重复提交）。
+      await this.patchCard(action.messageId, buildSetupDoneCard("⚠️ 表单已失效", ["请重新发送 `/form` 或 `/new` 打开表单。"]));
+      return;
+    }
+    const title = state.title?.trim() || defaultSessionTitle(this.now());
+    const preserved: SetupFormValuesInput = {
+      dir: values.dir,
+      ...(values.model ? { model: values.model } : {}),
+      ...(values.perm ? { perm: values.perm } : {}),
+    };
+
+    const validation = this.deps.validateDir(values.dir);
+    if (!validation.ok) {
+      await this.patchCard(
+        action.messageId,
+        await this.renderFormCard(state, { error: validation.message, values: preserved }),
+      );
+      return;
+    }
+
+    if (!values.perm) {
+      await this.patchCard(
+        action.messageId,
+        await this.renderFormCard(state, { error: "请选择权限档位。", values: { ...preserved, dir: validation.path } }),
+      );
+      return;
+    }
+
+    const model = values.model ? await this.resolveFormModel(values.model) : state?.model;
+    // 消费向导，防连点重复建会话。
+    await this.deps.wizard.cancel(action.chatId);
+    await this.createSessionFromSetup(action.chatId, action, {
+      title,
+      dir: validation.path,
+      perm: values.perm,
+      ...(model ? { model } : {}),
+      ...(state?.anchorMessageId ? { anchorMessageId: state.anchorMessageId } : {}),
+    });
+  }
+
+  /** 表单模型引用 → 尽量补全 name（列表不可用时保留原引用）。 */
+  private async resolveFormModel(ref: ModelRef): Promise<ModelRef> {
+    const models = await this.loadModels();
+    const matched = matchModel(`${ref.providerID}/${ref.id}`, models);
+    return matched.ok ? matched.model : ref;
+  }
+
+  /** 建会话统一创建路径（按钮确认 / 表单提交共用）。 */
+  private async createSessionFromSetup(
+    chatId: string,
+    action: CardAction,
+    opts: {
+      readonly title: string;
+      readonly dir: string;
+      readonly perm: PermissionPreset;
+      readonly model?: ModelRef;
+      readonly anchorMessageId?: string;
+    },
+  ): Promise<void> {
+    const { title, dir, perm, model } = opts;
     const permissions = presetToRuleset(perm);
     const gateMode = presetGateMode(perm);
 
@@ -590,24 +709,24 @@ export class SessionCommands {
       chatId,
       openId: action.operatorOpenId,
       setActive: true,
-      directory: state.dir,
+      directory: dir,
       permissions,
       perm,
       gateMode,
       ...(model ? { model } : {}),
     });
-    await this.deps.recent.addDir(state.dir);
+    await this.deps.recent.addDir(dir);
     if (model) await this.deps.recent.addModel(model);
 
     const readyCard = buildSessionReadyCard({
       title,
       sessionID: created.id,
-      dir: state.dir,
+      dir,
       ...(model ? { model: modelLabel(model) } : {}),
       perm: presetLabel(perm),
     });
 
-    const anchor = state.anchorMessageId ?? action.messageId;
+    const anchor = opts.anchorMessageId ?? action.messageId;
     const res = await this.deps.sender.replyCard(anchor, readyCard, { replyInThread: true });
     if (!res.ok || !res.messageId) {
       this.deps.log.warn("一键开话题失败", { error: res.error ?? "unknown" });
@@ -670,6 +789,23 @@ export class SessionCommands {
 
   private async sendConfirmCard(chatId: string, state: WizardStateLike): Promise<void> {
     await this.deps.sender.sendCard(chatId, buildConfirmCard(confirmInput(state)));
+  }
+
+  /** 渲染建会话表单卡（P6.1）：最近模型 + 常用模型 + 默认预选，供 `patch`/`send` 复用。 */
+  private async renderFormCard(
+    state: WizardStateLike | undefined,
+    over?: { readonly error?: string; readonly values?: SetupFormValuesInput },
+  ): Promise<object> {
+    const models = await this.loadModels();
+    const recent = await this.deps.recent.listModels();
+    return buildSetupFormCard({
+      models,
+      recent,
+      ...(state?.model ? { defaultModel: state.model } : {}),
+      ...(this.deps.allowedRoots ? { allowedRoots: this.deps.allowedRoots } : {}),
+      ...(over?.error ? { error: over.error } : {}),
+      ...(over?.values ? { values: over.values } : {}),
+    });
   }
 
   private async sendModelCardToThread(message: IncomingMessage, sessionID: string, page: number): Promise<void> {
@@ -770,6 +906,8 @@ function setupToast(value: SetupCardValue): object {
       return toast("info", "已翻页");
     case "confirm":
       return toast("success", "正在创建会话…");
+    case "form":
+      return toast("info", "已打开表单");
     case "cancel":
     default:
       return toast("info", "已取消");

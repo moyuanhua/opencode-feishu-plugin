@@ -50,7 +50,20 @@ export type SetupCardValue =
   | { readonly kind: "perm"; readonly preset: PermissionPreset; readonly sid?: string }
   | { readonly kind: "more"; readonly page: number; readonly sid?: string }
   | { readonly kind: "confirm" }
-  | { readonly kind: "cancel" };
+  | { readonly kind: "cancel" }
+  /** `/new` 首卡的「一次填完（表单）」按钮：把当前卡 patch 成表单卡。 */
+  | { readonly kind: "form" };
+
+/** 表单提交按钮 value 的标记（`cmd` 与审批卡/会话卡区分开）。 */
+export const SETUP_FORM_CMD = "setup.form";
+/** 表单容器 name（全局唯一）。 */
+export const SETUP_FORM_NAME = "setup_form";
+/** 表单内交互组件 name（全局唯一）。 */
+export const SETUP_FORM_FIELDS = { dir: "dir", model: "model", perm: "perm", submit: "setup_submit" } as const;
+/** 模型下拉最多展示的选项数（最近 + 常用）。 */
+export const SETUP_FORM_MAX_MODELS = 15;
+/** 表单默认权限档位（未显式选择时）。 */
+export const SETUP_FORM_DEFAULT_PERM: PermissionPreset = "edit";
 
 function button(text: string, type: "primary" | "default", value: Record<string, unknown>): object {
   return {
@@ -101,6 +114,7 @@ export function buildDirCard(input: { readonly recent: readonly string[]; readon
     recent.forEach((dir, i) => lines.push(`${i + 1}. \`${dir}\``));
   }
   const elements: object[] = [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }];
+  elements.push(button("📝 一次填完（表单）", "default", { wizard: "form" }));
   for (const dir of recent) {
     elements.push(button(`📁 ${shorten(dir, 40)}`, "default", { wizard: "dir", d: dir }));
   }
@@ -190,6 +204,173 @@ export function buildSetupDoneCard(title: string, lines: readonly string[], temp
   ]);
 }
 
+export interface SetupFormValuesInput {
+  readonly dir?: string;
+  readonly model?: ModelRef;
+  readonly perm?: PermissionPreset;
+}
+
+export interface SetupFormCardInput {
+  /** 可用模型（兜底选项来源）。 */
+  readonly models: readonly ModelRef[];
+  /** 最近使用模型（最新在前，优先展示）。 */
+  readonly recent: readonly ModelRef[];
+  /** 向导中已选模型 / 会话默认模型（`initial_option`）。 */
+  readonly defaultModel?: ModelRef;
+  readonly allowedRoots?: readonly string[];
+  /** 校验失败时的错误说明（会保留 `values` 已填项）。 */
+  readonly error?: string;
+  /** 预填/回显值。 */
+  readonly values?: SetupFormValuesInput;
+}
+
+/**
+ * 建会话**表单卡**（P6.1，纯函数，JSON 2.0）。
+ *
+ * 官方结构硬要求（见 FEISHU_FORM_REQUIREMENTS.md）：
+ * - `form` 容器放在 `body.elements` 根节点（不被其它组件嵌套）；
+ * - 表单内交互组件 `name` 全局唯一，且至少一个带 `form_action_type:"submit"` 的按钮；
+ * - 不出现 1.0 的 `tag:"action"` 容器。
+ */
+export function buildSetupFormCard(input: SetupFormCardInput): object {
+  const values = input.values ?? {};
+  const dirValue = values.dir ?? "";
+
+  // 模型下拉：默认/已选 → 最近 → 常用，去重后 cap 到 ~15。
+  const candidates = dedupeRefs([
+    ...(input.defaultModel ? [input.defaultModel] : []),
+    ...(values.model ? [values.model] : []),
+    ...input.recent,
+    ...input.models,
+  ]);
+  const defaultRef =
+    values.model ??
+    input.defaultModel ??
+    candidates[0];
+  const options = candidates.slice(0, SETUP_FORM_MAX_MODELS);
+  if (defaultRef && !options.some((m) => refKey(m) === refKey(defaultRef))) {
+    options.unshift(defaultRef);
+    options.length = Math.min(options.length, SETUP_FORM_MAX_MODELS);
+  }
+  const modelOptions = options.map((m) => ({
+    text: { tag: "plain_text", content: shorten(modelLabel(m), 80) },
+    value: refKey(m),
+  }));
+
+  const permOptions = PERMISSION_PRESETS.map((info) => ({
+    text: { tag: "plain_text", content: shorten(`${info.icon} ${info.label}：${info.description}`, 80) },
+    value: info.id,
+  }));
+
+  const lines = ["一次填好，点「创建会话」即可自动开话题。"];
+  if (input.allowedRoots && input.allowedRoots.length > 0) {
+    lines.push("", `目录需为**绝对路径**且在允许范围内：${input.allowedRoots.map((r) => `\`${r}\``).join("、")}`);
+  }
+
+  const formElements: object[] = [];
+  if (input.error) {
+    formElements.push({ tag: "markdown", content: truncateCardContent(`⚠️ **提交失败**：${input.error}`) });
+  }
+  formElements.push(
+    { tag: "markdown", content: truncateCardContent(lines.join("\n")) },
+    {
+      tag: "input",
+      name: SETUP_FORM_FIELDS.dir,
+      required: true,
+      width: "fill",
+      placeholder: {
+        tag: "plain_text",
+        content: "工作目录（绝对路径），例如 /home/ubuntu/work/my-app",
+      },
+      default_value: dirValue,
+    },
+    {
+      tag: "select_static",
+      name: SETUP_FORM_FIELDS.model,
+      type: "default",
+      width: "fill",
+      placeholder: { tag: "plain_text", content: "选择模型（可选，默认继承当前）" },
+      options: modelOptions,
+      ...(defaultRef && options.some((m) => refKey(m) === refKey(defaultRef))
+        ? { initial_option: refKey(defaultRef) }
+        : {}),
+    },
+    {
+      tag: "select_static",
+      name: SETUP_FORM_FIELDS.perm,
+      type: "default",
+      width: "fill",
+      placeholder: { tag: "plain_text", content: "选择权限档位" },
+      options: permOptions,
+      initial_option: values.perm ?? SETUP_FORM_DEFAULT_PERM,
+    },
+    {
+      tag: "column_set",
+      flex_mode: "none",
+      columns: [
+        {
+          tag: "column",
+          width: "weighted",
+          weight: 1,
+          elements: [
+            {
+              tag: "button",
+              name: SETUP_FORM_FIELDS.submit,
+              type: "primary",
+              text: { tag: "plain_text", content: "✅ 创建会话" },
+              behaviors: [{ type: "callback", value: { cmd: SETUP_FORM_CMD } }],
+              form_action_type: "submit",
+            },
+          ],
+        },
+      ],
+    },
+  );
+
+  return headerCard("📝 一次填完建会话", "blue", [
+    { tag: "form", name: SETUP_FORM_NAME, elements: formElements },
+  ]);
+}
+
+/** 表单提交数据（已解析/收敛）。 */
+export interface SetupFormSubmission {
+  readonly dir: string;
+  readonly model?: ModelRef;
+  readonly perm?: PermissionPreset;
+}
+
+/**
+ * 解析表单提交 `action.form_value`：`{ dir, model, perm }`。
+ * - `model`：`providerID/modelID`（首个 `/` 切分）；
+ * - `perm`：合法档位 key，否则忽略；
+ * - 非法/空输入返回 `undefined`；结构合法但 `dir` 为空时返回 `{dir:""}` 交由上层报错。
+ */
+export function parseSetupFormValues(formValue: unknown): SetupFormSubmission | undefined {
+  if (typeof formValue !== "object" || formValue === null || Array.isArray(formValue)) return undefined;
+  const rec = formValue as Record<string, unknown>;
+  const dir = typeof rec[SETUP_FORM_FIELDS.dir] === "string" ? (rec[SETUP_FORM_FIELDS.dir] as string).trim() : "";
+
+  let model: ModelRef | undefined;
+  const modelRaw = rec[SETUP_FORM_FIELDS.model];
+  if (typeof modelRaw === "string") {
+    const value = modelRaw.trim();
+    const slash = value.indexOf("/");
+    if (slash > 0 && slash < value.length - 1) {
+      model = { providerID: value.slice(0, slash), id: value.slice(slash + 1) };
+    }
+  }
+
+  const permRaw = rec[SETUP_FORM_FIELDS.perm];
+  const perm = isPreset(permRaw) ? permRaw : undefined;
+
+  return { dir, ...(model ? { model } : {}), ...(perm ? { perm } : {}) };
+}
+
+/** 是否为建会话表单的提交回调标记（`value = {cmd:"setup.form"}`）。 */
+export function isSetupFormAction(raw: unknown): boolean {
+  return typeof raw === "object" && raw !== null && (raw as Record<string, unknown>).cmd === SETUP_FORM_CMD;
+}
+
 function modelValue(model: ModelRef, sid: string | undefined): Record<string, unknown> {
   return {
     wizard: "model",
@@ -251,6 +432,8 @@ export function parseSetupCardValue(raw: unknown): SetupCardValue | undefined {
       return { kind: "confirm" };
     case "cancel":
       return { kind: "cancel" };
+    case "form":
+      return { kind: "form" };
     default:
       return undefined;
   }

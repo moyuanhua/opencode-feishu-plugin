@@ -5,7 +5,13 @@ import {
   buildModelCard,
   buildPermCard,
   buildSetupDoneCard,
+  buildSetupFormCard,
+  isSetupFormAction,
   parseSetupCardValue,
+  parseSetupFormValues,
+  SETUP_FORM_FIELDS,
+  SETUP_FORM_MAX_MODELS,
+  SETUP_FORM_NAME,
 } from "../src/feishu/setup-cards.js";
 import { MAX_CARD_BYTES } from "../src/feishu/cards.js";
 import type { ModelRef } from "../src/types.js";
@@ -21,14 +27,17 @@ const MODELS: ModelRef[] = Array.from({ length: 18 }, (_, i) => ({
 }));
 
 describe("buildDirCard", () => {
-  test("最近目录按钮 + 手动输入提示 + allowedRoots", () => {
+  test("最近目录按钮 + 手动输入提示 + allowedRoots + 表单入口", () => {
     const card = buildDirCard({ recent: ["/home/ubuntu/work/a", "/home/ubuntu/work/b"], allowedRoots: ["/home/ubuntu"] });
     expect(json(card)).toContain("手动输入");
     expect(json(card)).toContain("/dir");
     expect(json(card)).toContain("/home/ubuntu/work/a");
     expect(json(card)).toContain("允许的根目录");
     const buttons = bodyElements(card).filter((e) => e.tag === "button");
-    expect(buttons.length).toBe(2);
+    // 「一次填完（表单）」+ 2 个最近目录
+    expect(buttons.length).toBe(3);
+    expect(json(card)).toContain("一次填完");
+    expect(json(card)).toContain('"wizard":"form"');
     expect((card as { schema: string }).schema).toBe("2.0");
   });
 });
@@ -117,6 +126,7 @@ describe("parseSetupCardValue", () => {
     expect(parseSetupCardValue({ wizard: "more", page: 3 })).toEqual({ kind: "more", page: 3 });
     expect(parseSetupCardValue({ wizard: "confirm" })).toEqual({ kind: "confirm" });
     expect(parseSetupCardValue({ wizard: "cancel" })).toEqual({ kind: "cancel" });
+    expect(parseSetupCardValue({ wizard: "form" })).toEqual({ kind: "form" });
   });
 
   test("兼容 JSON 字符串 value，非法返回 undefined", () => {
@@ -134,5 +144,115 @@ describe("buildSetupDoneCard", () => {
     const card = buildSetupDoneCard("✅ 完成", ["line"], "green");
     expect(json(card)).toContain("完成");
     expect(bodyElements(card).some((e) => e.tag === "button")).toBe(false);
+  });
+});
+
+/** 递归收集表单内的组件（含 column_set/column 嵌套）。 */
+function collectFormElements(elements: readonly Record<string, unknown>[]): Record<string, unknown>[] {
+  const out: Record<string, unknown>[] = [];
+  for (const el of elements) {
+    out.push(el);
+    if (Array.isArray(el.elements)) out.push(...collectFormElements(el.elements as Record<string, unknown>[]));
+    if (Array.isArray(el.columns)) {
+      for (const col of el.columns as Record<string, unknown>[]) {
+        if (Array.isArray(col.elements)) out.push(...collectFormElements(col.elements as Record<string, unknown>[]));
+      }
+    }
+  }
+  return out;
+}
+
+const formRoot = (card: object): Record<string, unknown> => bodyElements(card)[0]!;
+
+describe("buildSetupFormCard（P6.1 表单卡）", () => {
+  test("form 在 body.elements 根节点且为唯一顶层元素，schema 2.0 + update_multi", () => {
+    const card = buildSetupFormCard({ models: MODELS, recent: MODELS.slice(0, 3), defaultModel: MODELS[0] });
+    const roots = bodyElements(card);
+    expect(roots).toHaveLength(1);
+    expect(roots[0]!.tag).toBe("form");
+    expect(roots[0]!.name).toBe(SETUP_FORM_NAME);
+    expect((card as { schema: string }).schema).toBe("2.0");
+    expect((card as { config: { update_multi: boolean } }).config.update_multi).toBe(true);
+  });
+
+  test("交互组件 name 全局唯一 + input 必填 + 提交按钮带提交行为", () => {
+    const card = buildSetupFormCard({ models: MODELS, recent: MODELS.slice(0, 3) });
+    const form = formRoot(card);
+    const els = collectFormElements(form.elements as Record<string, unknown>[]);
+    const names = els.map((e) => e.name).filter((n): n is string => typeof n === "string");
+    expect(new Set(names).size).toBe(names.length);
+    expect(names).toEqual(expect.arrayContaining(Object.values(SETUP_FORM_FIELDS)));
+
+    const input = els.find((e) => e.tag === "input")!;
+    expect(input.required).toBe(true);
+
+    const submit = els.find((e) => e.form_action_type === "submit")!;
+    expect(submit).toBeTruthy();
+    expect(submit.tag).toBe("button");
+    const behaviors = submit.behaviors as Array<{ type: string; value: { cmd: string } }>;
+    expect(behaviors[0]!.type).toBe("callback");
+    expect(behaviors[0]!.value.cmd).toBe("setup.form");
+  });
+
+  test("不含 1.0 的 tag:action 容器", () => {
+    expect(json(buildSetupFormCard({ models: MODELS, recent: [] }))).not.toContain('"tag":"action"');
+  });
+
+  test("模型下拉 cap 15 + initial_option 默认模型；权限四档 initial_option", () => {
+    const many = Array.from({ length: 40 }, (_, i) => ({ providerID: "p", id: `m${i}`, name: `M${i}` }));
+    const card = buildSetupFormCard({ models: many, recent: [], defaultModel: many[0] });
+    const els = collectFormElements(formRoot(card).elements as Record<string, unknown>[]);
+    const model = els.find((e) => e.tag === "select_static" && e.name === SETUP_FORM_FIELDS.model)!;
+    const modelOptions = model.options as unknown[];
+    expect(modelOptions.length).toBeLessThanOrEqual(SETUP_FORM_MAX_MODELS);
+    expect(model.initial_option).toBe("p/m0");
+
+    const perm = els.find((e) => e.tag === "select_static" && e.name === SETUP_FORM_FIELDS.perm)!;
+    expect((perm.options as unknown[]).length).toBe(4);
+    expect(perm.initial_option).toBe("edit");
+  });
+
+  test("错误说明 + 保留已填项（dir/perm）", () => {
+    const card = buildSetupFormCard({
+      models: MODELS,
+      recent: [],
+      error: "目录不在允许范围内。",
+      values: { dir: "/bad/dir", perm: "trust" },
+    });
+    const text = json(card);
+    expect(text).toContain("目录不在允许范围内");
+    const els = collectFormElements(formRoot(card).elements as Record<string, unknown>[]);
+    expect(els.find((e) => e.tag === "input")!.default_value).toBe("/bad/dir");
+    expect(els.find((e) => e.name === SETUP_FORM_FIELDS.perm)!.initial_option).toBe("trust");
+  });
+
+  test("体积在 30KB 内", () => {
+    const card = buildSetupFormCard({ models: MODELS, recent: MODELS.slice(0, 5), allowedRoots: ["/home/ubuntu"] });
+    expect(Buffer.byteLength(json(card), "utf8")).toBeLessThanOrEqual(MAX_CARD_BYTES);
+  });
+});
+
+describe("parseSetupFormValues / isSetupFormAction（P6.1）", () => {
+  test("解析 dir / model(provider/id) / perm", () => {
+    expect(parseSetupFormValues({ dir: " /home/ubuntu/work ", model: "anthropic/claude-sonnet-4", perm: "readonly" })).toEqual({
+      dir: "/home/ubuntu/work",
+      model: { providerID: "anthropic", id: "claude-sonnet-4" },
+      perm: "readonly",
+    });
+  });
+
+  test("非法 model / perm 被忽略；非对象返回 undefined", () => {
+    expect(parseSetupFormValues({ dir: "/x", model: "no-slash", perm: "bogus" })).toEqual({ dir: "/x" });
+    expect(parseSetupFormValues({ dir: "", model: "a/" })).toEqual({ dir: "" });
+    expect(parseSetupFormValues(null)).toBeUndefined();
+    expect(parseSetupFormValues([])).toBeUndefined();
+    expect(parseSetupFormValues("x")).toBeUndefined();
+  });
+
+  test("isSetupFormAction 只认 {cmd:'setup.form'}", () => {
+    expect(isSetupFormAction({ cmd: "setup.form" })).toBe(true);
+    expect(isSetupFormAction({ wizard: "form" })).toBe(false);
+    expect(isSetupFormAction({ cmd: "new" })).toBe(false);
+    expect(isSetupFormAction(null)).toBe(false);
   });
 });

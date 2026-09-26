@@ -119,6 +119,42 @@ describe("parseCardAction", () => {
   test("无 operator 返回 undefined", () => {
     expect(parseCardAction({ action: { value: {} } })).toBeUndefined();
   });
+
+  test("表单提交：同时读取 action.value 与 action.form_value（P6.1）", () => {
+    const action = parseCardAction({
+      context: { open_message_id: "om_form", open_chat_id: "oc_1" },
+      operator: { open_id: "ou_op" },
+      action: {
+        value: { cmd: "setup.form" },
+        form_value: { dir: "/home/ubuntu/work", model: "anthropic/claude-sonnet-4-5", perm: "edit" },
+      },
+    });
+    expect(action?.rawValue).toEqual({ cmd: "setup.form" });
+    expect(action?.formValue).toEqual({
+      dir: "/home/ubuntu/work",
+      model: "anthropic/claude-sonnet-4-5",
+      perm: "edit",
+    });
+  });
+
+  test("纯 value 回调不带 formValue（向后兼容）", () => {
+    const action = parseCardAction({
+      context: { open_message_id: "om_card", open_chat_id: "oc_1" },
+      operator: { open_id: "ou_op" },
+      action: { value: { t: "tok", d: "once" } },
+    });
+    expect(action?.rawValue).toEqual({ t: "tok", d: "once" });
+    expect(action && "formValue" in action).toBe(false);
+  });
+
+  test("仅 form_value（无 value）也能解析", () => {
+    const action = parseCardAction({
+      operator: { open_id: "ou_op" },
+      action: { form_value: { dir: "/x" } },
+    });
+    expect(action?.rawValue).toBeUndefined();
+    expect(action?.formValue).toEqual({ dir: "/x" });
+  });
 });
 
 describe("describeCardActionEvent（P5.2 回调诊断）", () => {

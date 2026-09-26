@@ -45,6 +45,11 @@ export interface IncomingMessage {
 export interface CardAction {
   /** `action.value` 原始值（对象或字符串）。 */
   readonly rawValue: unknown;
+  /**
+   * `action.form_value`（P6.1）：表单容器提交时携带，键 = 表单内组件的 `name`。
+   * 仅表单提交回调存在；纯按钮回调没有该字段（向后兼容）。
+   */
+  readonly formValue?: Readonly<Record<string, unknown>>;
   /** 卡片的 open_message_id，用于回填/更新卡片。 */
   readonly messageId: string;
   readonly chatId: string;
