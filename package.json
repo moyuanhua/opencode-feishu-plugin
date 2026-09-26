@@ -1,7 +1,7 @@
 {
-  "name": "opencode-feishu-v2",
+  "name": "opencode-feishu-plugin",
   "version": "0.1.0",
-  "description": "OpenCode V2 飞书插件 — 长连接单聊接入 + 卡片按钮审批 (最小权限, p2p only)",
+  "description": "Feishu/Lark plugin for OpenCode V2 — single-user topics as sessions, in-card permission approvals, streaming cards. Minimal permissions, no public endpoint.",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -14,6 +14,7 @@
   "files": [
     "dist",
     "README.md",
+    "README.en.md",
     "LICENSE"
   ],
   "scripts": {
@@ -29,11 +30,22 @@
     "feishu",
     "lark",
     "飞书",
-    "飞书机器人"
+    "飞书机器人",
+    "lark-bot",
+    "ai-agent",
+    "coding-agent"
   ],
   "license": "MIT",
   "engines": {
     "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/moyuanhua/opencode-feishu-plugin.git"
+  },
+  "homepage": "https://github.com/moyuanhua/opencode-feishu-plugin#readme",
+  "bugs": {
+    "url": "https://github.com/moyuanhua/opencode-feishu-plugin/issues"
   },
   "dependencies": {
     "@larksuiteoapi/node-sdk": "^1.74.0"

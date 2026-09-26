@@ -71,7 +71,8 @@ export interface ResolvedConfig {
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
-const DEFAULT_ALLOWED_ROOTS = ["/home/ubuntu"];
+/** 默认可作为会话工作目录的根：当前用户家目录（对外发布不能写死某个人的目录）。 */
+const DEFAULT_ALLOWED_ROOTS = [homedir()];
 const GENESIS_SECRET_SALT = "opencode-feishu-v2/approval/v1";
 const VALID_GATES: readonly PermissionGate[] = ["off", "notify", "gate", "lockdown"];
 const VALID_LOG_LEVELS: readonly LogLevel[] = ["debug", "info", "warn", "error"];

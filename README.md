@@ -1,536 +1,275 @@
-# opencode-feishu-v2
+# opencode-feishu-plugin
 
-把 [OpenCode](https://opencode.ai) 接入飞书**单聊**，并把 OpenCode 的**权限审批**做成飞书**卡片按钮**。
+[English](./README.en.md) | **简体中文**
 
-> **只使用 OpenCode V2 插件 API**（`Plugin.define({ id, setup(ctx) })`），不依赖任何 `@opencode-ai/*` V1 包。
-> 通过飞书**长连接**（WebSocket）收发事件与卡片回调，**不监听端口、不暴露公网地址**。
+把 [OpenCode](https://opencode.ai) 接进飞书：**一个飞书话题 = 一个 OpenCode 会话**。你在飞书里用话题管理多个会话，在话题里指挥 AI 写代码，**权限审批直接在飞书卡片上点按钮**。
 
----
-
-## 能力（P0）
-
-| 能力 | 说明 |
-| --- | --- |
-| 单聊对话 | 飞书单聊消息 → 映射/新建 OpenCode session → `ctx.session.prompt` |
-| 流式回复 | 订阅 `session.text.delta`，把 assistant 文本增量以**原地更新的飞书卡片**回填（节流 ≥400ms） |
-| 卡片审批 | `permission.evaluate` 降级为 `ask` → 发审批卡（允许一次 / 始终允许 / 拒绝）→ 点击后 `permission.reply` 闭环 |
-| 会话管理 | 一个飞书单聊可绑定**多个** opencode 会话：`/new` `/sessions` `/use` `/current` `/stop`，以及会话列表卡片按钮切换 |
-| 话题 = 会话（P5） | 一个飞书**话题**即一个 opencode 会话；`/new` 自动开话题「一键进入」，话题内消息与回复都留在话题内（`threadRouting` 可回退） |
-| 立即回执 | 收到消息**先**发一张运行卡片（思考中 / 已排队）再发起 prompt |
-| 原生排队 | session 正在执行时用 `delivery:"queue"` 排队，空闲时 `delivery:"steer"` |
-| 工具可见 | 工具调用以折叠面板回填卡片（≥3 自动折叠，最新一个展开） |
-| 跨实例去重 | 按 `messageId` 经 `ctx.storage` 去重，防重复投递导致双处理 |
-| 建会话向导（P6） | 主聊天流 `/new` 起向导：目录 → 模型 → 权限 → 确认，确认后自动开话题「一键进入」 |
-| 权限预设（P6） | 只读 / 可编辑 / 高风险审批 / 完全信任 四档，落到会话级 ruleset + gate，话题内 `/perm` 可改 |
-| 会话内操作（P6） | 话题内 `/model` 切换模型、`/perm` 改权限、`/cd` 迁移工作目录；运行卡页脚显示当前模型 |
+> **只用 OpenCode V2 插件 API**（`Plugin.define({ id, setup(ctx) })`），不依赖任何 V1 包。
+> **纯长连接**（WebSocket）收发事件与卡片回调，**不监听端口、不需要公网地址**。
 
 ---
 
-## 一、最小权限集（精确 scope 名，一个不多）
+## 亮点
 
-| 类型 | 项 | 精确值 | 用途 |
-| --- | --- | --- | --- |
-| 应用能力 | 机器人 | Bot | 收发消息/卡片 |
-| 权限 | 读取单聊消息 | `im:message.p2p_msg:readonly` | 接收用户发给机器人的单聊消息 |
-| 权限 | 以应用身份发消息 | `im:message:send_as_bot` | 发送消息、卡片，及**更新卡片**（`im.message.patch` 满足任一：`im:message` / `im:message:send_as_bot` / `im:message:update`） |
-| 事件订阅 | 接收消息 | `im.message.receive_v1` | 单聊消息触发 |
-| 回调订阅 | 卡片回传交互 | `card.action.trigger` | 按钮点击（**零权限要求**） |
-| 可用范围 | 可用成员 | **仅本人（1 人）** | 平台层单人边界 |
-| 订阅方式 | 长连接 | 使用长连接接收事件/回调 | 无需公网地址/端口 |
-
-**明确不申请**：任何 `im:message.group_*` / `im:message.group_at_*` 等群权限。机器人**物理上收不到群消息**，单人边界由平台 scope 层保证，而非只靠代码判断。
-
-> 卡片更新走 `PATCH /open-apis/im/v1/messages/:message_id`，官方文档明确该接口权限「满足任一：`im:message`、`im:message:send_as_bot`、`im:message:update`」——因此**不需要额外申请 CardKit 权限**。
+| | 说明 |
+|---|---|
+| 🔐 **最小权限** | 只要 2 个 scope（单聊读 + 发消息）。**不申请任何群权限**，机器人物理上收不到群消息 |
+| 💬 **话题 = 会话** | 每个飞书话题对应一个 OpenCode 会话。主聊天流只做管理，话题里干活，互不串台 |
+| 🚀 **一键进入** | `/new` 后机器人自动在你消息下开话题，无需手动创建 |
+| 🧭 **建会话向导** | 目录 → 模型 → 权限 → 确认。目录有白名单校验，防误开在系统目录 |
+| ✅ **卡片审批** | 权限请求变成飞书卡片（允许一次 / 始终允许 / 拒绝），点击即批准，带签名防伪防重放 |
+| 🪜 **权限预设** | 只读 / 可编辑 / 高风险审批 / 完全信任，四档一次选定，告别逐次审批 |
+| 📊 **实时可见** | 先回执「思考中」，工具调用实时上卡（≥3 个自动折叠），文本流式更新，页脚显示当前模型 |
+| 🧵 **原生排队** | 会话忙时自动排队（OpenCode 原生 `delivery:"queue"`），不丢消息 |
+| 🚫 **无端口** | 全程长连接，服务器不用开放任何入站端口 |
 
 ---
 
-## 二、飞书后台配置步骤
+## 一、飞书后台配置（约 3 分钟）
 
-1. 在[飞书开放平台](https://open.feishu.cn/app)创建**自建应用**。
+1. 打开 [飞书开放平台](https://open.feishu.cn/app) → **创建企业自建应用**。
 2. **添加应用能力 → 机器人**。
-3. **权限管理**，只开通：
-   - `im:message.p2p_msg:readonly`
-   - `im:message:send_as_bot`
-4. **事件与回调 → 事件配置**：
-   - 订阅方式选择**「使用长连接接收事件」**（不是 Webhook）。
-   - 添加事件 `im.message.receive_v1`。
-5. **事件与回调 → 回调配置**：
-   - 订阅方式同样选**长连接**。
-   - 添加回调 `card.action.trigger`（无需额外权限）。
-6. **应用发布 → 版本管理与发布**：
-   - **可用范围 = 仅本人**（只勾选你自己 1 人）。
-   - 创建版本并发布，等待管理员/自己审核通过。
-7. 记下 **App ID**（`cli_...`）与 **App Secret**，填入 OpenCode 配置（见下）。
+3. **权限管理**，只开通这两个：
+   - `im:message.p2p_msg:readonly` —— 读取用户发给机器人的单聊消息
+   - `im:message:send_as_bot` —— 以应用身份发消息（也用于更新卡片）
+4. **事件与回调 → 事件配置**：订阅方式选 **「使用长连接接收事件」**（不要选 Webhook），添加事件 `im.message.receive_v1`。
+5. **事件与回调 → 回调配置**：订阅方式同样选 **长连接**，添加回调 `card.action.trigger`（**该项零权限要求**）。
+6. **版本管理与发布**：**可用范围 = 仅本人**（只勾你自己），创建版本并发布。
+7. 记下 **App ID**（`cli_…`）与 **App Secret**。
+
+> **为什么不申请群权限？** 本插件的设计是"一个人的遥控台"。不申请群权限，机器人**物理上收不到群消息**，
+> 单人边界由平台 scope 层保证，而不是只靠代码判断。
 
 ---
 
-## 三、部署
+## 二、安装
 
-本插件通过 opencode 的 **plugins 目录自动加载**：
+### 1. 安装插件
 
-```
-~/.config/opencode/plugins/
-  feishu/          # 插件本体（目录内需 package.json + main 入口）
-  feishu.json      # 插件配置（可选；建议权限 600）
-```
-
-### 1. 放入插件目录
-
-**方式 A：拷贝构建产物**
+**方式 A：npm（推荐）**
 
 ```bash
-cd /path/to/opencode-feishu-v2
-npm install && npm run build
+cd ~/.config/opencode
+npm init -y                       # 若尚无 package.json
+npm install opencode-feishu-plugin
+```
+
+**方式 B：本地构建**
+
+```bash
+git clone https://github.com/moyuanhua/opencode-feishu-plugin.git
+cd opencode-feishu-plugin && npm install && npm run build
+```
+
+> 构建产物 `dist/index.js` **已自包含**飞书 SDK 等依赖，运行时不需要额外 `node_modules`。
+
+### 2. 让 OpenCode 加载插件
+
+OpenCode 会**自动加载 `<configDir>/plugins/<任意名>/` 下的插件目录**。
+把插件放进该目录，**不要**在 `opencode.json` 的 `plugins` 数组里写本地路径（实测无效；写包名会触发 npm install，私有包会 404）。
+
+```bash
+# npm 方式
 mkdir -p ~/.config/opencode/plugins/feishu
-cp -r dist package.json ~/.config/opencode/plugins/feishu/
+cp -r ~/.config/opencode/node_modules/opencode-feishu-plugin/{dist,package.json} \
+      ~/.config/opencode/plugins/feishu/
+
+# 本地构建方式同理，把 dist 与 package.json 拷进 plugins/feishu/
 ```
 
-> 构建产物 `dist/index.js` 已自包含飞书 SDK，运行时无需额外 `node_modules`。
+### 3. 写配置
 
-**方式 B：npm 安装到该目录**（未发布公共 registry 时用本地 tarball / 私有 registry）
-
-```bash
-cd ~/.config/opencode/plugins/feishu
-npm init -y
-npm install /path/to/opencode-feishu-v2-0.1.0.tgz
-```
-
-放入后执行 `opencode reload` 即时生效（插件目录内必须有 `package.json`，且 `main` 指向入口）。
-
-> ⚠️ **不要**在 `~/.config/opencode/opencode.json` 的 `plugins` 数组里写**本地路径**（如 `"./plugins/feishu"` 或绝对路径）——实测**无效**。
-> 写成包名（`"opencode-feishu-v2"`）则会触发 `npm install`，私有包会 **404**。
-> 正确做法就是上面把插件放进 `plugins/<name>/` 目录，**无需**在 `plugins` 数组里引用它。
-
-### 2. 配置：`<configDir>/plugins/feishu.json`
-
-配置文件字段与 `options` **完全一致**，并支持 `${ENV}` / `{env:ENV}` 展开。
-`configDir` 取 `OPENCODE_CONFIG_DIR`（若设置），否则 `~/.config/opencode`：
+`<configDir>/plugins/feishu.json`（`configDir` = `OPENCODE_CONFIG_DIR` 或 `~/.config/opencode`）：
 
 ```bash
 install -m 600 /dev/null ~/.config/opencode/plugins/feishu.json
 cat > ~/.config/opencode/plugins/feishu.json <<'JSON'
 {
   "appId": "{env:FEISHU_APP_ID}",
-  "appSecret": "{env:FEISHU_APP_SECRET}",
-  "allowUsers": ["ou_你的open_id"],
-  "permissionGate": "gate",
-  "allowTools": ["read", "glob", "grep", "webfetch"],
-  "stream": true,
-  "streamThrottleMs": 400
+  "appSecret": "{env:FEISHU_APP_SECRET}"
 }
 JSON
 chmod 600 ~/.config/opencode/plugins/feishu.json
 ```
 
-**优先级（字段级）**：`options` > `<configDir>/plugins/feishu.json` > 环境变量。
+把凭证放进 OpenCode **服务进程**的环境变量（不是你的交互 shell）：
 
-- 环境变量兜底仅针对 `FEISHU_APP_ID` / `FEISHU_APP_SECRET`，便于**零配置**运行：把插件放进目录后，只在服务进程里设置这两个变量即可。
-- **配置错误永不导致 opencode 崩溃**：文件缺失 / 非法 JSON / 顶层非对象 / 读取失败都只 `warn` 并退回下一优先级；最终缺 `appId`/`appSecret` 时**禁用插件**（不抛异常）。
-- App Secret **永远不写入日志**，配置告警文案也不会回显 secret 明文。
-
-> 🔐 建议 `feishu.json` 权限设为 `600`（`chmod 600`），避免同机其他用户读取 App Secret。
-
-### 3. `opencode.json` 的 `options`（可选）
-
-仅当你把此包发布到可解析的 registry 时，才在 `~/.config/opencode/opencode.json` 用**对象形式**传 `options`：
-
-```jsonc
-{
-  "plugins": [
-    {
-      "package": "opencode-feishu-v2",
-      "options": { "appId": "{env:FEISHU_APP_ID}", "appSecret": "{env:FEISHU_APP_SECRET}" }
-    }
-  ]
-}
+```bash
+opencode service set env FEISHU_APP_ID cli_xxxxxxxx
+opencode service set env FEISHU_APP_SECRET xxxxxxxx
 ```
 
-> 目录部署 + `feishu.json` 已能满足配置，**通常不需要**这一节；若同时存在，`options` 优先级最高。
-> `{env:FEISHU_APP_ID}` 由 OpenCode 在服务进程内解析，本插件也会兜底解析 `{env:NAME}` / `${NAME}`。
-> **App Secret 永远不会写入日志**——日志里只记录 `hasAppSecret: true/false`。
+也可以直接把明文写进 `feishu.json`（权限记得 `600`）。**优先级**：`options` > `feishu.json` > 环境变量。
 
-### 配置字段
+### 4. 生效与确认
+
+```bash
+opencode reload          # 重新加载配置与插件
+opencode mcp list        # 顺带确认服务健康
+```
+
+在飞书里给机器人发一条消息。**第一次发消息的人会被自动绑定为 owner**，之后其他人被静默忽略。
+
+---
+
+## 三、怎么用
+
+### 主聊天流（管理台）
+
+主聊天流**只做管理**，普通文本不会进入任何会话。
+
+| 命令 | 作用 |
+|---|---|
+| `/new [标题]` | 起**建会话向导**：目录 → 模型 → 权限 → 确认 → 自动开话题 |
+| `/sessions`（`/ls`） | 会话列表卡片（切换 / 新建） |
+| `/use <序号\|id前缀>` | 切换当前会话 |
+| `/current` | 查看当前会话 |
+| `/stop` | 中断当前会话正在跑的任务 |
+| `/help` | 命令列表 |
+
+### 话题内（干活）
+
+一个话题 = 一个会话。**在话题里发普通文本就是给 AI 下指令**；回复会留在同一话题内。
+
+| 命令 | 作用 |
+|---|---|
+| `/model` | 切换本会话模型 |
+| `/perm` | 修改本会话权限档位 |
+| `/cd <绝对路径>` | 迁移本会话工作目录 |
+| `/current` `/stop` `/help` | 同主聊天流，作用于本话题会话 |
+
+### 建会话向导
+
+```
+/new 修一下登录 bug
+  ↓
+📁 选目录   ← 最近使用目录按钮，或发 /dir /path/to/project
+  ↓
+🧠 选模型   ← 最近使用按钮 /「更多」分页，或发 /model <关键词>
+  ↓
+🔐 选权限   ← 四档，一句话说明
+  ↓
+✅ 确认     ← 展示 目录/模型/权限 汇总，点「创建」
+  ↓
+自动在你消息下开话题，会话就绪卡出现在话题里 → 直接在话题里开始干活
+```
+
+随时发 `/cancel` 可放弃向导。
+
+### 四档权限预设
+
+| 档位 | 含义 | 会话级规则 |
+|---|---|---|
+| 🔒 只读 | 只看不改，最安全 | 禁止 `edit` / `shell` |
+| ✏️ 可编辑 | 改文件免审批，**跑命令要问** | 允许 `edit`，`shell` 转审批 |
+| ⚠️ 高风险审批 | 改文件 / 跑命令 / 越目录都问 | 高风险动作逐次审批 |
+| 🔓 完全信任 | 什么都不问 | 全部放行 |
+
+档位写入**会话级** `permissions`，可在话题内用 `/perm` 随时改，不影响其它会话。
+
+---
+
+## 四、配置项
+
+`<configDir>/plugins/feishu.json`（或 OpenCode `plugins[].options`），支持 `{env:NAME}` / `${NAME}` 展开。
 
 | 字段 | 类型 | 默认 | 说明 |
-| --- | --- | --- | --- |
-| `appId` | string | — | 飞书 App ID，必填 |
-| `appSecret` | string | — | 飞书 App Secret，必填；缺失则**禁用插件**（不抛异常） |
-| `allowUsers` | string[] | `[]` | open_id 白名单。**空 = 仅应用 owner**：首个发消息者被绑定为 owner 并持久化到 `ctx.storage` |
-| `permissionGate` | `off`\|`notify`\|`gate`\|`lockdown` | `gate` | 权限门档位，见下 |
-| `allowTools` | string[] | `["read","glob","grep","webfetch"]` | 免打扰白名单：命中直接放行；支持 `*` / `prefix*` |
-| `denyTools` | string[] | `[]` | 强制拒绝名单（可选），优先于 `allowTools` |
-| `stream` | boolean | `true` | 是否用流式卡片回填回复 |
-| `streamThrottleMs` | number | `400` | 卡片更新最小间隔，**下限强制 400ms**（飞书单条消息更新 5 QPS） |
-| `threadRouting` | boolean | `true` | 话题路由总开关（P5）。`false` = 回到 P3 行为（忽略 `thread_id`，主聊天流普通文本进当前会话），出问题一键回退 |
-| `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | stderr 结构化日志级别 |
-| `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
+|---|---|---|---|
+| `appId` | string | — | 飞书 App ID（**必填**，缺失则禁用插件，不抛异常） |
+| `appSecret` | string | — | 飞书 App Secret（**必填**，永不写入日志） |
 | `domain` | `feishu`\|`lark` | `feishu` | 飞书 / Lark 国际版 |
-| `signSecret` | string | 由 appSecret 派生 | 审批按钮 token 的 HMAC 密钥（一般不用配） |
-| `maxResourcesShown` | number | `8` | 审批卡最多展示的 resource 行数 |
-| `allowedRoots` | string[] | `["/home/ubuntu"]` | 允许作为会话工作目录的根目录（P6）。目录须在其之下；`/`、家目录根、系统目录一律拒绝 |
-| `recentDirsLimit` | number | `5` | 「最近使用目录」列表长度（P6，夹取 1–20） |
-| `recentModelsLimit` | number | `5` | 「最近使用模型」列表长度（P6，夹取 1–20） |
-
-### `permissionGate` 档位
-
-| 档位 | 行为 |
-| --- | --- |
-| `off` | 全局不介入；**但**带权限预设（P6）的会话仍按预设生效（需要 evaluate hook） |
-| `notify` | 不改变原生判定；但**本来就产生**的 `permission.asked` 会推送审批卡 |
-| `gate` | 白名单外一律置为 `ask` → 弹飞书审批卡（推荐默认） |
-| `lockdown` | 白名单外一律 `deny`（不弹卡，最严格） |
-
-> ⚠️ **关键安全边界**：`gate` 的 `ask` **只对「能从飞书投递」的会话生效**（即通过本插件发起、存在 chat↔session 映射的会话）。
-> TUI 或其它来源的会话不会被降级为 `ask`，否则会因为没有审批出口而**永久挂起**。
+| `allowUsers` | string[] | `[]` | open_id 白名单。**空 = 仅应用 owner**（首个发消息者绑定并持久化） |
+| `permissionGate` | `off`\|`notify`\|`gate`\|`lockdown` | `gate` | 全局审批门档位 |
+| `allowTools` | string[] | `["read","glob","grep","webfetch"]` | 免审批白名单，支持 `prefix*` |
+| `denyTools` | string[] | `[]` | 强制拒绝（优先于白名单） |
+| `allowedRoots` | string[] | `[用户家目录]` | 允许作为会话工作目录的根目录；系统目录 / `/` / 家目录根一律拒绝 |
+| `stream` | boolean | `true` | 是否用流式卡片回填回复 |
+| `streamThrottleMs` | number | `400` | 卡片更新最小间隔（下限 400ms，飞书限 5 QPS） |
+| `threadRouting` | boolean | `true` | 话题路由总开关；`false` 时主聊天流普通文本进当前会话（回退用） |
+| `recentDirsLimit` | number | `5` | 「最近使用目录」条数（1–20） |
+| `recentModelsLimit` | number | `5` | 「最近使用模型」条数（1–20） |
+| `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | 日志级别（只记 secret 存在性，绝不含明文） |
+| `logFile` | string \| boolean | — | `true` = 写 `<configDir>/plugins/feishu.log`；或指定路径。**服务模式下插件 stderr 会被丢弃，排查问题请开它** |
+| `gatewayLocation` | string | — | 只在该 location 启动网关。OpenCode 会按 location 多次加载全局插件（独立 VM context，无法用进程内单例收敛）；**强烈建议设为你常用的工作目录**，否则会出现多个长连接 |
+| `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
+| `maxResourcesShown` | number | `8` | 审批卡最多展示的资源行数 |
 
 ---
 
-## 四、审批卡工作流与安全
+## 五、安全设计
 
 ```
-permission.evaluate (hook)                    permission.asked (SSE)
-─────────────────────────                     ──────────────────────
-allowTools 命中      → allow                  事件携带 {id, sessionID, action, resources, save, ...}
-denyTools / lockdown → deny                            │
-其它                 → ask ───────────────────────────┘
-                                                        ▼
-                                          发飞书审批卡（按钮 value = 自签 token）
-                                                        │ 用户点击
-                                                        ▼
-                              card.action.trigger（长连接到达，3 秒内回 toast）
-                                                        │
-                          校验：operator.open_id ∈ 白名单 → token 签名 → 绑定字段 → 防重放
-                                                        ▼
-                              ctx.permission.reply({ sessionID, requestID, reply })
+permission.evaluate (插件 hook)                 permission.asked (事件流)
+──────────────────────────                      ──────────────────────
+白名单工具      → allow                          事件带 {id, sessionID, action, resources, save}
+拒绝名单        → deny                                     │
+其余（按会话预设）→ ask ─────────────────────────────────────┘
+                                                           ▼
+                                            发飞书审批卡（按钮 value = 自签 token）
+                                                           │ 用户点击
+                                                           ▼
+                                   card.action.trigger（长连接到达，3 秒内回 toast）
+                                                           │
+                                   校验：点击人在白名单 → 验签 → 绑定字段 → 防重放
+                                                           ▼
+                                      ctx.permission.reply({sessionID, requestID, reply})
 ```
 
-- **自签 token**：HMAC-SHA256，绑定 `requestID + sessionID + operatorOpenId + 过期时间 + nonce`。
-  token 由 appSecret 派生密钥签发，任何人伪造/转发/重放都会被拒。
-- **防重放**：nonce 单次消费；重复点击返回「该操作已处理」。
-- **`always` 语义**：仅当请求带 `save[]` 时才会持久化为「已保存权限」；否则等价于 `once`（卡片文案已提示）。
-- **`reject` 级联**：会同时驳回**同一 session 内其余挂起请求**（卡片文案已警示）。
-- 卡片更新前后都在 `config` 声明 `update_multi: true`（飞书 `im.message.patch` 的硬要求）。
+- **自签 token**：HMAC-SHA256，绑定 `requestID + sessionID + 点击人 openId + 过期时间 + nonce`；伪造 / 转发 / 重放都会被拒。
+- **只对飞书来源的会话生效**：没有 chat↔session 映射的会话（例如你本地 TUI）**不会被降级为 ask**，否则会因为没有审批出口而永久挂起。
+- **三重单人边界**：平台可用范围「仅本人」+ 不申请群权限 + 代码层 open_id 白名单静默忽略。
+- **`always` 语义**：仅当请求带 `save[]` 时才持久化，否则等价于「允许一次」（卡片会提示）。
 
 ---
 
-## 五、会话管理（多会话）
+## 六、故障排查
 
-一个飞书单聊不再只映射一个 opencode 会话，而是维护**一个会话列表 + 一个当前会话**。
-在私聊里发送以 `/` 开头的文本即触发命令，**命令不会作为 prompt 发给模型**。
-
-### 命令
-
-| 命令 | 说明 |
-| --- | --- |
-| `/new [标题]` | 开始**建会话向导**（P6）：目录 → 模型 → 权限 → 确认；确认后自动开话题 |
-| `/dir <绝对路径>` | 向导内设置工作目录（须在 `allowedRoots` 之下） |
-| `/model [关键词]` | 向导内选模型；话题内切换当前会话模型（无参会发模型选择卡） |
-| `/perm [档位]` | 向导内选权限；话题内修改当前会话权限（档位：`readonly`/`edit`/`askHigh`/`trust`） |
-| `/cd <绝对路径>` | **仅话题内**：迁移当前会话工作目录 |
-| `/cancel` | 放弃建会话向导 |
-| `/sessions`（别名 `/ls`） | 发送**会话列表卡片**（见下） |
-| `/use <序号\|会话id前缀>` | 切换当前会话，例如 `/use 2`、`/use ses_abc` |
-| `/current` | 查看当前会话（标题 + id + 会话总数） |
-| `/stop` | 中断当前会话正在跑的任务（`ctx.session.interrupt`） |
-| `/help` | 命令列表 |
-| 未知 `/xxx` | 回复帮助提示，**不**发给模型 |
-
-> 没有显式建过会话时，**第一条普通消息**仍会自动新建会话并绑定（向后兼容旧行为）。
-
-### 会话卡片
-
-`/sessions` 或点击卡片按钮均可与会话列表交互：
-
-```
-🧩 OpenCode 会话
-1. 会话标题一（ses_aaa…） ← 当前
-2. 会话标题二（ses_bbb…）
-
-[切换 1] [切换 2] [➕ 新建会话]
-```
-
-- 每个会话一行（序号 + 标题 + 短 id + 是否为当前），带一个「切换 N」按钮；当前会话按钮高亮。
-- 「➕ 新建会话」= `/new`（缺省标题）。
-- 点击后：校验 `operator.open_id` 在白名单 → 切换/新建 → 返回 toast → **原地更新卡片**为最新列表。
-- 与审批卡共用 `card.action.trigger` 链路，靠按钮 value 路由（会话卡 `{cmd}` / 审批卡 `{t,d}`）。
-- 回调必须 **3 秒内**返回：校验同步完成，`create/switch/patch` 全部 fire-and-forget。
-
-### 持久化与迁移
-
-| key | 结构 | 说明 |
-| --- | --- | --- |
-| `feishu:v2:chat:<chatId>:sessions` | `{ sessions: [{sessionID,title,updatedAt}], active? }` | **新**多会话结构 |
-| `feishu:v2:chat:<chatId>` | `{ sessionID, openId }` | **旧**单值，仅向后兼容读取；读到即迁移到新结构并删除 |
-| `feishu:v2:session:<sid>` | `{ chatId, openId }` | 不变；权限路由（`resolveBySession`/`hasSession`）依赖它 |
-
-> 迁移是无损的：旧记录会变成新结构的第一个会话并设为当前，同时补齐 `session:<sid>` 索引。
-
-### 进程级幂等
-
-opencode 会按 location 多次加载全局插件，导致同一进程内 `setup` 被调用多次（起两个长连接 → 重复回复/重复发卡）。
-插件用模块级 `SetupGuard` 保证**同一进程只真正启动一次** gateway/事件订阅：
-第二次 setup 只打一条 debug 日志并返回 no-op cleanup，**不会**影响第一个实例的资源；第一个实例的 cleanup 仍能正常关闭并在之后允许重新 setup。
+| 现象 | 处理 |
+|---|---|
+| 发消息没反应 | ① 应用是否**已发布**、可用范围是否勾了你；② 事件/回调订阅是否选了**长连接**（不是 Webhook）；③ 是否开通 `im:message.p2p_msg:readonly` |
+| 改了 `feishu.json` 不生效 | 确认路径是 `<configDir>/plugins/feishu.json`，然后 `opencode reload` |
+| 改了插件代码不生效 | `opencode reload` **只重跑 `setup`，不会重新 import 模块**。升级插件要换 `plugins/` 下的目录名，或重启服务（`opencode service restart`） |
+| 出现多个长连接 / 重复回复 | 设置 `gatewayLocation` 为你常用的工作目录（OpenCode 按 location 多次加载全局插件） |
+| 审批卡收不到 | 该会话不是从飞书发起的（无映射）；插件按安全设计不接管 |
+| 点按钮提示凭证无效 | token 过期（默认 10 分钟）或点击者不在白名单 |
+| 卡片内容被截断 | 飞书卡片上限约 30KB，插件截断并标注；超长会话会丢弃卡片上最旧的块（完整内容仍在会话里） |
+| 看不到插件日志 | 服务模式下插件 stderr 会被丢弃；设 `logFile: true`，然后看 `<configDir>/plugins/feishu.log` |
+| 主聊天流发消息只回提示卡 | 预期行为：主聊天流只做管理。用 `/new` 进话题；想恢复旧行为设 `threadRouting: false` |
 
 ---
 
-## 六、话题 = 会话（P5）
-
-> 依据 2026-09-26 实测：p2p 消息事件在**话题内**会带 `thread_id`(`omt_…`) + `root_id` + `parent_id`；
-> **主聊天流**三者皆空。机器人可对一条消息 `POST /im/v1/messages/{id}/reply` 且 `reply_in_thread:true`
-> **自动开话题**（新消息获得 `thread_id`）。
-
-### 机制
-
-- **一个飞书话题 = 一个 OpenCode 会话**。话题内发消息 → 路由到该话题绑定的会话；回复用 `im.message.reply`
-  引用触发消息，**自然留在话题内**。
-- **主聊天流只做会话管理**：普通文本**不进入任何会话**，回一张「管理台」提示卡；要干活请进话题。
-- 映射持久化在共享 `ctx.storage`（跨实例有效）：
-
-  | key | 值 | 说明 |
-  | --- | --- | --- |
-  | `feishu:v2:thread:<threadId>` | `{sessionID, chatId, openId, anchorMessageId?}` | 话题 → 会话主键 |
-  | `feishu:v2:root:<rootId>` | `{sessionID}` | 话题根消息 → 会话（手动从卡片建话题） |
-  | `feishu:v2:session:<sid>` | `{chatId, openId, replyMessageId?, perm?, gateMode?, dir?, model?}` | 权限路由；话题会话带锚点，审批卡也 reply 落话题；P6 还记录预设/目录/模型 |
-  | `feishu:v2:setup:<chatId>` | `{step, dir?, model?, perm?, title?, page?, anchorMessageId?}` | 建会话向导状态（P6） |
-  | `feishu:v2:recent:dirs` / `recent:models` | `string[]` / `ModelRef[]` | 最近使用目录 / 模型（LRU，P6） |
-
-- 路由决策（`src/feishu/routing.ts`，纯函数）：
-
-  ```
-  有 threadId ?
-  ├─ 是
-  │   ├─ thread 命中 → 用该会话
-  │   ├─ 否则 root 命中 → 用该会话（补写 thread 映射）
-  │   └─ 都未命中 → 新建会话（标题 `话题: <首条消息前20字>`）+ bind thread + bind root
-  └─ 否 → 以 / 开头走命令；普通文本回「管理台」提示卡
-  ```
-
-### 进入会话的两条路径
-
-1. **一键**：主聊天流 `/new [标题]` → 建会话后，机器人把「会话已就绪」卡 `reply_in_thread` 到你的那条消息，
-   **自动生成话题**并绑定；卡片消息 id 同时 `bindRoot`。
-2. **手动**：在**会话列表卡**上使用飞书的「创建话题」；该卡片消息 id 即 `root_id`，话题内发消息会经 root 反查绑定到对应会话。
-
-### 命令矩阵
-
-| 命令 | 主聊天流 | 话题内 |
-| --- | --- | --- |
-| `/new [标题]` | ✅ 起建会话向导 → 确认后自动开话题 | ❌ 提示去主聊天流 |
-| `/dir <路径>` | ✅ 向导内设置目录 | ❌ 同上 |
-| `/model [关键词]` | ✅ 向导内选模型 | ✅ 切换本话题会话模型 |
-| `/perm [档位]` | ✅ 向导内选权限 | ✅ 修改本话题会话权限 |
-| `/cd <路径>` | ❌ 提示只能话题内用 | ✅ 迁移本话题会话目录 |
-| `/cancel` | ✅ 放弃向导 | ❌ 同上 |
-| `/sessions`（`/ls`） | ✅ 管理面板 | ❌ 同上 |
-| `/use <n\|id>` | ✅ | ❌ 同上 |
-| `/current` | ✅（当前会话） | ✅（本话题会话） |
-| `/stop` | ✅（当前会话） | ✅（本话题会话） |
-| `/help` | ✅ | ✅（只列话题内可用命令） |
-| 普通文本 | ❌ 回提示卡 | ✅ 进入该话题的会话 |
-
-### 建会话向导与权限预设（P6）
-
-**向导流程**（主聊天流，`threadRouting: true`）：
-
-```
-/new [标题] ──▶ 📁 选目录 ──▶ 🧠 选模型 ──▶ 🔐 选权限 ──▶ ✅ 确认 ──▶ 建会话 + 自动开话题
-   │              │(可点最近目录/发 /dir)  │(可点按钮/发 /model)  │(四档按钮/发 /perm)
-   └─ /cancel 随时放弃；状态存 `feishu:v2:setup:<chatId>`（跨实例共享）
-```
-
-- **不依赖表单**：所有选择走卡片按钮；自由文本走斜杠命令（`/dir <path>`、`/model <query>`）。
-- 卡片（纯函数，`src/feishu/setup-cards.ts`）：目录选择卡、模型选择卡（当前/最近 5 + 「更多」分页）、权限选择卡（四档一句话说明）、确认卡（目录/模型/权限汇总）。
-- 确认后调用 `ctx.session.create({ title, model, location, permissions })`，对触发消息 `reply_in_thread` 发「会话已就绪」卡，读回 `thread_id` 后 `bindThread`，卡片 `bindRoot`；`dir/model/perm` 记入 `feishu:v2:session:<sid>`。
-- **目录校验**（`src/feishu/dirs.ts`）：存在、是目录、在 `allowedRoots` 之下、拒绝 `/` / 家目录根 / 系统目录（`/etc /usr /bin /sbin /boot /dev /proc /sys …`）；对 `realpath` 再校验一次，防符号链接逃逸。
-- **权限预设 → (ruleset, gateMode)**：
-
-  | 预设 | ruleset（会话级） | gateMode | 效果 |
-  | --- | --- | --- | --- |
-  | `readonly` 🔒 | 禁 `edit`/`write`/`shell`/`bash` | `off` | 最安全，不弹审批 |
-  | `edit` ✏️ | allow `edit`，`shell`/`bash`→ask | `gate` | 可改文件，执行命令需审批 |
-  | `askHigh` ⚠️ | 空（继承） | `gate`，对 `shell`/`bash`/`edit`/`external_directory` 置 ask | 高风险动作逐次审批 |
-  | `trust` 🔓 | allow `*` | `off` | 完全放行 |
-
-- **gate 按会话生效**（`decideEffectForSession`）：`permission.evaluate` 先读 `session:<sid>.gateMode`；
-  - `off`：完全不介入（依赖 ruleset/原生）；
-  - `gate`：`denyTools`→deny、`allowTools`→allow、`askActions`→ask、其余**继承**（不会把只读工具误伤）；
-  - 无预设会话 → 回退全局 `permissionGate` 行为。**安全边界保留**：无飞书映射的会话不降级为 `ask`。
-- 话题内 `/model`、`/perm` 通过卡片按钮或命令直接改当前会话；`/cd` 调 `ctx.session.move` 并再次校验目录；切换模型后运行卡页脚显示 `🤖 <模型>`。
-- 「最近使用」：`feishu:v2:recent:dirs` / `feishu:v2:recent:models`（LRU、去重、限长，见 `recentDirsLimit`/`recentModelsLimit`）。
-
-### 回退开关
-
-配置 `threadRouting: false` 可**一键回到 P3 行为**（主聊天流普通文本进当前会话，完全忽略 `thread_id`，不建/不用话题）。
-详见下方「配置字段」与「排障」。
-
-### 已知限制
-
-- 话题被用户删除后会留下**孤儿映射**，当前策略是**惰性忽略**（不报错）；后续版本再提供 `/forget` 清理。
-- `card.action.trigger` 回调**不带** `thread_id`：话题会话的审批卡靠 `session:<sid>.replyMessageId` 锚点落话题；
-  审批 `value` 目前未编入 threadId（P5.2 兜底项）。
-- 话题内新建会话**不改变主聊天流的「当前会话」**，避免管理面板指错。
-- 主题约束（软引导）尚未实现，接口位置预留在 P5.3。
-
----
-
-## 七、卡片交互（回执 / 原生排队 / 工具可见 / 流式）
-
-收到私聊文本后，插件**先**发一张「运行卡片」再发起 prompt；随后所有事件都回填到这张卡上。
-
-```
-你：帮我看看这个 bug
-
-🤖 OpenCode            （蓝色 = 运行中 / 绿色 = 完成 / 红色 = 失败）
-已收到，思考中…
-🧰 正在调用工具…
-  ▸ 🔧 bash — npm test
-  ▸ ✅ read — /home/me/app.ts
-✍️ 正在输出…
-```
-
-| 能力 | 行为 |
-| --- | --- |
-| 立即回执 | 收到消息**先**发卡（`已收到，思考中…` / `已排队`），再 `session.prompt`，避免「无反馈」 |
-| 原生排队 | 该 session 有正在跑的 execution（`session.execution.started` 置位，`succeeded/failed` 清除）→ `delivery:"queue"` + 卡片显示「已排队」；空闲则 `delivery:"steer"` |
-| 工具可见 | `session.tool.input.started` 加工具块（🔧 名称，running）；`input.ended` 附输入（截断）；`tool.success` 标 ✅ + 结果首行；`tool.error` 标 ❌ 红框 |
-| 工具折叠 | 连续工具 ≥ 3 折叠为一个摘要面板（**只留名称行**，防 30KB 超限），运行中最新一个展开、历史折叠；终态整体折叠 |
-| 流式回复 | `text.started/delta/ended` 增量更新正文块，卡片 patch 节流 ≥ 400ms |
-| 状态页脚 | 思考中 / 正在调用工具 / 正在输出 / 已排队，随事件切换；`execution.succeeded` 收尾（清页脚、卡片转绿） |
-| 失败收尾 | `execution.failed` 清页脚、卡片转红并附错误摘要，同时补发一条文本提示 |
-
-### 去重（跨实例）
-
-插件会被实例化两次（独立 VM context，进程内单例无效），飞书可能重复投递；因此按 `messageId` 去重：
-
-| key | 值 | TTL |
-| --- | --- | --- |
-| `feishu:v2:msg:<messageId>` | `{ at: <ms> }` | 10 分钟 |
-
-- 同实例走内存快路径；跨实例用共享 `ctx.storage` 兜底，命中即打 debug 日志并丢弃。
-- ⚠️ **已知限制**：`get-then-set` **非原子**，极端并发（两实例几乎同时处理同一消息）下可能双处理（storage 无 CAS）；单实例顺序执行不受影响。
-
-### 状态与实现（纯函数，可单测）
-
-- `src/feishu/run-state.ts` — **纯 reducer**：文本块 / 工具块 / 页脚 / 终态，按 `assistantMessageID` 区分 step。
-- `src/feishu/run-renderer.ts` — 卡片 JSON 2.0 渲染 + 工具折叠 + 体积保护（超 30KB 时逐级截断、必要时丢弃最旧元素）。
-- `src/feishu/run-controller.ts` — 回执卡发送、per-session active/queued 卡片、节流 patch、终态强制 flush。
-- `src/feishu/dedup.ts` / `src/feishu/delivery.ts` — messageId 去重 与 排队决策 / 执行态跟踪。
-
----
-
-## 八、故障排查
-
-| 现象 | 可能原因 / 处理 |
-| --- | --- |
-| 日志出现「飞书插件未启用」 | `appId`/`appSecret` 缺失或 `{env:...}` 未解析；检查 `plugins/feishu.json` 与 **opencode 服务进程**内的环境变量 |
-| 改了 `feishu.json` 不生效 | 配置目录取 `OPENCODE_CONFIG_DIR` 或 `~/.config/opencode`；确认文件位于 `<configDir>/plugins/feishu.json`，改完执行 `opencode reload` |
-| 日志出现「不是合法 JSON / 顶层必须是 JSON 对象」 | 配置文件格式有误，插件会**忽略该文件并退回环境变量**（不会崩溃）；修正 JSON 后 reload |
-| 把本地路径写进 `opencode.json` 的 `plugins` 数组没反应 | 该写法无效；写成包名会触发 npm install（私有包 404）。请把插件放进 `plugins/<name>/` 目录 |
-| 飞书发消息机器人无反应 | ① 应用未发布 / 可用范围没勾选你；② 事件订阅误选 Webhook 而非长连接；③ `im.message.p2p_msg:readonly` 未开通 |
-| 只有单聊可用是预期的吗 | 是。**故意不申请群权限**，机器人收不到群消息 |
-| 审批卡收不到 | 该 session 不是从飞书发起的（无 chat↔session 映射），插件按安全设计不降级为 ask |
-| 点了按钮没反应 / 提示凭证无效 | token 过期（默认 10 分钟）；或点击者不在 `allowUsers` |
-| 回复卡片不更新 | `stream: false`；或日志里 `运行卡片更新失败`（检查 `im:message:send_as_bot` 是否开通） |
-| 卡片内容被截断 | 飞书卡片上限 ~30KB，插件截断到 28KB 并标注「已截断」；极端超长时会丢弃卡片上最旧的块 |
-| 卡片一直显示「已排队」 | 当前 execution 尚未结束，或服务端未发出下一次 `session.execution.started`；可用 `/stop` 中断后重试 |
-| 同一条消息被处理两次 | 去重为 `get-then-set` 非原子，极端并发下可能双处理；日志搜 `忽略重复消息` 确认去重是否命中 |
-| 想临时关闭审批 | 把 `permissionGate` 设为 `off` |
-| `/sessions`、`/use` 等命令没反应 | 命令仅识别**以 `/` 开头的单聊文本**；确认是 p2p 且发送者在白名单内。未知命令会回帮助提示 |
-| 切换会话后再发消息仍进旧会话 | `/use` 成功会回执「已切换」；也可用 `/current` 复核。切换只改变当前会话，历史消息不受影响 |
-| 主聊天流发消息只回「管理台」提示卡 | P5 预期行为：主聊天流只做管理；用 `/new` 或从会话卡进入话题后发消息。想恢复旧行为设 `threadRouting: false` |
-| 话题内发消息没反应 / 进了别的会话 | 用话题内 `/current` 复核本话题会话；检查 `feishu:v2:thread:<tid>` 映射是否存在。若曾手动建话题，确认其根消息是会话卡（已 `bindRoot`） |
-| 话题内 `/new` `/sessions` `/use` 无反应 | P5 决策 2：话题内禁用这三个命令（会提示去主聊天流）。请回主聊天流操作 |
-| 重复回复 / 重复发卡 | 旧版本因 opencode 多次 setup 起了两个长连接；现已用进程级 `SetupGuard` 修复（debug 日志「检测到同进程重复 setup」） |
-| 想看详细日志 | 把 `logLevel` 设为 `debug`（日志只打 secret 存在性，绝不含明文） |
-
----
-
-## 九、安全边界（三重保险）
-
-1. **平台层**：应用可用范围 = 仅本人，其他人无法与机器人建立单聊。
-2. **scope 层**：只申请 p2p 读权限，不申请任何群权限，群消息物理收不到。
-3. **代码层**：`allowUsers` / owner 白名单之外的 `sender.open_id` **静默忽略**；审批点击同样校验白名单 + 自签 token。
-
-另有两条工程红线：**不监听端口**（纯长连接）、**不打印密钥**（日志只记录存在性）。
-
----
-
-## 十、开发
+## 七、开发
 
 ```bash
 npm install
-npm run typecheck   # tsc --noEmit（含 test/）
-npm run build       # tsup → dist/
-npm test            # vitest run（纯逻辑单测，不连真飞书）
+npm run typecheck   # tsc --noEmit
+npm run build       # tsup → dist/（自包含 bundle）
+npm test            # vitest（纯逻辑单测，不连真飞书）
 npm run dev         # tsup --watch
 ```
 
-目录结构：
+**架构**：`src/index.ts` 装配所有部件；飞书交互层在 `src/feishu/`（事件解析、卡片构建、话题路由、向导状态机、流式卡片 reducer 等，**以纯函数为主便于单测**）；安全层在 `src/security/`（token 签名、白名单）。
 
-```
-src/
-  index.ts              # Plugin.define，装配所有部件 + 进程级幂等守卫
-  config.ts             # 配置解析/校验（options > plugins/feishu.json > 环境变量，永不抛异常）
-  lifecycle.ts          # SetupGuard：同进程 setup 只真正启动一次
-  permission.ts         # permission.evaluate 策略 + 审批卡闭环 + reply
-  session-commands.ts   # 会话命令编排（文本命令 + 会话卡片按钮）
-  logger.ts             # 结构化 stderr 日志（secret 脱敏）
-  types.ts
-  security/
-    token.ts            # 审批 token 签名/校验/防重放
-    allowlist.ts        # 单人白名单 + owner 引导
-  feishu/
-    gateway.ts          # WSClient 长连接 + EventDispatcher
-    events.ts           # 飞书事件 → 归一化模型（纯函数）
-    cards.ts            # 审批卡 / 流式卡 / 结果卡构建（纯函数）
-    session-cards.ts    # 会话列表卡片构建 + 按钮 value 解析（纯函数）
-    setup-cards.ts      # P6 建会话向导卡片（目录/模型/权限/确认）构建 + value 解析（纯函数）
-    commands.ts         # 会话命令解析 / 匹配 / 文案（纯函数）
-    dirs.ts             # P6 工作目录校验（allowedRoots / 系统目录 / realpath 防逃逸）
-    perm-presets.ts     # P6 权限预设 → ruleset / gateMode（纯函数）
-    models.ts           # P6 模型列表归一化 + 模糊匹配（纯函数）
-    wizard.ts           # P6 建会话向导状态机 + storage 持久化
-    recent.ts           # P6 最近使用目录/模型（LRU）
-    routing.ts          # P5 话题路由决策（有/无 threadId、thread/root 命中，纯函数）
-    sender.ts           # im.message.create/reply/patch/delete/get 薄封装
-    session-map.ts      # chat ↔ 多会话映射 + 话题/root 映射（ctx.storage 持久化 + 旧格式迁移）
-    run-state.ts        # 运行卡片纯 reducer（文本/工具/页脚/终态）
-    run-renderer.ts     # 运行卡片 JSON 2.0 渲染 + 工具折叠 + 体积保护（纯函数）
-    run-controller.ts   # 回执卡 + per-session active/queued + 节流 patch
-    dedup.ts            # messageId 跨实例去重（ctx.storage + 内存快路径）
-    delivery.ts         # 排队决策 + execution 态跟踪
-    streaming.ts        # [deprecated] 早期独立流式卡片（已由 run-* 取代，保留单测参考）
-  test/                   # vitest 纯逻辑单测
-```
+**设计要点**：
+- 卡片一律 **JSON 2.0**（按钮直接放 `body.elements`，回调用 `behaviors`；1.0 的 `tag:"action"` 在 2.0 会 400）。
+- 卡片更新统一节流 ≥400ms；连续工具调用 ≥3 个自动折叠（只留名称行）以防 30KB 超限。
+- 运行卡状态用一个**纯 reducer** 维护（文本块 / 工具块 / 页脚 / 终态），事件按 `assistantMessageID` 分步。
 
 ---
 
-## 十一、已知限制（P0 范围外）
+## 八、与其它项目的区别
 
-- 只处理**单聊文本**（含富文本 post）；图片/文件/音视频只给出文字占位描述，不下载。
-- 会话管理提供 `/new` `/sessions` `/use` `/current` `/stop`；`removeSession` / `renameSession` API 已就绪但暂无对应命令。
-- 只处理从飞书发起的会话的审批；TUI 会话不接管（避免挂起）。
-- 未做「问答卡 / question」审批，仅 `permission`。
-- 未申请群相关能力，故不支持群聊（未来按 `APP_MODE_SCOPES.md` 的 T1–T6 逐档扩展）。
-- **messageId 去重非原子**：`ctx.storage` 无 CAS，两个实例极端并发处理同一条消息时理论上可能双处理（详见「七、卡片交互」）。
-- 排队卡片依赖 `session.execution.started` 晋升；若服务端在排队任务开始时未发出该事件，卡片会停留在「已排队」（可用 `/stop` 或重新发消息兜底）。
-- 运行卡片体积保护会**丢弃最旧**的 body 元素（保证 ≤30KB），超长会话早期内容可能不出现在卡片上；完整内容仍在日志/会话里。
-- **主聊天流不再直接干活**（决策 1）：主聊天流只做会话管理，普通文本回「管理台」提示卡，需 `/new` 或从会话卡进入话题。想恢复旧行为设 `threadRouting: false`。
-- **孤儿话题映射**：话题被删除后映射不主动清理（惰性忽略），后续再提供 `/forget`。
-- **审批卡话题归属**：`card.action.trigger` 不带 `thread_id`（P5.2 已加回调诊断日志确认，仅记录键与布尔、不含 token），
-  话题会话靠 `replyMessageId` 锚点落话题；卡片按钮 value 仍以 `sessionID`/向导状态路由，不依赖 thread_id。
-- **向导与命令双轨**：第一版不依赖表单提交（`form_value` 未支持）；自由文本用 `/dir`、`/model` 输入，
-  按钮只做离散选择。确认建会话目前只能通过「✅ 创建」按钮（无 `/confirm` 命令）。
-- **模型 action id 命名**：设计稿的 `shell` 与 OpenCode 实测工具 id `bash` 均已覆盖，规则可真正生效。
-- **`permissionGate: "off"` 语义微调**：为支持会话权限预设，evaluate hook 始终注册；
-  无预设的会话仍保持 off 行为（不改写 effect、零行为变化）。
+- 本插件**只支持 OpenCode V2**（`@opencode/plugin`，`Plugin.define` 形态）。
+- 生态里另有 `opencode-feishu`（V1 插件，`@opencode-ai/plugin`），两者**不兼容**，也不共用代码，请按你的 OpenCode 版本选择。
+
+## 已知限制
+
+- 只处理**单聊文本**（含富文本）；图片 / 文件 / 音视频只给文字占位，不下载。
+- 只接管**从飞书发起的会话**的审批；本地 TUI 会话不受影响（安全设计）。
+- 消息去重为 `get-then-set`，非原子：极端并发下理论上可能双处理（正常情况下单实例顺序处理）。
+- 话题被删除后映射不主动清理（惰性忽略）。
+- 建会话向导第一版不依赖卡片表单提交，自由文本走斜杠命令（`/dir`、`/model`）。
 
 ## 许可证
 
 MIT
-
-### 关于「插件被 setup 两次」
-
-opencode 会按 location 加载全局插件，同一服务器进程内会出现**多个独立 VM context**（实测 `process` 与 `globalThis` 都不共享），因此进程内单例（含 `globalThis` 槽位）无法阻止第二份 setup，会出现两个飞书长连接。
-
-实测影响：**飞书把事件只投递给其中一个连接**，观察到的 `收到飞书消息` 只有一条，未出现重复回复/重复发卡。故保留这一现象但不再尝试强行消除；如后续确需单实例，需要从 opencode 侧的插件加载方式入手。

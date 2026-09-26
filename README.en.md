@@ -1,0 +1,270 @@
+# opencode-feishu-plugin
+
+**English** | [简体中文](./README.md)
+
+Bring [OpenCode](https://opencode.ai) into Feishu/Lark: **one Feishu topic = one OpenCode session**. Manage multiple sessions from chat, drive the agent from inside topics, and **approve permission requests with a button on a Feishu card**.
+
+> Built **only on the OpenCode V2 plugin API** (`Plugin.define({ id, setup(ctx) })`) — no V1 packages.
+> **Pure long connection** (WebSocket) for events and card callbacks: **no listening port, no public URL required**.
+
+---
+
+## Highlights
+
+| | |
+|---|---|
+| 🔐 **Minimal permissions** | Only 2 scopes (read p2p messages + send as bot). **No group scopes at all** — the bot physically cannot receive group messages |
+| 💬 **Topics as sessions** | Each Feishu topic maps to one OpenCode session. The main chat is a management console; work happens inside topics |
+| 🚀 **One-tap entry** | `/new` makes the bot create a topic under your message automatically |
+| 🧭 **Setup wizard** | Directory → model → permissions → confirm. Directory is validated against an allowlist |
+| ✅ **In-card approvals** | Permission requests become Feishu cards (allow once / always / reject) with signed, replay-proof buttons |
+| 🪜 **Permission presets** | Read-only / Editable / Ask-on-risky / Trust — pick once per session instead of approving every call |
+| 📊 **Live visibility** | Instant ack card, live tool calls (auto-collapsed when ≥3), streaming text, current model in the footer |
+| 🧵 **Native queueing** | Busy session → messages queue via OpenCode's native `delivery:"queue"` |
+| 🚫 **No ports** | Everything over a long connection; nothing to expose |
+
+---
+
+## 1. Feishu app setup (~3 minutes)
+
+1. Go to the [Feishu Open Platform](https://open.feishu.cn/app) → **Create a custom app**.
+2. **Add capability → Bot**.
+3. **Permissions** — enable only these two:
+   - `im:message.p2p_msg:readonly` — read direct messages sent to the bot
+   - `im:message:send_as_bot` — send messages *as the app* (also used to update cards)
+4. **Events & Callbacks → Event subscription**: choose **"Receive events via long connection"** (do **not** pick Webhook), add event `im.message.receive_v1`.
+5. **Events & Callbacks → Callback subscription**: also choose **long connection**, add callback `card.action.trigger` (**zero permission required**).
+6. **Version management & release**: set **availability = only yourself**, create a version and publish it.
+7. Note the **App ID** (`cli_…`) and **App Secret**.
+
+> **Why no group scopes?** This plugin is a *personal console*. With no group scopes the bot **physically cannot**
+> receive group messages, so the single-user boundary is enforced by the platform, not just by code.
+
+---
+
+## 2. Installation
+
+### 2.1 Install the plugin
+
+**Option A — npm (recommended)**
+
+```bash
+cd ~/.config/opencode
+npm init -y                       # if you don't have a package.json yet
+npm install opencode-feishu-plugin
+```
+
+**Option B — build locally**
+
+```bash
+git clone https://github.com/moyuanhua/opencode-feishu-plugin.git
+cd opencode-feishu-plugin && npm install && npm run build
+```
+
+> The build output `dist/index.js` is a **self-contained bundle** (Feishu SDK included) — no extra `node_modules` at runtime.
+
+### 2.2 Let OpenCode load it
+
+OpenCode **auto-discovers plugin directories under `<configDir>/plugins/<name>/`**.
+Place the plugin there. Do **not** put a local path into the `plugins` array of `opencode.json` (it does not work), and a bare package name there triggers an `npm install` (a private package will 404).
+
+```bash
+mkdir -p ~/.config/opencode/plugins/feishu
+cp -r ~/.config/opencode/node_modules/opencode-feishu-plugin/{dist,package.json} \
+      ~/.config/opencode/plugins/feishu/
+```
+
+### 2.3 Configure
+
+`<configDir>/plugins/feishu.json` (`configDir` = `OPENCODE_CONFIG_DIR` or `~/.config/opencode`):
+
+```bash
+install -m 600 /dev/null ~/.config/opencode/plugins/feishu.json
+cat > ~/.config/opencode/plugins/feishu.json <<'JSON'
+{
+  "appId": "{env:FEISHU_APP_ID}",
+  "appSecret": "{env:FEISHU_APP_SECRET}"
+}
+JSON
+chmod 600 ~/.config/opencode/plugins/feishu.json
+```
+
+Put the credentials into the **OpenCode service process** environment (not your interactive shell):
+
+```bash
+opencode service set env FEISHU_APP_ID cli_xxxxxxxx
+opencode service set env FEISHU_APP_SECRET xxxxxxxx
+```
+
+Plaintext values inside `feishu.json` work too (keep it `chmod 600`). **Precedence**: `options` > `feishu.json` > environment.
+
+### 2.4 Activate & verify
+
+```bash
+opencode reload
+```
+
+Send the bot a direct message. **The first sender is bound as the owner**; everyone else is silently ignored.
+
+---
+
+## 3. Usage
+
+### Main chat (console)
+
+The main chat is management-only; plain text never enters a session.
+
+| Command | Purpose |
+|---|---|
+| `/new [title]` | Start the **setup wizard**: directory → model → permissions → confirm → auto-creates a topic |
+| `/sessions` (`/ls`) | Session list card (switch / create) |
+| `/use <n\|id-prefix>` | Switch current session |
+| `/current` | Show current session |
+| `/stop` | Interrupt the running task in the current session |
+| `/help` | Command list |
+
+### Inside a topic (work)
+
+One topic = one session. **Plain text inside a topic is a prompt to the agent**; replies stay in the same topic.
+
+| Command | Purpose |
+|---|---|
+| `/model` | Switch the model for this session |
+| `/perm` | Change the permission preset for this session |
+| `/cd <abs path>` | Move this session's working directory |
+| `/current` `/stop` `/help` | Same as main chat, scoped to this topic's session |
+
+### Setup wizard
+
+```
+/new fix the login bug
+  ↓
+📁 directory  ← recent-dir buttons, or /dir /path/to/project
+  ↓
+🧠 model      ← recent buttons / "more" pagination, or /model <query>
+  ↓
+🔐 permissions← four presets, each with a one-line explanation
+  ↓
+✅ confirm    ← summary of directory/model/permissions → tap Create
+  ↓
+the bot opens a topic under your message; the session card lands inside it
+```
+
+`/cancel` aborts the wizard at any step.
+
+### Permission presets
+
+| Preset | Meaning | Session ruleset |
+|---|---|---|
+| 🔒 Read-only | Look, don't touch | deny `edit` / `shell` |
+| ✏️ Editable | Edits free, **commands need approval** | allow `edit`, `shell` → ask |
+| ⚠️ Ask-on-risky | Edits, commands and outside-directory access all ask | risky actions ask each time |
+| 🔓 Trust | Never ask | allow all |
+
+The preset is written to a **session-scoped** ruleset and can be changed any time with `/perm`, without affecting other sessions.
+
+---
+
+## 4. Configuration
+
+`<configDir>/plugins/feishu.json` (or `plugins[].options` in OpenCode). `{env:NAME}` / `${NAME}` expansion supported.
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `appId` | string | — | Feishu App ID (**required**; missing ⇒ plugin disabled, never throws) |
+| `appSecret` | string | — | Feishu App Secret (**required**; never logged) |
+| `domain` | `feishu`\|`lark` | `feishu` | Feishu or Lark international |
+| `allowUsers` | string[] | `[]` | open_id allowlist. **Empty = app owner only** (first sender is bound and persisted) |
+| `permissionGate` | `off`\|`notify`\|`gate`\|`lockdown` | `gate` | Global approval gate |
+| `allowTools` | string[] | `["read","glob","grep","webfetch"]` | Auto-allow list; supports `prefix*` |
+| `denyTools` | string[] | `[]` | Hard deny (takes precedence) |
+| `allowedRoots` | string[] | `[homedir]` | Roots allowed as session working directories; `/`, home root and system dirs are always rejected |
+| `stream` | boolean | `true` | Stream replies into the card |
+| `streamThrottleMs` | number | `400` | Min card update interval (floor 400ms; Feishu limit is 5 QPS) |
+| `threadRouting` | boolean | `true` | Topic routing master switch; `false` restores the legacy behaviour |
+| `recentDirsLimit` | number | `5` | Number of recent directories (1–20) |
+| `recentModelsLimit` | number | `5` | Number of recent models (1–20) |
+| `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | Log level (secrets are never logged, only their presence) |
+| `logFile` | string \| boolean | — | `true` writes `<configDir>/plugins/feishu.log`. **Plugin stderr is discarded in service mode — enable this when debugging** |
+| `gatewayLocation` | string | — | Only start the gateway in this location. OpenCode loads global plugins per location (separate VM contexts, so an in-process singleton cannot dedupe). **Set this to your usual working directory**, otherwise you get multiple long connections |
+| `approvalTtlMs` | number | `600000` | Approval token / card TTL |
+| `maxResourcesShown` | number | `8` | Max resource lines shown on an approval card |
+
+---
+
+## 5. Security model
+
+```
+permission.evaluate (plugin hook)              permission.asked (event stream)
+──────────────────────────                     ──────────────────────
+allow-listed tool   → allow                    event carries {id, sessionID, action, resources, save}
+deny list           → deny                                │
+otherwise (per session preset) → ask ─────────────────────┘
+                                                          ▼
+                                      Feishu approval card (button value = signed token)
+                                                          │ user taps
+                                                          ▼
+                                card.action.trigger over the long connection (<3s response)
+                                                          │
+                     verify: operator allow-listed → signature → bound fields → replay guard
+                                                          ▼
+                                     ctx.permission.reply({sessionID, requestID, reply})
+```
+
+- **Signed tokens**: HMAC-SHA256 binding `requestID + sessionID + operator openId + expiry + nonce`; forgery, forwarding and replay are rejected.
+- **Only Feishu-originated sessions**: sessions without a chat↔session mapping (e.g. your local TUI) are **never downgraded to `ask`**, otherwise they would hang forever with no approval channel.
+- **Three layers of single-user isolation**: platform availability (only you) + no group scopes + code-level open_id allowlist with silent ignore.
+- **`always` semantics**: persisted only when the request carries `save[]`; otherwise it behaves like "once" (the card says so).
+
+---
+
+## 6. Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Bot does not respond | ① App **published** and availability includes you? ② Event/callback subscription set to **long connection** (not Webhook)? ③ `im:message.p2p_msg:readonly` granted? |
+| `feishu.json` changes ignored | Confirm the path is `<configDir>/plugins/feishu.json`, then `opencode reload` |
+| Plugin code changes ignored | `opencode reload` only re-runs `setup`; it does **not** re-import the module. To upgrade, use a new directory name under `plugins/`, or restart the service |
+| Multiple long connections / duplicate replies | Set `gatewayLocation` to your usual working directory |
+| No approval cards | The session did not originate from Feishu (no mapping); by design the plugin does not take it over |
+| "Invalid credentials" on button tap | Token expired (default 10 min) or the tapper is not allow-listed |
+| Card content truncated | Feishu card limit is ~30KB; the plugin truncates and marks it. Very long sessions drop the oldest blocks from the card (full content stays in the session) |
+| No plugin logs | Plugin stderr is discarded in service mode; set `logFile: true` and read `<configDir>/plugins/feishu.log` |
+| Main chat replies with a hint card | Expected: the main chat is management-only. Use `/new` and work inside a topic; set `threadRouting: false` to revert |
+
+---
+
+## 7. Development
+
+```bash
+npm install
+npm run typecheck   # tsc --noEmit
+npm run build       # tsup → dist/ (self-contained bundle)
+npm test            # vitest (pure logic, no live Feishu)
+npm run dev         # tsup --watch
+```
+
+**Architecture**: `src/index.ts` wires everything; the Feishu interaction layer lives in `src/feishu/` (event parsing, card builders, topic routing, wizard state machine, streaming-card reducer — mostly **pure functions** for testability); `src/security/` holds token signing and the allowlist.
+
+**Implementation notes**
+- Cards are **JSON 2.0** (buttons directly in `body.elements`, callbacks via `behaviors`; the 1.0 `tag:"action"` container returns HTTP 400 on 2.0).
+- Card updates are throttled to ≥400ms; ≥3 consecutive tool calls collapse into one summary panel (names only) to stay under the 30KB limit.
+- Run-card state is maintained by a **pure reducer** (text blocks / tool blocks / footer / terminal state), keyed per `assistantMessageID`.
+
+---
+
+## 8. Relationship to other projects
+
+This plugin targets **OpenCode V2 only** (`@opencode/plugin`, `Plugin.define`). The separately maintained `opencode-feishu` package is a **V1** plugin (`@opencode-ai/plugin`) — the two are incompatible and share no code. Pick according to your OpenCode version.
+
+## Known limitations
+
+- Text-only inbound (including rich text); images/files/audio get a textual placeholder and are not downloaded.
+- Only approvals for **Feishu-originated** sessions are handled. Local TUI sessions are untouched by design.
+- Message dedup is `get-then-set` (not atomic): under extreme concurrency a duplicate is theoretically possible.
+- Deleted topics leave stale mappings (lazily ignored).
+- The wizard's first version does not rely on card form submission; free text goes through `/dir` and `/model`.
+
+## License
+
+MIT
