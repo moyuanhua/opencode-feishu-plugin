@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "description": "Feishu/Lark plugin for OpenCode V2 — single-user topics as sessions, in-card permission approvals, streaming cards. Minimal permissions, no public endpoint.",
   "type": "module",
-  "main": "dist/index.js",
+  "main": "index.js",
   "types": "dist/index.d.ts",
   "exports": {
     ".": {
@@ -12,6 +12,7 @@
     }
   },
   "files": [
+    "index.js",
     "dist/index.js",
     "dist/index.d.ts",
     "README.md",

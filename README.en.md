@@ -64,16 +64,32 @@ cd opencode-feishu-plugin && npm install && npm run build
 
 > The build output `dist/index.js` is a **self-contained bundle** (Feishu SDK included) — no extra `node_modules` at runtime.
 
-### 2.2 Let OpenCode load it
+### 2.2 Let OpenCode load it (must be `index.js`)
 
-OpenCode **auto-discovers plugin directories under `<configDir>/plugins/<name>/`**.
-Place the plugin there. Do **not** put a local path into the `plugins` array of `opencode.json` (it does not work), and a bare package name there triggers an `npm install` (a private package will 404).
+OpenCode **auto-discovers `<configDir>/plugins/<name>/index.js`** — it does **not** read `package.json#main`.
+So the plugin directory must have a root `index.js` (this package ships one that re-exports `dist/`).
 
 ```bash
-mkdir -p ~/.config/opencode/plugins/feishu
-cp -r ~/.config/opencode/node_modules/opencode-feishu-plugin/{dist,package.json} \
-      ~/.config/opencode/plugins/feishu/
+# Option A: install from npm, then copy (recommended)
+cd ~/.config/opencode
+npm install opencode-feishu-plugin
+mkdir -p plugins/feishu
+cp -r node_modules/opencode-feishu-plugin/{index.js,dist,package.json} plugins/feishu/
+
+# Option B: build locally, then copy
+# cd /path/to/opencode-feishu-plugin && npm install && npm run build
+# mkdir -p ~/.config/opencode/plugins/feishu
+# cp -r dist index.js package.json ~/.config/opencode/plugins/feishu/
 ```
+
+> ⚠️ Two common traps:
+> 1. Copying only `dist/` + `package.json` (no root `index.js`) → **the plugin is never loaded**, with no obvious error.
+> 2. Putting a local path into the `plugins` array of `opencode.json` → **does nothing**; a bare package name triggers `npm install` (404 for private packages). Just use the `plugins/<name>/` directory as shown.
+>
+> **After upgrading, restart the service**: `opencode reload` only re-runs `setup`, it does **not** re-import a module from the same path.
+> ```bash
+> opencode service restart
+> ```
 
 ### 2.3 Configure
 
@@ -261,6 +277,7 @@ otherwise (per session preset) → ask ─────────────�
 |---|---|
 | Bot does not respond | ① App **published** and availability includes you? ② Event/callback subscription set to **long connection** (not Webhook)? ③ `im:message.p2p_msg:readonly` granted? |
 | `feishu.json` changes ignored | Confirm the path is `<configDir>/plugins/feishu.json`, then `opencode reload` |
+| Plugin never loads (no logs, no error) | The plugin directory is missing a root `index.js`. OpenCode only loads `plugins/<name>/index.js` and ignores `package.json#main`; make sure the root `index.js` is copied |
 | Plugin code changes ignored | `opencode reload` only re-runs `setup`; it does **not** re-import the module. To upgrade, use a new directory name under `plugins/`, or restart the service |
 | Multiple long connections / duplicate replies | Set `gatewayLocation` to your usual working directory |
 | No approval cards | The session did not originate from Feishu (no mapping); by design the plugin does not take it over |

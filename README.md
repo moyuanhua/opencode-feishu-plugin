@@ -64,19 +64,32 @@ cd opencode-feishu-plugin && npm install && npm run build
 
 > 构建产物 `dist/index.js` **已自包含**飞书 SDK 等依赖，运行时不需要额外 `node_modules`。
 
-### 2. 让 OpenCode 加载插件
+### 2. 让 OpenCode 加载插件（关键：必须是 `index.js`）
 
-OpenCode 会**自动加载 `<configDir>/plugins/<任意名>/` 下的插件目录**。
-把插件放进该目录，**不要**在 `opencode.json` 的 `plugins` 数组里写本地路径（实测无效；写包名会触发 npm install，私有包会 404）。
+OpenCode 会**自动加载 `<configDir>/plugins/<任意名>/index.js`**——它**不会**读取 `package.json` 的 `main`。
+所以插件目录根部必须有一个 `index.js`（本包已经带了这个根入口，转发到 `dist/`）。
 
 ```bash
-# npm 方式
-mkdir -p ~/.config/opencode/plugins/feishu
-cp -r ~/.config/opencode/node_modules/opencode-feishu-plugin/{dist,package.json} \
-      ~/.config/opencode/plugins/feishu/
+# 方式 A：从 npm 包安装后拷贝（推荐）
+cd ~/.config/opencode
+npm install opencode-feishu-plugin
+mkdir -p plugins/feishu
+cp -r node_modules/opencode-feishu-plugin/{index.js,dist,package.json} plugins/feishu/
 
-# 本地构建方式同理，把 dist 与 package.json 拷进 plugins/feishu/
+# 方式 B：本地构建后拷贝
+# cd /path/to/opencode-feishu-plugin && npm install && npm run build
+# mkdir -p ~/.config/opencode/plugins/feishu
+# cp -r dist index.js package.json ~/.config/opencode/plugins/feishu/
 ```
+
+> ⚠️ 两个常见坑：
+> 1. 只拷 `dist/` 和 `package.json`（没有根 `index.js`）→ **插件不会被加载**，且没有明显报错。
+> 2. 在 `opencode.json` 的 `plugins` 数组里写本地路径（`.`/绝对路径）→ **无效**；写包名会触发 `npm install`（私有包会 404）。正确做法就是上面放进 `plugins/<名>/` 目录。
+>
+> **升级插件后需要重启服务**：`opencode reload` 只重跑 `setup`，**不会重新 import 同路径模块**。
+> ```bash
+> opencode service restart
+> ```
 
 ### 3. 写配置
 
@@ -264,6 +277,7 @@ permission.evaluate (插件 hook)                 permission.asked (事件流)
 |---|---|
 | 发消息没反应 | ① 应用是否**已发布**、可用范围是否勾了你；② 事件/回调订阅是否选了**长连接**（不是 Webhook）；③ 是否开通 `im:message.p2p_msg:readonly` |
 | 改了 `feishu.json` 不生效 | 确认路径是 `<configDir>/plugins/feishu.json`，然后 `opencode reload` |
+| 放了插件但完全没被加载（无日志、无报错） | 插件目录根部**缺少 `index.js`**。OpenCode 只加载 `plugins/<名>/index.js`，不读 `package.json#main`；确认拷贝了根 `index.js` |
 | 改了插件代码不生效 | `opencode reload` **只重跑 `setup`，不会重新 import 模块**。升级插件要换 `plugins/` 下的目录名，或重启服务（`opencode service restart`） |
 | 出现多个长连接 / 重复回复 | 设置 `gatewayLocation` 为你常用的工作目录（OpenCode 按 location 多次加载全局插件） |
 | 审批卡收不到 | 该会话不是从飞书发起的（无映射）；插件按安全设计不接管 |
