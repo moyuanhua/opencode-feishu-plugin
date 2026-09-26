@@ -26,4 +26,10 @@ export class FakeStorage implements StorageLike {
   raw(key: string): unknown {
     return this.data.get(key);
   }
+
+  /** 测试辅助：清空所有条目（含 setCalls）。 */
+  clear(): void {
+    this.data.clear();
+    this.setCalls.length = 0;
+  }
 }

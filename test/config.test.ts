@@ -78,7 +78,15 @@ describe("resolveConfig", () => {
     expect(cfg.stream).toBe(true);
     expect(cfg.streamThrottleMs).toBe(400);
     expect(cfg.domain).toBe("feishu");
+    expect(cfg.threadRouting).toBe(true);
     expect(cfg.warnings).toEqual([]);
+  });
+
+  test("threadRouting 默认 true，显式 false 可回退；字符串 'false' 也识别", () => {
+    expect(resolve({ appId: "a", appSecret: "s" }, {}).threadRouting).toBe(true);
+    expect(resolve({ appId: "a", appSecret: "s", threadRouting: false }, {}).threadRouting).toBe(false);
+    expect(resolve({ appId: "a", appSecret: "s", threadRouting: "false" }, {}).threadRouting).toBe(false);
+    expect(resolve({ appId: "a", appSecret: "s", threadRouting: "true" }, {}).threadRouting).toBe(true);
   });
 
   test("节流下限被夹到 400ms", () => {

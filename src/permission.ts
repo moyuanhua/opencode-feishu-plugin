@@ -149,7 +149,9 @@ export class ApprovalManager {
       maxResourcesShown: this.deps.config.maxResourcesShown,
     };
 
-    const result = await this.deps.sender.sendCard(link.chatId, buildApprovalCard(input));
+    const result = link.replyMessageId
+      ? await this.deps.sender.replyCard(link.replyMessageId, buildApprovalCard(input))
+      : await this.deps.sender.sendCard(link.chatId, buildApprovalCard(input));
     if (!result.ok || !result.messageId) {
       this.deps.log.warn("审批卡发送失败", { requestID, error: result.error ?? "unknown" });
       return;

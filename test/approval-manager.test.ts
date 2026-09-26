@@ -12,10 +12,15 @@ class FakeSender implements FeishuSender {
   readonly sent: Array<{ chatId: string; card: object }> = [];
   readonly patched: Array<{ messageId: string; card: object }> = [];
   readonly texts: string[] = [];
+  readonly repliedCards: Array<{ messageId: string; card: object }> = [];
   failSend = false;
 
   async sendCard(chatId: string, card: object): Promise<SendCardResult> {
     this.sent.push({ chatId, card });
+    return this.failSend ? { ok: false, error: "boom" } : { ok: true, messageId: "om_card_1" };
+  }
+  async replyCard(messageId: string, card: object): Promise<SendCardResult> {
+    this.repliedCards.push({ messageId, card });
     return this.failSend ? { ok: false, error: "boom" } : { ok: true, messageId: "om_card_1" };
   }
   async patchCard(messageId: string, card: object): Promise<{ ok: boolean; error?: string }> {
@@ -25,6 +30,12 @@ class FakeSender implements FeishuSender {
   async sendText(chatId: string, text: string): Promise<SendCardResult> {
     this.texts.push(`${chatId}:${text}`);
     return { ok: true, messageId: "om_text" };
+  }
+  async replyText(): Promise<SendCardResult> {
+    return { ok: true };
+  }
+  async getMessageMeta(): Promise<undefined> {
+    return undefined;
   }
   async deleteMessage(): Promise<void> {}
 }
@@ -89,6 +100,15 @@ describe("ApprovalManager.onAsked", () => {
     const { manager, sender } = setup();
     sender.failSend = true;
     await expect(manager.onAsked(REQUEST)).resolves.toBeUndefined();
+  });
+
+  test("会话绑定话题（replyMessageId）时审批卡用 reply 落话题", async () => {
+    const { manager, sender } = setup({ link: { chatId: "oc_1", openId: "ou_1", replyMessageId: "om_root" } });
+    await manager.onAsked(REQUEST);
+    expect(sender.sent).toHaveLength(0);
+    expect(sender.repliedCards).toHaveLength(1);
+    expect(sender.repliedCards[0]!.messageId).toBe("om_root");
+    expect(sender.repliedCards[0]!.card).toMatchObject({ schema: "2.0" });
   });
 });
 

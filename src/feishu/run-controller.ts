@@ -29,6 +29,11 @@ export interface BeginRunInput {
   readonly sessionID: string;
   readonly chatId: string;
   readonly delivery: Delivery;
+  /**
+   * 有值时用 `im.message.reply` 引用该消息发回执卡（P5：消息在话题内 → 回复留在话题）。
+   * 缺省则维持 `im.message.create`。
+   */
+  readonly replyToMessageId?: string;
 }
 
 export interface BeginRunResult {
@@ -134,7 +139,9 @@ export function createRunController(deps: RunControllerDeps): RunController {
       const runID = `${input.sessionID}:${runs.seq++}`;
       const state = reduce(initialRunState(), input.delivery === "queue" ? { type: "queued" } : { type: "execution.started" });
 
-      const res = await deps.sender.sendCard(input.chatId, renderRunCard(state));
+      const res = input.replyToMessageId
+        ? await deps.sender.replyCard(input.replyToMessageId, renderRunCard(state))
+        : await deps.sender.sendCard(input.chatId, renderRunCard(state));
       if (!res.ok || !res.messageId) {
         deps.log.warn("回执卡片发送失败", { sessionID: input.sessionID, error: res.error ?? "unknown" });
         return { ok: false };

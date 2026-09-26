@@ -29,7 +29,9 @@ import { decideDelivery, ExecutionTracker, type Delivery } from "./feishu/delive
 import { createRunController } from "./feishu/run-controller.js";
 import type { RunEvent } from "./feishu/run-state.js";
 import { isP2PChat } from "./feishu/events.js";
-import { defaultSessionTitle, isCommand } from "./feishu/commands.js";
+import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js";
+import { decideRoute } from "./feishu/routing.js";
+import { buildConsoleHintCard } from "./feishu/cards.js";
 import { parseSessionCardValue } from "./feishu/session-cards.js";
 import { ApprovalManager, decideEffect, type ReplyInput } from "./permission.js";
 import { SessionCommands } from "./session-commands.js";
@@ -60,6 +62,7 @@ export default Plugin.define({
       allowUserCount: config.allowUsers.length,
       stream: config.stream,
       streamThrottleMs: config.streamThrottleMs,
+      threadRouting: config.threadRouting,
       hasAppSecret: hasSecret(config.appSecret),
     });
 
@@ -138,6 +141,7 @@ async function start(
       // V2 的字段是 `resume`（缺省 false 即中断后不续跑）；兼容文档中曾提到的 `continue`。
       await ctx.session.interrupt({ sessionID, resume: false });
     },
+    threadRouting: config.threadRouting,
   });
 
   // ── 审批门 ────────────────────────────────────────────────────────────
@@ -191,13 +195,74 @@ async function start(
       return;
     }
 
+    // 回退开关：threadRouting=false 时完全回到 P3 行为（忽略 thread_id，普通文本进当前会话）。
+    if (!config.threadRouting) {
+      // 回退模式下把消息当作主聊天流处理：剥掉 threadId，避免话题命令矩阵误判。
+      const flat: IncomingMessage = { ...message, threadId: undefined, rootId: undefined, parentId: undefined };
+      if (isCommand(flat.text)) {
+        const handled = await commands.handleText(flat);
+        if (handled) return;
+      }
+      await runInActiveSession(flat);
+      return;
+    }
+
     // 命令优先拦截：绝不把 `/xxx` 当 prompt 发给模型。
+    // 话题内被禁命令（/new /sessions /use）由 SessionCommands 按 scope 回提示。
     if (isCommand(message.text)) {
       const handled = await commands.handleText(message);
       if (handled) return;
     }
 
-    // 兼容：没显式建过会话时，第一条普通消息自动建会话并绑定。
+    // ── 普通文本 ────────────────────────────────────────────────────────
+    const hasThread = Boolean(message.threadId);
+    let threadLink = hasThread ? await sessionMap.resolveByThread(message.threadId!) : undefined;
+    const rootLink =
+      hasThread && !threadLink && message.rootId ? await sessionMap.resolveByRoot(message.rootId) : undefined;
+
+    const decision = decideRoute({
+      hasThread,
+      isCommand: false,
+      threadKnown: Boolean(threadLink),
+      rootKnown: Boolean(rootLink),
+    });
+
+    if (decision.kind === "main-hint") {
+      // 主聊天流 = 管理台：普通文本不进入任何会话（决策 1）。
+      const res = await sender.sendCard(message.chatId, buildConsoleHintCard());
+      if (!res.ok) log.warn("管理台提示卡发送失败", { error: res.error ?? "unknown" });
+      return;
+    }
+
+    if (decision.kind === "use-session") {
+      const sessionID = threadLink?.sessionID ?? rootLink?.sessionID;
+      if (!sessionID) return; // 理论不可达
+      const anchor = message.rootId ?? message.messageId;
+      // root 命中：补写 thread 映射；thread 命中但缺锚点时补齐锚点（审批卡出站需要）。
+      if (decision.source === "root" || (threadLink && !threadLink.anchorMessageId)) {
+        await sessionMap.bindThread(message.threadId!, sessionID, message.chatId, message.senderOpenId, anchor);
+      }
+      log.debug("话题路由命中会话", { source: decision.source, sessionID, threadId: message.threadId });
+      await runInSession(message, sessionID, message.messageId);
+      return;
+    }
+
+    // create-in-thread：话题内第一条消息 → 新建会话并绑定 thread/root。
+    const title = topicTitle(message.text);
+    const created = await ctx.session.create({ title });
+    await sessionMap.addSession(message.chatId, created.id, title, message.senderOpenId, { setActive: false });
+    const anchor = message.rootId ?? message.messageId;
+    await sessionMap.bindThread(message.threadId!, created.id, message.chatId, message.senderOpenId, anchor);
+    await sessionMap.bindRoot(anchor, created.id);
+    log.info("话题新建 opencode 会话", { sessionID: created.id, threadId: message.threadId, chatId: message.chatId });
+    await runInSession(message, created.id, message.messageId);
+  }
+
+  /**
+   * 回退路径（threadRouting=false）：沿用 P3 行为，普通文本进当前会话（无则自动建）。
+   * 刻意不传 replyToMessageId —— 回退模式下即使消息带 thread_id 也不落话题。
+   */
+  async function runInActiveSession(message: IncomingMessage): Promise<void> {
     let active = await sessionMap.getActive(message.chatId);
     if (!active) {
       const title = defaultSessionTitle(Date.now());
@@ -206,20 +271,36 @@ async function start(
       active = { sessionID: created.id, title, updatedAt: Date.now() };
       log.info("新建 opencode 会话", { sessionID: created.id, chatId: message.chatId });
     }
+    await runInSession(message, active.sessionID);
+  }
 
+  /**
+   * 在指定会话里跑一条消息：先发回执卡，再 prompt。
+   * `replyToMessageId` 有值时回执卡引用该消息（话题内 → 回复留在话题）。
+   */
+  async function runInSession(
+    message: IncomingMessage,
+    sessionID: string,
+    replyToMessageId?: string,
+  ): Promise<void> {
     // 原生排队：该 session 正在跑 execution 就 queue，否则 steer。
-    const delivery: Delivery = decideDelivery(executions.isRunning(active.sessionID));
+    const delivery: Delivery = decideDelivery(executions.isRunning(sessionID));
 
     // 关键顺序：**先**发回执卡（含状态页脚），再发起 prompt。
-    const receipt = await runs.beginRun({ sessionID: active.sessionID, chatId: message.chatId, delivery });
-    if (!receipt.ok) log.warn("回执卡未发送，仍继续 prompt", { sessionID: active.sessionID, delivery });
+    const receipt = await runs.beginRun({
+      sessionID,
+      chatId: message.chatId,
+      delivery,
+      ...(replyToMessageId ? { replyToMessageId } : {}),
+    });
+    if (!receipt.ok) log.warn("回执卡未发送，仍继续 prompt", { sessionID, delivery });
 
     try {
-      await promptSession(ctx, active.sessionID, message.text, delivery);
+      await promptSession(ctx, sessionID, message.text, delivery);
     } catch (err) {
-      log.warn("prompt 发送失败", { sessionID: active.sessionID, error: errorMessage(err) });
+      log.warn("prompt 发送失败", { sessionID, error: errorMessage(err) });
       // 卡片收尾为失败态，避免页脚永久停在「思考中」。
-      runs.apply(active.sessionID, { type: "execution.failed", error: errorMessage(err) });
+      runs.apply(sessionID, { type: "execution.failed", error: errorMessage(err) });
     }
   }
 
@@ -356,6 +437,10 @@ async function start(
     const link = await sessionMap.resolveBySession(sessionID);
     if (!link) return;
     const text = `❌ OpenCode 运行失败：${extractErrorText(error)}`;
+    if (link.replyMessageId) {
+      await sender.replyText(link.replyMessageId, text);
+      return;
+    }
     await sender.sendText(link.chatId, text);
   }
 

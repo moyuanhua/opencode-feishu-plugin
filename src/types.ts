@@ -80,6 +80,20 @@ export interface SessionLink {
   readonly chatId: string;
   /** 触发该会话的飞书用户 open_id（审批卡 token 绑定对象）。 */
   readonly openId: string;
+  /**
+   * 话题锚点消息 id（P5）。存在即表示该会话绑定在某个飞书话题内，
+   * 异步出站（审批卡 / 失败提示）通过 `im.message.reply` 引用它，回复自然留在话题内。
+   */
+  readonly replyMessageId?: string;
+}
+
+/** 话题 / 话题根 → 会话映射（P5：话题 = 会话）。 */
+export interface ThreadLink {
+  readonly sessionID: string;
+  readonly chatId: string;
+  readonly openId: string;
+  /** 话题根消息 id；回复它可留在话题内（审批卡等异步出站使用）。 */
+  readonly anchorMessageId?: string;
 }
 
 /** `ctx.storage` 的最小子集，便于单测注入 fake。 */

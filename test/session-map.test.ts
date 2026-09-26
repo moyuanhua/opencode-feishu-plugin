@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { CHAT_KEY_PREFIX, CHAT_SESSIONS_SUFFIX, SessionMap, SESSION_KEY_PREFIX } from "../src/feishu/session-map.js";
+import { CHAT_KEY_PREFIX, CHAT_SESSIONS_SUFFIX, ROOT_KEY_PREFIX, SessionMap, SESSION_KEY_PREFIX, THREAD_KEY_PREFIX } from "../src/feishu/session-map.js";
 import { createLogger } from "../src/logger.js";
 import { FakeStorage } from "./helpers.js";
 
@@ -128,5 +128,87 @@ describe("SessionMap 多会话", () => {
     await expect(map.addSession("oc_1", "ses_1", "t", "ou_1")).resolves.toBeUndefined();
     // 内存仍可用
     expect(map.hasSession("ses_1")).toBe(true);
+  });
+});
+
+describe("SessionMap 话题 / root 映射（P5）", () => {
+  test("bindThread 持久化 + resolveByThread（含冷缓存回填）", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.bindThread("omt_1", "ses_1", "oc_1", "ou_1", "om_root");
+
+    expect(storage.raw(`${THREAD_KEY_PREFIX}omt_1`)).toEqual({
+      sessionID: "ses_1",
+      chatId: "oc_1",
+      openId: "ou_1",
+      anchorMessageId: "om_root",
+    });
+    expect(await map.resolveByThread("omt_1")).toEqual({
+      sessionID: "ses_1",
+      chatId: "oc_1",
+      openId: "ou_1",
+      anchorMessageId: "om_root",
+    });
+
+    // 冷启动：新实例仅凭 storage 回填。
+    const fresh = new SessionMap(storage, log);
+    expect((await fresh.resolveByThread("omt_1"))?.sessionID).toBe("ses_1");
+  });
+
+  test("bindThread 同步写 session 索引的 replyMessageId（审批卡落话题）", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.addSession("oc_1", "ses_1", "t", "ou_1");
+    await map.bindThread("omt_1", "ses_1", "oc_1", "ou_1", "om_root");
+
+    expect(storage.raw(`${SESSION_KEY_PREFIX}ses_1`)).toEqual({
+      chatId: "oc_1",
+      openId: "ou_1",
+      replyMessageId: "om_root",
+    });
+    // 内存缓存同步可见
+    expect(map.getLink("ses_1")?.replyMessageId).toBe("om_root");
+    // addSession 再调用不应冲掉锚点
+    await map.addSession("oc_1", "ses_1", "t2", "ou_1");
+    expect(map.getLink("ses_1")?.replyMessageId).toBe("om_root");
+  });
+
+  test("bindRoot / resolveByRoot（含冷缓存回填）", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.bindRoot("om_card", "ses_1");
+    expect(storage.raw(`${ROOT_KEY_PREFIX}om_card`)).toEqual({ sessionID: "ses_1" });
+    expect(await map.resolveByRoot("om_card")).toEqual({ sessionID: "ses_1" });
+    expect(await new SessionMap(storage, log).resolveByRoot("om_card")).toEqual({ sessionID: "ses_1" });
+    expect(await map.resolveByRoot("om_unknown")).toBeUndefined();
+  });
+
+  test("空 id 直接忽略，不写 storage", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log);
+    await map.bindThread("", "ses_1", "oc_1", "ou_1");
+    await map.bindThread("omt_1", "", "oc_1", "ou_1");
+    await map.bindRoot("", "ses_1");
+    expect(await map.resolveByThread("omt_1")).toBeUndefined();
+    expect(await map.resolveByRoot("om_card")).toBeUndefined();
+  });
+
+  test("ThreadLink 缺 sessionID 视为非法", async () => {
+    const storage = new FakeStorage();
+    storage.seed(`${THREAD_KEY_PREFIX}omt_bad`, { chatId: "oc_1", openId: "ou_1" });
+    const map = new SessionMap(storage, log);
+    expect(await map.resolveByThread("omt_bad")).toBeUndefined();
+  });
+
+  test("addSession setActive=false 不抢走当前会话", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.addSession("oc_1", "ses_1", "一", "ou_1");
+    await map.addSession("oc_1", "ses_2", "话题", "ou_1", { setActive: false });
+    expect((await map.getActive("oc_1"))?.sessionID).toBe("ses_1");
+    expect((await map.listSessions("oc_1")).map((s) => s.sessionID)).toEqual(["ses_1", "ses_2"]);
+    // 没有任何会话时 setActive=false 仍应落到新会话，避免“无当前”。
+    await map.addSession("oc_2", "ses_3", "首", "ou_1", { setActive: false });
+    expect((await map.getActive("oc_2"))?.sessionID).toBe("ses_3");
   });
 });

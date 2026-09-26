@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   buildApprovalCard,
+  buildConsoleHintCard,
   buildResolvedCard,
   buildStreamingCard,
   MAX_CARD_BYTES,
@@ -60,6 +61,18 @@ describe("buildStreamingCard", () => {
   test("空内容显示思考占位", () => {
     const card = JSON.stringify(buildStreamingCard(""));
     expect(card).toContain("正在思考");
+  });
+});
+
+describe("buildConsoleHintCard", () => {
+  test("管理台提示卡：JSON 2.0 + 无按钮 + 指向 /new 与 /sessions", () => {
+    const card = buildConsoleHintCard() as Record<string, unknown>;
+    expect(card.schema).toBe("2.0");
+    expect((card.config as Record<string, unknown>).update_multi).toBe(true);
+    const text = JSON.stringify(card);
+    expect(text).toContain("/new");
+    expect(text).toContain("/sessions");
+    expect(text).not.toContain('"tag":"button"');
   });
 });
 

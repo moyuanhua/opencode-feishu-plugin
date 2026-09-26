@@ -12,12 +12,21 @@ class FakeSender implements FeishuSender {
     this.sent.push({ chatId, card });
     return { ok: true, messageId: "om_stream" };
   }
+  async replyCard(): Promise<SendCardResult> {
+    return { ok: true, messageId: "om_stream" };
+  }
   async patchCard(messageId: string, card: object): Promise<{ ok: boolean }> {
     this.patched.push({ messageId, card });
     return { ok: true };
   }
   async sendText(): Promise<SendCardResult> {
     return { ok: true };
+  }
+  async replyText(): Promise<SendCardResult> {
+    return { ok: true };
+  }
+  async getMessageMeta(): Promise<undefined> {
+    return undefined;
   }
   async deleteMessage(): Promise<void> {}
 }

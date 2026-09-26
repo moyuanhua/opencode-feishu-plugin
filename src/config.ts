@@ -32,6 +32,12 @@ export interface ResolvedConfig {
   readonly denyTools: readonly string[];
   readonly stream: boolean;
   readonly streamThrottleMs: number;
+  /**
+   * 话题路由总开关（P5）。默认 true。
+   * - true：主聊天流只做管理（普通文本回提示卡），话题 = 会话，出站走 reply。
+   * - false：完全回到 P3 行为（主聊天流普通文本进当前会话，忽略 thread_id），出问题一键回退。
+   */
+  readonly threadRouting: boolean;
   readonly logLevel: LogLevel;
   /**
    * 日志同时追加写入的文件全路径；`undefined` = 只写 stderr。
@@ -102,6 +108,7 @@ export function resolveConfig(
   const gate = asGate(merged.permissionGate);
   const logLevel = asLogLevel(merged.logLevel);
   const stream = asBoolean(merged.stream, true);
+  const threadRouting = asBoolean(merged.threadRouting, true);
   const throttle = clamp(asNumber(merged.streamThrottleMs, 400), 400, 60_000);
   const approvalTtlMs = clamp(asNumber(merged.approvalTtlMs, 10 * 60 * 1000), 30_000, 24 * 60 * 60 * 1000);
   const maxResourcesShown = clamp(asNumber(merged.maxResourcesShown, 8), 1, 50);
@@ -136,6 +143,7 @@ export function resolveConfig(
     denyTools,
     stream,
     streamThrottleMs: throttle,
+    threadRouting,
     logLevel,
     logFile,
     gatewayLocation,

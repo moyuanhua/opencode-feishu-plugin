@@ -99,11 +99,21 @@ export function useErrorText(reason: "empty" | "not_found" | "ambiguous"): strin
   }
 }
 
-/** `/help` 文案。 */
-export function helpText(): string {
+/** `/help` 文案。`scope` 决定显示哪些命令（话题内不展示被禁命令）。 */
+export function helpText(scope: "main" | "thread" = "main"): string {
+  if (scope === "thread") {
+    return [
+      "**OpenCode 话题命令**",
+      "`/current` — 查看本话题对应的会话",
+      "`/stop` — 中断本话题会话正在跑的任务",
+      "`/help` — 显示本帮助",
+      "",
+      "会话管理（`/new` `/sessions` `/use`）请回到**主聊天流**操作。",
+    ].join("\n");
+  }
   return [
     "**OpenCode 会话命令**",
-    "`/new [标题]` — 新建会话并切换（缺省标题为时间戳）",
+    "`/new [标题]` — 新建会话并自动开好话题（缺省标题为时间戳）",
     "`/sessions`（别名 `/ls`）— 会话列表卡片",
     "`/use <序号|会话id前缀>` — 切换当前会话",
     "`/current` — 查看当前会话",
@@ -111,3 +121,25 @@ export function helpText(): string {
     "`/help` — 显示本帮助",
   ].join("\n");
 }
+
+/** 话题内允许的命令白名单（决策 2）。 */
+const THREAD_ALLOWED: ReadonlySet<CommandName> = new Set<CommandName>(["current", "stop", "help", "unknown"]);
+
+/** 话题内该命令是否可用；`/new` `/sessions` `/use` 在话题内被禁。 */
+export function isCommandAllowedInThread(name: CommandName): boolean {
+  return THREAD_ALLOWED.has(name);
+}
+
+/** 话题内敲了被禁命令时的提示文案（引导去主聊天流）。 */
+export function threadForbiddenText(raw: string): string {
+  const name = raw ? `\`/${raw}\`` : "该命令";
+  return `话题内不支持 ${name}。\n\n会话管理请回到**主聊天流**操作（\`/new\`、\`/sessions\`、\`/use\`）。`;
+}
+
+/** 话题会话标题：取首条消息摘要，如 `话题: 帮我看看这个 bug`。 */
+export function topicTitle(text: string, max = 20): string {
+  const oneLine = text.replace(/\s+/g, " ").trim();
+  const summary = oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+  return summary ? `话题: ${summary}` : "话题会话";
+}
+

@@ -15,6 +15,7 @@
 | 流式回复 | 订阅 `session.text.delta`，把 assistant 文本增量以**原地更新的飞书卡片**回填（节流 ≥400ms） |
 | 卡片审批 | `permission.evaluate` 降级为 `ask` → 发审批卡（允许一次 / 始终允许 / 拒绝）→ 点击后 `permission.reply` 闭环 |
 | 会话管理 | 一个飞书单聊可绑定**多个** opencode 会话：`/new` `/sessions` `/use` `/current` `/stop`，以及会话列表卡片按钮切换 |
+| 话题 = 会话（P5） | 一个飞书**话题**即一个 opencode 会话；`/new` 自动开话题「一键进入」，话题内消息与回复都留在话题内（`threadRouting` 可回退） |
 | 立即回执 | 收到消息**先**发一张运行卡片（思考中 / 已排队）再发起 prompt |
 | 原生排队 | session 正在执行时用 `delivery:"queue"` 排队，空闲时 `delivery:"steer"` |
 | 工具可见 | 工具调用以折叠面板回填卡片（≥3 自动折叠，最新一个展开） |
@@ -157,6 +158,7 @@ chmod 600 ~/.config/opencode/plugins/feishu.json
 | `denyTools` | string[] | `[]` | 强制拒绝名单（可选），优先于 `allowTools` |
 | `stream` | boolean | `true` | 是否用流式卡片回填回复 |
 | `streamThrottleMs` | number | `400` | 卡片更新最小间隔，**下限强制 400ms**（飞书单条消息更新 5 QPS） |
+| `threadRouting` | boolean | `true` | 话题路由总开关（P5）。`false` = 回到 P3 行为（忽略 `thread_id`，主聊天流普通文本进当前会话），出问题一键回退 |
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | stderr 结构化日志级别 |
 | `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
 | `domain` | `feishu`\|`lark` | `feishu` | 飞书 / Lark 国际版 |
@@ -260,7 +262,70 @@ opencode 会按 location 多次加载全局插件，导致同一进程内 `setup
 
 ---
 
-## 六、卡片交互（回执 / 原生排队 / 工具可见 / 流式）
+## 六、话题 = 会话（P5）
+
+> 依据 2026-09-26 实测：p2p 消息事件在**话题内**会带 `thread_id`(`omt_…`) + `root_id` + `parent_id`；
+> **主聊天流**三者皆空。机器人可对一条消息 `POST /im/v1/messages/{id}/reply` 且 `reply_in_thread:true`
+> **自动开话题**（新消息获得 `thread_id`）。
+
+### 机制
+
+- **一个飞书话题 = 一个 OpenCode 会话**。话题内发消息 → 路由到该话题绑定的会话；回复用 `im.message.reply`
+  引用触发消息，**自然留在话题内**。
+- **主聊天流只做会话管理**：普通文本**不进入任何会话**，回一张「管理台」提示卡；要干活请进话题。
+- 映射持久化在共享 `ctx.storage`（跨实例有效）：
+
+  | key | 值 | 说明 |
+  | --- | --- | --- |
+  | `feishu:v2:thread:<threadId>` | `{sessionID, chatId, openId, anchorMessageId?}` | 话题 → 会话主键 |
+  | `feishu:v2:root:<rootId>` | `{sessionID}` | 话题根消息 → 会话（手动从卡片建话题） |
+  | `feishu:v2:session:<sid>` | `{chatId, openId, replyMessageId?}` | 权限路由；话题会话额外带锚点，审批卡也 reply 落话题 |
+
+- 路由决策（`src/feishu/routing.ts`，纯函数）：
+
+  ```
+  有 threadId ?
+  ├─ 是
+  │   ├─ thread 命中 → 用该会话
+  │   ├─ 否则 root 命中 → 用该会话（补写 thread 映射）
+  │   └─ 都未命中 → 新建会话（标题 `话题: <首条消息前20字>`）+ bind thread + bind root
+  └─ 否 → 以 / 开头走命令；普通文本回「管理台」提示卡
+  ```
+
+### 进入会话的两条路径
+
+1. **一键**：主聊天流 `/new [标题]` → 建会话后，机器人把「会话已就绪」卡 `reply_in_thread` 到你的那条消息，
+   **自动生成话题**并绑定；卡片消息 id 同时 `bindRoot`。
+2. **手动**：在**会话列表卡**上使用飞书的「创建话题」；该卡片消息 id 即 `root_id`，话题内发消息会经 root 反查绑定到对应会话。
+
+### 命令矩阵
+
+| 命令 | 主聊天流 | 话题内 |
+| --- | --- | --- |
+| `/new [标题]` | ✅ 建会话并自动开话题 | ❌ 提示去主聊天流 |
+| `/sessions`（`/ls`） | ✅ 管理面板 | ❌ 同上 |
+| `/use <n\|id>` | ✅ | ❌ 同上 |
+| `/current` | ✅（当前会话） | ✅（本话题会话） |
+| `/stop` | ✅（当前会话） | ✅（本话题会话） |
+| `/help` | ✅ | ✅（只列话题内可用命令） |
+| 普通文本 | ❌ 回提示卡 | ✅ 进入该话题的会话 |
+
+### 回退开关
+
+配置 `threadRouting: false` 可**一键回到 P3 行为**（主聊天流普通文本进当前会话，完全忽略 `thread_id`，不建/不用话题）。
+详见下方「配置字段」与「排障」。
+
+### 已知限制
+
+- 话题被用户删除后会留下**孤儿映射**，当前策略是**惰性忽略**（不报错）；后续版本再提供 `/forget` 清理。
+- `card.action.trigger` 回调**不带** `thread_id`：话题会话的审批卡靠 `session:<sid>.replyMessageId` 锚点落话题；
+  审批 `value` 目前未编入 threadId（P5.2 兜底项）。
+- 话题内新建会话**不改变主聊天流的「当前会话」**，避免管理面板指错。
+- 主题约束（软引导）尚未实现，接口位置预留在 P5.3。
+
+---
+
+## 七、卡片交互（回执 / 原生排队 / 工具可见 / 流式）
 
 收到私聊文本后，插件**先**发一张「运行卡片」再发起 prompt；随后所有事件都回填到这张卡上。
 
@@ -305,7 +370,7 @@ opencode 会按 location 多次加载全局插件，导致同一进程内 `setup
 
 ---
 
-## 七、故障排查
+## 八、故障排查
 
 | 现象 | 可能原因 / 处理 |
 | --- | --- |
@@ -324,12 +389,15 @@ opencode 会按 location 多次加载全局插件，导致同一进程内 `setup
 | 想临时关闭审批 | 把 `permissionGate` 设为 `off` |
 | `/sessions`、`/use` 等命令没反应 | 命令仅识别**以 `/` 开头的单聊文本**；确认是 p2p 且发送者在白名单内。未知命令会回帮助提示 |
 | 切换会话后再发消息仍进旧会话 | `/use` 成功会回执「已切换」；也可用 `/current` 复核。切换只改变当前会话，历史消息不受影响 |
+| 主聊天流发消息只回「管理台」提示卡 | P5 预期行为：主聊天流只做管理；用 `/new` 或从会话卡进入话题后发消息。想恢复旧行为设 `threadRouting: false` |
+| 话题内发消息没反应 / 进了别的会话 | 用话题内 `/current` 复核本话题会话；检查 `feishu:v2:thread:<tid>` 映射是否存在。若曾手动建话题，确认其根消息是会话卡（已 `bindRoot`） |
+| 话题内 `/new` `/sessions` `/use` 无反应 | P5 决策 2：话题内禁用这三个命令（会提示去主聊天流）。请回主聊天流操作 |
 | 重复回复 / 重复发卡 | 旧版本因 opencode 多次 setup 起了两个长连接；现已用进程级 `SetupGuard` 修复（debug 日志「检测到同进程重复 setup」） |
 | 想看详细日志 | 把 `logLevel` 设为 `debug`（日志只打 secret 存在性，绝不含明文） |
 
 ---
 
-## 八、安全边界（三重保险）
+## 九、安全边界（三重保险）
 
 1. **平台层**：应用可用范围 = 仅本人，其他人无法与机器人建立单聊。
 2. **scope 层**：只申请 p2p 读权限，不申请任何群权限，群消息物理收不到。
@@ -339,7 +407,7 @@ opencode 会按 location 多次加载全局插件，导致同一进程内 `setup
 
 ---
 
-## 九、开发
+## 十、开发
 
 ```bash
 npm install
@@ -369,8 +437,9 @@ src/
     cards.ts            # 审批卡 / 流式卡 / 结果卡构建（纯函数）
     session-cards.ts    # 会话列表卡片构建 + 按钮 value 解析（纯函数）
     commands.ts         # 会话命令解析 / 匹配 / 文案（纯函数）
-    sender.ts           # im.message.create/patch/delete 薄封装
-    session-map.ts      # chat ↔ 多会话映射（ctx.storage 持久化 + 旧格式迁移）
+    routing.ts          # P5 话题路由决策（有/无 threadId、thread/root 命中，纯函数）
+    sender.ts           # im.message.create/reply/patch/delete/get 薄封装
+    session-map.ts      # chat ↔ 多会话映射 + 话题/root 映射（ctx.storage 持久化 + 旧格式迁移）
     run-state.ts        # 运行卡片纯 reducer（文本/工具/页脚/终态）
     run-renderer.ts     # 运行卡片 JSON 2.0 渲染 + 工具折叠 + 体积保护（纯函数）
     run-controller.ts   # 回执卡 + per-session active/queued + 节流 patch
@@ -382,16 +451,19 @@ src/
 
 ---
 
-## 十、已知限制（P0 范围外）
+## 十一、已知限制（P0 范围外）
 
 - 只处理**单聊文本**（含富文本 post）；图片/文件/音视频只给出文字占位描述，不下载。
 - 会话管理提供 `/new` `/sessions` `/use` `/current` `/stop`；`removeSession` / `renameSession` API 已就绪但暂无对应命令。
 - 只处理从飞书发起的会话的审批；TUI 会话不接管（避免挂起）。
 - 未做「问答卡 / question」审批，仅 `permission`。
 - 未申请群相关能力，故不支持群聊（未来按 `APP_MODE_SCOPES.md` 的 T1–T6 逐档扩展）。
-- **messageId 去重非原子**：`ctx.storage` 无 CAS，两个实例极端并发处理同一条消息时理论上可能双处理（详见「六、卡片交互」）。
+- **messageId 去重非原子**：`ctx.storage` 无 CAS，两个实例极端并发处理同一条消息时理论上可能双处理（详见「七、卡片交互」）。
 - 排队卡片依赖 `session.execution.started` 晋升；若服务端在排队任务开始时未发出该事件，卡片会停留在「已排队」（可用 `/stop` 或重新发消息兜底）。
 - 运行卡片体积保护会**丢弃最旧**的 body 元素（保证 ≤30KB），超长会话早期内容可能不出现在卡片上；完整内容仍在日志/会话里。
+- **主聊天流不再直接干活**（决策 1）：主聊天流只做会话管理，普通文本回「管理台」提示卡，需 `/new` 或从会话卡进入话题。想恢复旧行为设 `threadRouting: false`。
+- **孤儿话题映射**：话题被删除后映射不主动清理（惰性忽略），后续再提供 `/forget`。
+- **审批卡话题归属**：`card.action.trigger` 不带 `thread_id`，话题会话靠 `replyMessageId` 锚点落话题；卡片按钮 value 尚未编入 threadId（P5.2）。
 
 ## 许可证
 

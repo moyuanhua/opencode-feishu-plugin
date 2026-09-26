@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { buildSessionListCard, parseSessionCardValue } from "../src/feishu/session-cards.js";
+import { buildSessionListCard, buildSessionReadyCard, parseSessionCardValue } from "../src/feishu/session-cards.js";
 import type { SessionEntry } from "../src/feishu/session-map.js";
 
 const entries: SessionEntry[] = [
@@ -36,6 +36,23 @@ describe("buildSessionListCard", () => {
     const card = buildSessionListCard({ chatId: "oc_1", sessions: [] });
     expect(buttonsOf(card)).toHaveLength(1);
     expect(JSON.stringify(card)).toContain("还没有会话");
+  });
+});
+
+describe("buildSessionReadyCard", () => {
+  test("一键进入卡：2.0 + 无按钮 + 展示标题与会话 id", () => {
+    const card = buildSessionReadyCard({ title: "我的标题", sessionID: "ses_new_1" }) as Record<string, unknown>;
+    expect(card.schema).toBe("2.0");
+    expect((card.config as Record<string, unknown>).update_multi).toBe(true);
+    expect(buttonsOf(card)).toHaveLength(0);
+    const text = JSON.stringify(card);
+    expect(text).toContain("我的标题");
+    expect(text).toContain("ses_new_1");
+    expect(text).toContain("本话题内直接发消息");
+  });
+
+  test("空标题回退 (未命名)", () => {
+    expect(JSON.stringify(buildSessionReadyCard({ title: "  ", sessionID: "s" }))).toContain("(未命名)");
   });
 });
 

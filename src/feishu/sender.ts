@@ -33,13 +33,38 @@ export function describeLarkError(err: unknown): string {
 export interface SendCardResult {
   readonly ok: boolean;
   readonly messageId?: string;
+  /** `im.message.reply` 直接带回的 thread_id（P5）；回复响应可能不含，调用方再 getMessageThread 兜底。 */
+  readonly threadId?: string;
+  readonly rootId?: string;
   readonly error?: string;
+}
+
+/** `im.message.reply` 可选参数。 */
+export interface ReplyOptions {
+  /** true = 对该消息开启新话题（`reply_in_thread`）；缺省 false = 普通引用回复。 */
+  readonly replyInThread?: boolean;
+}
+
+/** 消息归属信息（读回 `im.message.get`）。 */
+export interface MessageMeta {
+  readonly threadId?: string;
+  readonly rootId?: string;
+  readonly parentId?: string;
 }
 
 export interface FeishuSender {
   sendCard(chatId: string, card: object): Promise<SendCardResult>;
+  /**
+   * 引用回复一张卡片（P5）：消息在话题内时用它，回复自然留在同一话题。
+   * `opts.replyInThread` 为 true 时开启新话题（`/new` 一键进入）。
+   */
+  replyCard(messageId: string, card: object, opts?: ReplyOptions): Promise<SendCardResult>;
   patchCard(messageId: string, card: object): Promise<{ ok: boolean; error?: string }>;
   sendText(chatId: string, text: string): Promise<SendCardResult>;
+  /** 引用回复文本（话题内的命令回执 / 失败提示）。 */
+  replyText(messageId: string, text: string, opts?: ReplyOptions): Promise<SendCardResult>;
+  /** 读回消息的 thread/root/parent（reply 响应未直接给 thread_id 时的可靠兜底）。 */
+  getMessageMeta(messageId: string): Promise<MessageMeta | undefined>;
   deleteMessage(messageId: string): Promise<void>;
 }
 
@@ -66,6 +91,35 @@ export function createFeishuSender(client: LarkClient, log: Logger): FeishuSende
         return messageId ? { ok: true, messageId } : { ok: false, error: "missing message_id" };
       } catch (err) {
         log.warn("发送卡片异常", { chatId, error: describeLarkError(err) });
+        return { ok: false, error: describeLarkError(err) };
+      }
+    },
+
+    async replyCard(messageId, card, opts) {
+      if (!messageId) return { ok: false, error: "missing messageId" };
+      try {
+        const res = await client.im.message.reply({
+          path: { message_id: messageId },
+          data: {
+            msg_type: "interactive",
+            content: JSON.stringify(card),
+            ...(opts?.replyInThread ? { reply_in_thread: true } : {}),
+          },
+        });
+        if (res?.code && res.code !== 0) {
+          log.warn("回复卡片失败", { messageId, code: res.code, msg: res.msg });
+          return { ok: false, error: `code=${res.code} msg=${res.msg ?? ""}` };
+        }
+        const newMessageId = res?.data?.message_id ?? "";
+        if (!newMessageId) return { ok: false, error: "missing message_id" };
+        return {
+          ok: true,
+          messageId: newMessageId,
+          ...(res?.data?.thread_id ? { threadId: res.data.thread_id } : {}),
+          ...(res?.data?.root_id ? { rootId: res.data.root_id } : {}),
+        };
+      } catch (err) {
+        log.warn("回复卡片异常", { messageId, error: describeLarkError(err) });
         return { ok: false, error: describeLarkError(err) };
       }
     },
@@ -106,6 +160,52 @@ export function createFeishuSender(client: LarkClient, log: Logger): FeishuSende
         return messageId ? { ok: true, messageId } : { ok: true };
       } catch (err) {
         return { ok: false, error: describeLarkError(err) };
+      }
+    },
+
+    async replyText(messageId, text, opts) {
+      if (!messageId) return { ok: false, error: "missing messageId" };
+      try {
+        const res = await client.im.message.reply({
+          path: { message_id: messageId },
+          data: {
+            msg_type: "text",
+            content: JSON.stringify({ text }),
+            ...(opts?.replyInThread ? { reply_in_thread: true } : {}),
+          },
+        });
+        if (res?.code && res.code !== 0) {
+          return { ok: false, error: `code=${res.code} msg=${res.msg ?? ""}` };
+        }
+        const newMessageId = res?.data?.message_id ?? "";
+        return {
+          ok: true,
+          ...(newMessageId ? { messageId: newMessageId } : {}),
+          ...(res?.data?.thread_id ? { threadId: res.data.thread_id } : {}),
+        };
+      } catch (err) {
+        return { ok: false, error: describeLarkError(err) };
+      }
+    },
+
+    async getMessageMeta(messageId) {
+      if (!messageId) return undefined;
+      try {
+        const res = await client.im.message.get({ path: { message_id: messageId } });
+        if (res?.code && res.code !== 0) {
+          log.warn("读取消息失败", { messageId, code: res.code, msg: res.msg });
+          return undefined;
+        }
+        const item = res?.data?.items?.[0];
+        if (!item) return undefined;
+        return {
+          ...(item.thread_id ? { threadId: item.thread_id } : {}),
+          ...(item.root_id ? { rootId: item.root_id } : {}),
+          ...(item.parent_id ? { parentId: item.parent_id } : {}),
+        };
+      } catch (err) {
+        log.warn("读取消息异常", { messageId, error: describeLarkError(err) });
+        return undefined;
       }
     },
 

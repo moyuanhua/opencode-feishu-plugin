@@ -88,6 +88,35 @@ export function buildApprovalCard(input: ApprovalCardInput): object {
   };
 }
 
+/**
+ * 主聊天流「管理台」提示卡（P5，决策 1）：普通文本不进入任何会话，只回这张卡。
+ */
+export function buildConsoleHintCard(): object {
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    header: { title: { tag: "plain_text", content: "🛠️ OpenCode 管理台" }, template: "blue" },
+    body: {
+      elements: [
+        {
+          tag: "markdown",
+          content: truncateCardContent(
+            [
+              "这里是**会话管理台**，不会直接执行任务。",
+              "",
+              "- `/new [标题]` — 新建会话，并自动为你开好一个话题",
+              "- `/sessions`（别名 `/ls`）— 查看 / 切换会话",
+              "- `/help` — 查看全部命令",
+              "",
+              "进入话题后直接发消息，OpenCode 就在那个会话里干活。",
+            ].join("\n"),
+          ),
+        },
+      ],
+    },
+  };
+}
+
 /** 审批完成后的结果卡片（无按钮）。 */
 export function buildResolvedCard(input: ApprovalCardInput, outcome: ApprovalOutcome): object {
   const label =

@@ -3,10 +3,13 @@ import {
   defaultSessionTitle,
   helpText,
   isCommand,
+  isCommandAllowedInThread,
   matchSession,
   parseCommand,
   sessionLine,
   shortSessionId,
+  threadForbiddenText,
+  topicTitle,
   useErrorText,
 } from "../src/feishu/commands.js";
 import type { SessionEntry } from "../src/feishu/session-map.js";
@@ -104,5 +107,37 @@ describe("文案与展示", () => {
     for (const cmd of ["/new", "/sessions", "/use", "/current", "/stop", "/help"]) {
       expect(helpText()).toContain(cmd);
     }
+  });
+
+  test("helpText(thread) 只列话题内可用命令并提示去主聊天流", () => {
+    const text = helpText("thread");
+    expect(text).toContain("/current");
+    expect(text).toContain("/stop");
+    expect(text).not.toContain("/new [标题]");
+    expect(text).not.toContain("/use <序号");
+    expect(text).toContain("主聊天流");
+  });
+
+  test("话题命令白名单：只允许 current/stop/help/unknown", () => {
+    expect(isCommandAllowedInThread("current")).toBe(true);
+    expect(isCommandAllowedInThread("stop")).toBe(true);
+    expect(isCommandAllowedInThread("help")).toBe(true);
+    expect(isCommandAllowedInThread("unknown")).toBe(true);
+    expect(isCommandAllowedInThread("new")).toBe(false);
+    expect(isCommandAllowedInThread("sessions")).toBe(false);
+    expect(isCommandAllowedInThread("use")).toBe(false);
+  });
+
+  test("threadForbiddenText 指向主聊天流", () => {
+    expect(threadForbiddenText("new")).toContain("/new");
+    expect(threadForbiddenText("new")).toContain("主聊天流");
+  });
+
+  test("topicTitle 取首条消息摘要（压缩空白、按 20 字截断）", () => {
+    expect(topicTitle("  帮我   看看这个 bug ")).toBe("话题: 帮我 看看这个 bug");
+    expect(topicTitle("")).toBe("话题会话");
+    const long = topicTitle("一".repeat(30));
+    expect(long.startsWith("话题: ")).toBe(true);
+    expect(long).toMatch(/…$/);
   });
 });

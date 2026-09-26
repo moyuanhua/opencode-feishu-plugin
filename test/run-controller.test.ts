@@ -26,6 +26,12 @@ class FakeSender implements FeishuSender {
     return { ok: true, messageId };
   }
 
+  async replyCard(_messageId: string, card: object): Promise<SendCardResult> {
+    const messageId = `om_${this.seq++}`;
+    this.sent.push({ chatId: "reply", card, messageId });
+    return { ok: true, messageId };
+  }
+
   async patchCard(messageId: string, card: object): Promise<{ ok: boolean }> {
     this.patched.push({ messageId, card });
     return { ok: true };
@@ -33,6 +39,14 @@ class FakeSender implements FeishuSender {
 
   async sendText(): Promise<SendCardResult> {
     return { ok: true };
+  }
+
+  async replyText(): Promise<SendCardResult> {
+    return { ok: true };
+  }
+
+  async getMessageMeta(): Promise<undefined> {
+    return undefined;
   }
 
   async deleteMessage(): Promise<void> {}
@@ -104,6 +118,21 @@ describe("run controller", () => {
     const result = await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "steer" });
     expect(result.ok).toBe(false);
     expect(sender.sent).toHaveLength(0);
+    controller.dispose();
+  });
+
+  test("replyToMessageId 有值时用 reply 发回执卡（话题内）", async () => {
+    const { sender, controller } = setup();
+    const result = await controller.beginRun({
+      sessionID: "ses_1",
+      chatId: "oc_1",
+      delivery: "steer",
+      replyToMessageId: "om_src",
+    });
+    expect(result.ok).toBe(true);
+    expect(sender.sent).toHaveLength(1);
+    expect(sender.sent[0]!.chatId).toBe("reply");
+    expect(sender.sent[0]!.messageId).toBe("om_0");
     controller.dispose();
   });
 
