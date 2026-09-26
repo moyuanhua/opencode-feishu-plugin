@@ -122,6 +122,9 @@ export function parseIncomingMessage(data: unknown): IncomingMessage | undefined
     text: extractMessageText(messageType, rawContent),
     senderOpenId,
     ...(str(message.create_time) ? { createTime: str(message.create_time) } : {}),
+    ...(str(message.thread_id) ? { threadId: str(message.thread_id) } : {}),
+    ...(str(message.root_id) ? { rootId: str(message.root_id) } : {}),
+    ...(str(message.parent_id) ? { parentId: str(message.parent_id) } : {}),
   };
 }
 

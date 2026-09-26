@@ -43,6 +43,10 @@ export function startGateway(options: GatewayOptions): Gateway {
           chatType: message.chatType,
           messageType: message.messageType,
           textPreview: message.text.slice(0, 60),
+          messageId: message.messageId,
+          threadId: message.threadId,
+          parentId: message.parentId,
+          rootId: message.rootId,
         });
         void Promise.resolve(options.onMessage(message)).catch((err) => {
           log.error("消息处理失败", { error: errorMessage(err) });

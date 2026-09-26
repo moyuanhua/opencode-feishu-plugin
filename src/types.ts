@@ -34,6 +34,11 @@ export interface IncomingMessage {
   readonly text: string;
   readonly senderOpenId: string;
   readonly createTime?: string;
+  /** 话题 ID（`omt_`）。单聊里通过「创建话题」产生；普通消息为 undefined。 */
+  readonly threadId?: string;
+  /** 回复链：root 是话题/回复树的根消息，parent 是直接父消息。 */
+  readonly rootId?: string;
+  readonly parentId?: string;
 }
 
 /** `card.action.trigger` 回调归一化后的模型。 */
