@@ -22,7 +22,8 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "prepublishOnly": "npm run typecheck && npm run build && npm test"
   },
   "keywords": [
     "opencode",
@@ -39,6 +40,9 @@
   "engines": {
     "node": ">=20.0.0"
   },
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/moyuanhua/opencode-feishu-plugin.git"
@@ -51,7 +55,7 @@
     "@larksuiteoapi/node-sdk": "^1.74.0"
   },
   "peerDependencies": {
-    "@opencode/plugin": "2.0.16"
+    "@opencode/plugin": ">=2.0.16"
   },
   "devDependencies": {
     "@opencode/plugin": "2.0.16",
