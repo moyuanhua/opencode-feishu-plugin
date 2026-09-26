@@ -416,9 +416,10 @@ describe("SessionCommands 向导卡片回调", () => {
     expect(input.permissions).toEqual(
       expect.arrayContaining([{ action: "edit", resource: "*", effect: "allow" }]),
     );
-    // 一键开话题：reply 到 /new 那条消息并 reply_in_thread
+    // 一键开话题：先发独立锚点文本，再对它 reply_in_thread（不再复用会被改写的卡片）
+    expect(sender.texts.some((x) => x.includes("话题已开好"))).toBe(true);
     expect(sender.repliedCards).toHaveLength(1);
-    expect(sender.repliedCards[0]!.messageId).toBe("om_in");
+    expect(sender.repliedCards[0]!.messageId).toBe("om_text");
     expect(sender.repliedCards[0]!.replyInThread).toBe(true);
     const ready = JSON.stringify(sender.repliedCards[0]!.card);
     expect(ready).toContain("我的项目");
@@ -631,9 +632,10 @@ describe("SessionCommands 建会话表单（P6.1）", () => {
     expect(input.permissions).toEqual(
       expect.arrayContaining([{ action: "edit", resource: "*", effect: "allow" }]),
     );
-    // 锚点到 /new 那条消息并 reply_in_thread 开话题
+    // 独立锚点文本 + reply_in_thread 开话题
+    expect(sender.texts.some((x) => x.includes("话题已开好"))).toBe(true);
     expect(sender.repliedCards).toHaveLength(1);
-    expect(sender.repliedCards[0]!.messageId).toBe("om_in");
+    expect(sender.repliedCards[0]!.messageId).toBe("om_text");
     expect(sender.repliedCards[0]!.replyInThread).toBe(true);
     expect((await sessionMap.resolveByThread("omt_new"))?.sessionID).toBe("ses_new_1");
     expect((await sessionMap.resolveByRoot("om_ready"))?.sessionID).toBe("ses_new_1");

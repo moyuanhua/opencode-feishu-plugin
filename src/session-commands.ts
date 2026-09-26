@@ -754,15 +754,28 @@ export class SessionCommands {
       perm: presetLabel(perm),
     });
 
-    const anchor = opts.anchorMessageId ?? action.messageId;
-    const res = await this.deps.sender.replyCard(anchor, readyCard, { replyInThread: true });
+    // 用一条**独立**消息作为话题锚点：
+    // 不复用会被 patchCard 改写的卡片（否则同一张卡既是话题根又被改写，视觉上会重复）。
+    const anchorText = await this.deps.sender.sendText(chatId, `🗂 已为「${title}」创建会话，话题已开好 👇`);
+    const anchorId = anchorText.messageId ?? opts.anchorMessageId ?? action.messageId;
+    const res = await this.deps.sender.replyCard(anchorId, readyCard, { replyInThread: true });
+    this.deps.log.info("创建会话并开话题", {
+      sessionID: created.id,
+      anchorMessageId: anchorId,
+      anchorFromText: Boolean(anchorText.messageId),
+      replyOk: res.ok,
+      replyMessageId: res.messageId,
+      replyThreadId: res.threadId,
+      replyError: res.error,
+    });
     if (!res.ok || !res.messageId) {
       this.deps.log.warn("一键开话题失败", { error: res.error ?? "unknown" });
       await this.patchCard(
         action.messageId,
         buildSetupDoneCard("✅ 会话已创建", [
           `「${title}」\`${created.id}\``,
-          "（自动开话题失败，可稍后在 `/sessions` 卡片上手动创建话题）",
+          "",
+          "⚠️ 自动开话题失败：请在 `/sessions` 的会话卡上手动「创建话题」，或在主聊天流用 `/use` 切换后继续。",
         ]),
       );
       return;
@@ -772,14 +785,21 @@ export class SessionCommands {
     const meta = res.threadId ? undefined : await this.deps.sender.getMessageMeta(res.messageId);
     const threadId = res.threadId ?? meta?.threadId;
     if (threadId) {
-      await this.deps.sessionMap.bindThread(threadId, created.id, chatId, action.operatorOpenId, anchor);
+      await this.deps.sessionMap.bindThread(threadId, created.id, chatId, action.operatorOpenId, anchorId);
     } else {
       this.deps.log.warn("一键开话题后未读到 thread_id，该会话暂无法自动路由", { messageId: res.messageId });
     }
 
     await this.patchCard(
       action.messageId,
-      buildSetupDoneCard("✅ 会话已创建", [`「${title}」已就绪，请到新话题内发消息。`], "green"),
+      buildSetupDoneCard(
+        "✅ 会话已创建",
+        [
+          `会话「${title}」已就绪（\`${created.id}\`）`,
+          ...(threadId ? ["", "已开好话题 👆 点进话题后直接发消息即可。"] : ["", "（未拿到话题 ID，若话题未出现请在会话卡上手动创建）"]),
+        ],
+        "green",
+      ),
     );
   }
 
