@@ -634,13 +634,28 @@ export class SessionCommands {
    * 目录先用 `validateDir` 校验（失败 → 回带错误说明的表单卡并保留已填项，不建会话）。
    */
   private async applySetupFormSubmit(action: CardAction): Promise<void> {
+    const fv = action.formValue;
+    const fvKeys = fv && typeof fv === "object" ? Object.keys(fv as Record<string, unknown>) : [];
+    this.deps.log.info("表单提交进入处理", {
+      chatId: action.chatId,
+      messageId: action.messageId,
+      formValueKeys: fvKeys,
+      formValueType: Array.isArray(fv) ? "array" : typeof fv,
+    });
     const values = parseSetupFormValues(action.formValue);
     if (!values) {
+      this.deps.log.warn("表单数据缺失（parse 返回 undefined）", { formValueKeys: fvKeys });
       await this.patchCard(action.messageId, buildSetupDoneCard("⚠️ 表单数据缺失", ["请重新发送 `/form` 填写。"]));
       return;
     }
     const state = await this.deps.wizard.get(action.chatId);
     if (!state) {
+      this.deps.log.warn("表单提交但向导状态不存在（可能已过期/已被消费）", {
+        chatId: action.chatId,
+        dirLen: values.dir.length,
+        hasModel: Boolean(values.model),
+        hasPerm: Boolean(values.perm),
+      });
       // 与按钮确认一致：向导状态已消费/失效 → 视为过期提交，不再建会话（防重放/重复提交）。
       await this.patchCard(action.messageId, buildSetupDoneCard("⚠️ 表单已失效", ["请重新发送 `/form` 或 `/new` 打开表单。"]));
       return;
@@ -652,8 +667,15 @@ export class SessionCommands {
       ...(values.perm ? { perm: values.perm } : {}),
     };
 
+    this.deps.log.info("表单字段解析", {
+      dir: values.dir,
+      model: values.model ? `${values.model.providerID}/${values.model.id}` : undefined,
+      perm: values.perm,
+      hasState: true,
+    });
     const validation = this.deps.validateDir(values.dir);
     if (!validation.ok) {
+      this.deps.log.warn("目录校验失败", { dir: values.dir, reason: validation.message });
       await this.patchCard(
         action.messageId,
         await this.renderFormCard(state, { error: validation.message, values: preserved }),
@@ -662,6 +684,7 @@ export class SessionCommands {
     }
 
     if (!values.perm) {
+      this.deps.log.warn("权限档位缺失", { dir: validation.path });
       await this.patchCard(
         action.messageId,
         await this.renderFormCard(state, { error: "请选择权限档位。", values: { ...preserved, dir: validation.path } }),
@@ -670,6 +693,11 @@ export class SessionCommands {
     }
 
     const model = values.model ? await this.resolveFormModel(values.model) : state?.model;
+    this.deps.log.info("表单校验通过，开始建会话", {
+      dir: validation.path,
+      perm: values.perm,
+      model: model ? `${model.providerID}/${model.id}` : undefined,
+    });
     // 消费向导，防连点重复建会话。
     await this.deps.wizard.cancel(action.chatId);
     await this.createSessionFromSetup(action.chatId, action, {

@@ -417,12 +417,19 @@ async function start(
     onCardAction: (action) => {
       // 会话卡 / 向导卡 / 表单提交优先；其余交给审批卡（value 里带 `cmd` / `wizard` 的才是管理操作）。
       const value = action.rawValue;
-      if (
-        action.formValue !== undefined ||
+      const hasForm = action.formValue !== undefined;
+      const routed =
+        hasForm ||
         isSetupFormAction(value) ||
-        parseSessionCardValue(value) ||
-        parseSetupCardValue(value)
-      ) {
+        Boolean(parseSessionCardValue(value)) ||
+        Boolean(parseSetupCardValue(value));
+      log.debug("卡片回调路由", {
+        hasForm,
+        hasValue: value !== undefined,
+        valueKeys: value && typeof value === "object" ? Object.keys(value as Record<string, unknown>) : [],
+        routedTo: routed ? "commands" : "approvals",
+      });
+      if (routed) {
         return commands.handleCardAction(action);
       }
       return approvals.handleCardAction(action);
