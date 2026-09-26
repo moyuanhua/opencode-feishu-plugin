@@ -27,6 +27,7 @@ import { SessionMap } from "./feishu/session-map.js";
 import { MessageDedup } from "./feishu/dedup.js";
 import { decideDelivery, ExecutionTracker, type Delivery } from "./feishu/delivery.js";
 import { createRunController } from "./feishu/run-controller.js";
+import { FormRelay, type FormReplyInput } from "./feishu/form-relay.js";
 import type { RunEvent } from "./feishu/run-state.js";
 import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js";
@@ -141,6 +142,15 @@ async function start(
     throttleMs: config.streamThrottleMs,
   });
 
+  // 表单（含 question 工具）中继：避免 agent 反问时执行永久挂起。
+  const formRelay = new FormRelay({
+    sender,
+    log,
+    getLink: (sessionID) => sessionMap.resolveBySession(sessionID),
+    isAllowed: (openId) => owner.isAllowed(openId),
+    reply: (input) => replyForm(ctx, input),
+  });
+
   // ── 会话管理 / 建会话向导（P6） ───────────────────────────────────────
   const wizard = new WizardStore(storage, log);
   const recent = new RecentStore(storage, log, {
@@ -228,6 +238,12 @@ async function start(
       runs.apply(sessionID, { type: "execution.failed", error: "已中断（/stop）" });
       await cancelQueuedPrompts(ctx, sessionID, await sessionMap.resolveBySession(sessionID), log);
     },
+    steerPrompt: async (message, sessionID, text) => {
+      // 强制 steer：打断当前步骤，把这条消息插入执行。
+      await runInSession({ ...message, text }, sessionID, message.messageId, "steer");
+    },
+    promoteQueued: async (sessionID) =>
+      promoteQueuedInbox(ctx, sessionID, await sessionMap.resolveBySession(sessionID), log),
     listModels,
     switchSessionModel,
     applyPermissionPreset,
@@ -339,6 +355,11 @@ async function start(
         await sessionMap.bindThread(message.threadId!, sessionID, message.chatId, message.senderOpenId, anchor);
       }
       log.debug("话题路由命中会话", { source: decision.source, sessionID, threadId: message.threadId });
+      // 若该会话有「等待自由文本」的表单字段，这条文本作为答案消费，不再当 prompt。
+      if (formRelay.consumeText(sessionID, message.text)) {
+        log.debug("表单自由文本已作为答案消费", { sessionID });
+        return;
+      }
       await runInSession(message, sessionID, message.messageId);
       return;
     }
@@ -386,9 +407,10 @@ async function start(
     message: IncomingMessage,
     sessionID: string,
     replyToMessageId?: string,
+    forceDelivery?: Delivery,
   ): Promise<void> {
-    // 原生排队：该 session 正在跑 execution 就 queue，否则 steer。
-    const delivery: Delivery = decideDelivery(executions.isRunning(sessionID));
+    // 原生排队：该 session 正在跑 execution 就 queue，否则 steer。`/steer` 强制 steer。
+    const delivery: Delivery = forceDelivery ?? decideDelivery(executions.isRunning(sessionID));
     // P6：运行卡页脚展示当前模型（会话元数据里记录的）。
     const link = await sessionMap.resolveBySession(sessionID);
     const model = link?.model ? modelLabel(link.model) : undefined;
@@ -420,6 +442,10 @@ async function start(
     logLevel: config.logLevel,
     onMessage: (message) => handleMessage(message),
     onCardAction: (action) => {
+      // opencode 表单卡（含 question 工具）优先：value 形如 `{f,k,...}`。
+      const formResponse = formRelay.handleCardAction(action);
+      if (formResponse) return formResponse;
+
       // 会话卡 / 向导卡 / 表单提交优先；其余交给审批卡（value 里带 `cmd` / `wizard` 的才是管理操作）。
       const value = action.rawValue;
       const hasForm = action.formValue !== undefined;
@@ -467,6 +493,18 @@ async function start(
         break;
       case "permission.replied":
         approvals.onReplied(event.data as PermissionRepliedLike);
+        break;
+      case "form.created":
+        // 发卡是网络 IO，不能阻塞事件流（否则会拖慢后续 text.delta）。
+        void formRelay
+          .onCreated(event.data)
+          .catch((err) => log.warn("处理 form.created 失败", { error: errorMessage(err) }));
+        break;
+      case "form.replied":
+        formRelay.onReplied(event.data);
+        break;
+      case "form.cancelled":
+        formRelay.onCancelled(event.data);
         break;
       case "session.text.started": {
         const data = event.data as { sessionID: string; assistantMessageID?: string };
@@ -634,6 +672,7 @@ async function start(
     runs.dispose();
     executions.clear();
     approvals.dispose();
+    formRelay.dispose();
     await evaluateRegistration.dispose().catch((err) => log.warn("evaluate hook 释放失败", { error: errorMessage(err) }));
     gateway.stop();
     logSink?.close();
@@ -701,6 +740,62 @@ async function cancelQueuedPrompts(
     }
   } catch (err) {
     log.debug("取消排队消息失败（忽略）", { sessionID, error: errorMessage(err) });
+  }
+}
+
+/** 提交 opencode 表单答复（`session.form.reply`），带目录头跨 location 路由。 */
+async function replyForm(ctx: Plugin.Context, input: FormReplyInput): Promise<void> {
+  const form = (ctx.session as unknown as {
+    form?: {
+      reply?: (
+        arg: Record<string, unknown>,
+        options?: { headers?: Record<string, string> },
+      ) => Promise<void>;
+    };
+  }).form;
+  if (!form?.reply) throw new Error("session.form.reply 不可用");
+  const options = input.directory
+    ? { headers: { "x-opencode-directory": input.directory } }
+    : undefined;
+  await form.reply(
+    { sessionID: input.sessionID, formID: input.formID, answer: input.answer },
+    options,
+  );
+}
+
+/**
+ * 把会话内**尚未投递**的排队消息提升为 `steer`（立即插队执行）。
+ * 返回提升条数；运行时未暴露 inbox 时返回 -1（`/now` 据此提示不支持）。
+ */
+async function promoteQueuedInbox(
+  ctx: Plugin.Context,
+  sessionID: string,
+  link: SessionLink | undefined,
+  log: ReturnType<typeof createLogger>,
+): Promise<number> {
+  const inbox = (ctx.session as unknown as {
+    inbox?: {
+      list?: (input: { sessionID: string }, options?: unknown) => Promise<unknown>;
+      update?: (
+        input: { sessionID: string; inboxID: string; delivery: "steer" | "queue" },
+        options?: unknown,
+      ) => Promise<unknown>;
+    };
+  }).inbox;
+  if (!inbox?.list || !inbox.update) return -1;
+  const options = link?.dir ? { headers: { "x-opencode-directory": link.dir } } : undefined;
+  try {
+    const items = (await inbox.list({ sessionID }, options)) as Array<{ id?: string; delivery?: string }>;
+    let promoted = 0;
+    for (const item of items ?? []) {
+      if (!item?.id || item.delivery === "steer") continue;
+      await inbox.update({ sessionID, inboxID: item.id, delivery: "steer" }, options);
+      promoted++;
+    }
+    return promoted;
+  } catch (err) {
+    log.warn("提升排队消息为 steer 失败", { sessionID, error: errorMessage(err) });
+    return 0;
   }
 }
 

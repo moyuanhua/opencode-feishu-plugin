@@ -88,6 +88,16 @@ export interface SessionCommandsDeps {
   readonly createSession: (input: CreateSessionInput) => Promise<{ id: string }>;
   /** 中断指定会话正在跑的任务。 */
   readonly interruptSession: (sessionID: string) => Promise<void>;
+  /**
+   * `/steer <文本>`：把文本以 `delivery:"steer"` 立即插入会话执行（打断当前步骤）。
+   * 缺省时该命令提示不支持。
+   */
+  readonly steerPrompt?: (message: IncomingMessage, sessionID: string, text: string) => Promise<void>;
+  /**
+   * `/now`：把会话已排队的未投递消息改为 `steer`，返回提升条数。
+   * 返回 -1 表示当前运行时未暴露 inbox（不支持）；缺省同。
+   */
+  readonly promoteQueued?: (sessionID: string) => Promise<number>;
   /** 话题路由开关（P5）。false = 完全回到 P3 行为（`/new` 只回执文本）。 */
   readonly threadRouting?: boolean;
   readonly now?: () => number;
@@ -197,6 +207,10 @@ export class SessionCommands {
         return this.cmdCurrent(message, scope);
       case "stop":
         return this.cmdStop(message, scope);
+      case "steer":
+        return this.cmdSteer(message, parsed.args, scope);
+      case "now":
+        return this.cmdNow(message, scope);
       case "dir":
         return this.cmdDir(message, parsed.args);
       case "model":
@@ -511,6 +525,55 @@ export class SessionCommands {
     }
     await this.deps.interruptSession(active.sessionID);
     await this.reply(message, `⏹️ 已请求中断当前会话：「${active.title.trim() || "(未命名)"}」`);
+  }
+
+  /** 解析命令作用域内的目标会话：话题内用 thread 映射，主聊天流用当前会话。 */
+  private async scopeSessionID(message: IncomingMessage, scope: CommandScope): Promise<string | undefined> {
+    if (scope === "thread") return this.threadSessionID(message);
+    const active = await this.deps.sessionMap.getActive(message.chatId);
+    return active?.sessionID;
+  }
+
+  /** `/now`：把已排队（未投递）的消息提升为 steer，立即插队执行。 */
+  private async cmdNow(message: IncomingMessage, scope: CommandScope): Promise<void> {
+    const sessionID = await this.scopeSessionID(message, scope);
+    if (!sessionID) {
+      await this.reply(message, "当前没有会话。");
+      return;
+    }
+    if (!this.deps.promoteQueued) {
+      await this.reply(message, "当前版本不支持插队（运行时未暴露 inbox）。");
+      return;
+    }
+    const promoted = await this.deps.promoteQueued(sessionID);
+    if (promoted < 0) {
+      await this.reply(message, "当前版本不支持插队（运行时未暴露 inbox）。");
+      return;
+    }
+    if (promoted === 0) {
+      await this.reply(message, "没有排队中的消息（该会话当前空闲或无待投递项）。");
+      return;
+    }
+    await this.reply(message, `⚡ 已把 ${promoted} 条排队消息改为立即插队执行。`);
+  }
+
+  /** `/steer <文本>`：立即插队发送一条消息（打断当前步骤插入执行）。 */
+  private async cmdSteer(message: IncomingMessage, args: string, scope: CommandScope): Promise<void> {
+    const sessionID = await this.scopeSessionID(message, scope);
+    if (!sessionID) {
+      await this.reply(message, "当前没有会话。");
+      return;
+    }
+    const text = args.trim();
+    if (!text) {
+      await this.reply(message, "用法：`/steer <文本>`（立即插队发送）；把已排队消息插队请用 `/now`。");
+      return;
+    }
+    if (!this.deps.steerPrompt) {
+      await this.reply(message, "当前版本不支持插队。");
+      return;
+    }
+    await this.deps.steerPrompt(message, sessionID, text);
   }
 
   // ── 会话列表卡片（旧） ────────────────────────────────────────────────

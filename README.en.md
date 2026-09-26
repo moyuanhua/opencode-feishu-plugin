@@ -139,6 +139,8 @@ The main chat is management-only; plain text never enters a session.
 | `/use <n\|id-prefix>` | Switch current session |
 | `/current` | Show current session |
 | `/stop` | Interrupt the running task in the current session |
+| `/steer <text>` | Send a message that **cuts in immediately** (steers into the running step instead of queuing) |
+| `/now` | Promote this session's already-queued, not-yet-delivered messages to run immediately |
 | `/dir <path>` | **Pre-fill** the form's working directory (empty = allowed root; a missing path is auto-created) |
 | `/model [query]` | **Pre-fill** the form's model (also switches the current session's model inside a topic) |
 | `/perm [preset]` | **Pre-fill** the form's permission preset (also changes the current session inside a topic) |
@@ -154,6 +156,8 @@ One topic = one session. **Plain text inside a topic is a prompt to the agent**;
 | `/model` | Switch the model for this session |
 | `/perm` | Change the permission preset for this session |
 | `/cd <path>` | Move this session's working directory (empty = allowed root; a missing path is auto-created) |
+| `/steer <text>` | Steer a message into the running step immediately |
+| `/now` | Promote this session's queued messages to run immediately |
 | `/current` `/stop` `/help` | Same as main chat, scoped to this topic's session |
 
 ### Creating a session (`/new` and `/form` are fully equivalent)
@@ -215,6 +219,23 @@ The dropdown defaults to "✍️ Manually enter a path" so typing stays authorit
 | 🔓 Trust | Never ask | allow all |
 
 The preset is written to a **session-scoped** ruleset and can be changed any time with `/perm`, without affecting other sessions.
+
+### Queue and cut-in (`/steer` `/now`)
+
+While a session is busy, new messages use OpenCode's native queue (`delivery:"queue"`, the card footer shows "queued") and run only after the current task finishes. Two ways to cut in:
+
+- `/steer <text>` — send this message with `delivery:"steer"` to insert it immediately (interrupts the current step, like steering in the TUI).
+- `/now` — promote this session's already-queued, not-yet-delivered messages to `steer` (via OpenCode's `session.inbox.update`; content is neither lost nor re-sent).
+
+### Forms and questions (`question` tool)
+
+When the agent calls the `question` tool (or any form interaction), OpenCode creates a pending form that blocks execution. The plugin relays it as a Feishu card:
+
+- tap an option for single-choice fields; multi-field forms submit automatically once every field is filled;
+- for free-text fields, tap "✍️ reply directly" and send the answer as a message in the **same topic**;
+- the card resolves after submit/cancel.
+
+Without this relay, any clarifying question would stall the Feishu session forever and every later message would queue behind it — a common cause of "stuck sessions".
 
 ---
 

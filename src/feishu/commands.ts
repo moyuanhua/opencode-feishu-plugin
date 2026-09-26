@@ -19,6 +19,8 @@ export type CommandName =
   | "cd"
   | "cancel"
   | "form"
+  | "steer"
+  | "now"
   | "unknown";
 
 export interface ParsedCommand {
@@ -45,6 +47,8 @@ const ALIASES: Readonly<Record<string, CommandName>> = {
   permissions: "perm",
   cancel: "cancel",
   form: "form",
+  steer: "steer",
+  now: "now",
 };
 
 /** 是否是命令（以 `/` 开头）。 */
@@ -127,6 +131,8 @@ export function helpText(scope: "main" | "thread" = "main"): string {
       "**OpenCode 话题命令**",
       "`/current` — 查看本话题对应的会话",
       "`/stop` — 中断本话题会话正在跑的任务",
+      "`/steer <文本>` — 发送一条**立即插队**的消息（打断当前步骤插入执行）",
+      "`/now` — 把本会话**已排队**的未执行消息全部改为立即插队执行",
       "`/model [关键词]` — 查看 / 切换本话题会话的模型",
       "`/perm [档位]` — 查看 / 修改本话题会话的权限预设",
       "`/cd <绝对路径>` — 切换本话题会话的工作目录",
@@ -147,6 +153,8 @@ export function helpText(scope: "main" | "thread" = "main"): string {
     "`/use <序号|会话id前缀>` — 切换当前会话",
     "`/current` — 查看当前会话",
     "`/stop` — 中断当前会话正在跑的任务",
+    "`/steer <文本>` — 发送一条**立即插队**的消息（打断当前步骤插入执行）",
+    "`/now` — 把当前会话**已排队**的未执行消息全部改为立即插队执行",
     "`/help` — 显示本帮助",
   ].join("\n");
 }
@@ -155,6 +163,8 @@ export function helpText(scope: "main" | "thread" = "main"): string {
 const THREAD_ALLOWED: ReadonlySet<CommandName> = new Set<CommandName>([
   "current",
   "stop",
+  "steer",
+  "now",
   "help",
   "model",
   "perm",

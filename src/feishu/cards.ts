@@ -149,13 +149,21 @@ export function buildResolvedCard(input: ApprovalCardInput, outcome: ApprovalOut
  * 按钮必须直接放进 `body.elements`；回调数据用 `behaviors:[{type:"callback", value}]`
  * 且 `value` 必须是对象（事件里 `action.value` 原样带回）。
  */
-function button(text: string, type: "primary" | "default" | "danger", value: Record<string, unknown>): object {
+export function cardButton(
+  text: string,
+  type: "primary" | "default" | "danger",
+  value: Record<string, unknown>,
+): object {
   return {
     tag: "button",
     text: { tag: "plain_text", content: text },
     type,
     behaviors: [{ type: "callback", value }],
   };
+}
+
+function button(text: string, type: "primary" | "default" | "danger", value: Record<string, unknown>): object {
+  return cardButton(text, type, value);
 }
 
 /** 转义 markdown 行内代码里的反引号，避免破坏渲染。 */

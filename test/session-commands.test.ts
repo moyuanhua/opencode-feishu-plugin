@@ -89,7 +89,7 @@ function fakeValidate(path: string): DirValidation {
   return { ok: false, reason: "outside_allowed", message: `目录不在允许范围内：${path}` };
 }
 
-function setup(over: { allowed?: boolean; threadRouting?: boolean } = {}) {
+function setup(over: { allowed?: boolean; threadRouting?: boolean; promoted?: number } = {}) {
   const storage = new FakeStorage();
   const sessionMap = new SessionMap(storage, log, { now: () => 1000 });
   const sender = new FakeSender();
@@ -106,6 +106,8 @@ function setup(over: { allowed?: boolean; threadRouting?: boolean } = {}) {
   const switchSessionModel = vi.fn(async (_sessionID: string, _model: ModelRef) => undefined);
   const applyPermissionPreset = vi.fn(async (_sessionID: string, _preset: PermissionPreset) => undefined);
   const moveSessionDir = vi.fn(async (_sessionID: string, _dir: string) => undefined);
+  const steerPrompt = vi.fn(async (_message: IncomingMessage, _sessionID: string, _text: string) => undefined);
+  const promoteQueued = vi.fn(async (_sessionID: string) => over.promoted ?? 0);
   // 表单目录下拉来源：注入固定的一级子目录，避免测试触碰真实文件系统。
   const scanRootSubdirs = vi.fn(async (root: string) => [
     { path: `${root}/my-app`, isRepo: true },
@@ -124,6 +126,8 @@ function setup(over: { allowed?: boolean; threadRouting?: boolean } = {}) {
     switchSessionModel,
     applyPermissionPreset,
     moveSessionDir,
+    steerPrompt,
+    promoteQueued,
     validateDir: fakeValidate,
     allowedRoots: ["/home/ubuntu"],
     scanRootSubdirs,
@@ -141,6 +145,8 @@ function setup(over: { allowed?: boolean; threadRouting?: boolean } = {}) {
     switchSessionModel,
     applyPermissionPreset,
     moveSessionDir,
+    steerPrompt,
+    promoteQueued,
     scanRootSubdirs,
     storage,
   };
@@ -921,5 +927,53 @@ describe("SessionCommands 表单目录下拉（P6.3）", () => {
     expect(text).toContain("不在允许范围内");
     expect(text).toContain("/etc");
     expect(rootElements(patched.card)[0]!.tag).toBe("form");
+  });
+});
+
+describe("SessionCommands 插队（/steer 与 /now）", () => {
+  async function withActive() {
+    const ctx = setup();
+    await ctx.sessionMap.addSession("oc_1", "ses_live", "在跑的会话", "ou_1", { setActive: true });
+    return ctx;
+  }
+
+  test("/steer <文本>：以 steer 立即插队发送（不新建会话、不发普通回执）", async () => {
+    const { commands, sender, steerPrompt } = await withActive();
+    const handled = await commands.handleText(message("/steer 先看这个"));
+    expect(handled).toBe(true);
+    expect(steerPrompt).toHaveBeenCalledTimes(1);
+    const call = steerPrompt.mock.calls[0]!;
+    expect(call[1]).toBe("ses_live");
+    expect(call[2]).toBe("先看这个");
+    expect(sender.texts).toHaveLength(0);
+  });
+
+  test("/steer 无参数：回用法提示，不发送", async () => {
+    const { commands, sender, steerPrompt } = await withActive();
+    await commands.handleText(message("/steer"));
+    expect(steerPrompt).not.toHaveBeenCalled();
+    expect(sender.texts.at(-1)).toContain("用法");
+  });
+
+  test("/now：把已排队消息提升为 steer 并回报条数", async () => {
+    const { commands, sender, promoteQueued } = await withActive();
+    promoteQueued.mockResolvedValue(3);
+    await commands.handleText(message("/now"));
+    expect(promoteQueued).toHaveBeenCalledWith("ses_live");
+    expect(sender.texts.at(-1)).toContain("3 条");
+  });
+
+  test("/now：没有排队消息时如实提示", async () => {
+    const { commands, sender } = await withActive();
+    await commands.handleText(message("/now"));
+    expect(sender.texts.at(-1)).toContain("没有排队中的消息");
+  });
+
+  test("话题内 /steer 允许使用，并解析到话题会话", async () => {
+    const { commands, sessionMap, steerPrompt } = await withActive();
+    await sessionMap.bindThread("omt_1", "ses_live", "oc_1", "ou_1", "om_root");
+    await commands.handleText(threadMsg("/steer 立即处理"));
+    expect(steerPrompt).toHaveBeenCalledTimes(1);
+    expect(steerPrompt.mock.calls[0]![1]).toBe("ses_live");
   });
 });
