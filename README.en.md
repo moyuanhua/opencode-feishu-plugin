@@ -16,7 +16,7 @@ Bring [OpenCode](https://opencode.ai) into Feishu/Lark: **one Feishu topic = one
 | 🔐 **Minimal permissions** | Only 2 scopes (read p2p messages + send as bot). **No group scopes at all** — the bot physically cannot receive group messages |
 | 💬 **Topics as sessions** | Each Feishu topic maps to one OpenCode session. The main chat is a management console; work happens inside topics |
 | 🚀 **One-tap entry** | `/new` opens the setup form directly; on submit the bot creates a topic under your message automatically |
-| 📝 **One-shot form** | `/new` and `/form` are **fully equivalent**: fill directory + model + permissions once and submit. The directory can be typed or picked from a dropdown of recent / default-root paths. **Zero new permissions** |
+| 📝 **One-shot form** | `/new` and `/form` are **fully equivalent**: fill directory + model + permissions once and submit. The directory can be typed or picked from a dropdown of the allowed root's first-level subdirectories. **Zero new permissions** |
 | 🗂 **Directory tolerance** | Empty directory = the allowed root; a non-existent one is created automatically (still constrained by the `allowedRoots` allowlist) |
 | ✅ **In-card approvals** | Permission requests become Feishu cards (allow once / always / reject) with signed, replay-proof buttons |
 | 🪜 **Permission presets** | Read-only / Editable / Ask-on-risky / Trust — pick once per session instead of approving every call |
@@ -146,7 +146,7 @@ One topic = one session. **Plain text inside a topic is a prompt to the agent**;
 /new fix the login bug        (or /form fix the login bug)
   ↓
 📝 setup form card
-   directory: type it, or pick from the dropdown (recent / default root); empty = allowed root, auto-created if missing
+   directory: type it, or pick from the dropdown (first-level subdirectories of the allowed root); empty = allowed root, auto-created if missing
    model:     dropdown (defaults to the current/most recent)
    permissions: pick one of four presets
   ↓ tap "Create"
@@ -176,13 +176,14 @@ Jump into the topic and just send a message
 `/cd` follows **exactly the same** rules.
 
 **Directory precedence in the form** (dropdown and text input coexist): dropdown pick (other than "✍️ Manually enter a path") > text input > both empty falls back to `allowedRoots[0]`.
-The dropdown defaults to "✍️ Manually enter a path" so typing stays authoritative and you never accidentally pick an unexpected directory; `/dir <path>` writes to the input and, when it matches a recent directory, selects it in the dropdown too.
+The dropdown defaults to "✍️ Manually enter a path" so typing stays authoritative and you never accidentally pick an unexpected directory; `/dir <path>` writes to the input and selects it in the dropdown if it is one of the listed options, otherwise it falls back to "Manually enter a path" (any path can still be typed).
 
 ### One-shot form (`/form`)
 
 - Send `/form` (or `/new` — they are equivalent) to open the form card.
-- Fill in one go: **directory** (type it, or pick from a dropdown of recent / default-root paths; may be empty), **model** (dropdown of recent + popular, defaulting to the current/most recent model) and **permission preset** (dropdown, four presets with descriptions). Tap **Create** to submit.
-- Directory dropdown options: `✍️ Manually enter a path (use the input above)` + recent directories (count limited by `recentDirsLimit`, default 5) + the default root `🏠 <path> (default)`, de-duplicated and capped at 8 options total; long paths are middle-ellipsized.
+- Fill in one go: **directory** (type it, or pick from a dropdown of the allowed root's first-level subdirectories; may be empty), **model** (dropdown of recent + popular, defaulting to the current/most recent model) and **permission preset** (dropdown, four presets with descriptions). Tap **Create** to submit.
+- Directory dropdown options: `✍️ Manually enter a path (use the input above)` + `🏠 <root> (use this root)` + the **first-level subdirectories** of that root (hidden dirs and `node_modules` filtered out, sorted by name, at most 15; subdirectories containing `.git` are prefixed with `📦 `).
+- The dropdown uses **only `allowedRoots[0]`** (the first allowed root). A scan failure (missing / no permission) silently degrades to just "manual input + root" without affecting the form or the plugin; the scan runs while rendering the form (low-frequency, not cached). `/dir` can still type any (in-scope) path.
 - On submit: `session.create` → `reply_in_thread` on the **form card message** posts the ready card (the form message becomes the topic root) → bind, and you can start working in the new topic.
 - With `/new <title>`, the title is stored in the wizard state and becomes the session title on submit.
 - **Zero new permissions**: form submission reuses the `card.action.trigger` callback (permission requirement: None) — **no new scope, no app re-release**.
@@ -214,7 +215,7 @@ The preset is written to a **session-scoped** ruleset and can be changed any tim
 | `permissionGate` | `off`\|`notify`\|`gate`\|`lockdown` | `gate` | Global approval gate |
 | `allowTools` | string[] | `["read","glob","grep","webfetch"]` | Auto-allow list; supports `prefix*` |
 | `denyTools` | string[] | `[]` | Hard deny (takes precedence) |
-| `allowedRoots` | string[] | `[homedir]` | Roots allowed as session working directories (the default directory is `allowedRoots[0]`); `/`, the filesystem root and system dirs are always rejected; an empty directory falls back to the first root and a non-existent one is auto-created |
+| `allowedRoots` | string[] | `[homedir]` | Roots allowed as session working directories (the default directory is `allowedRoots[0]`); `/`, the filesystem root and system dirs are always rejected; an empty directory falls back to the first root and a non-existent one is auto-created. **The directory dropdown only scans the first root's first-level subdirectories** |
 | `stream` | boolean | `true` | Stream replies into the card |
 | `streamThrottleMs` | number | `400` | Min card update interval (floor 400ms; Feishu limit is 5 QPS) |
 | `threadRouting` | boolean | `true` | Topic routing master switch; `false` restores the legacy behaviour |

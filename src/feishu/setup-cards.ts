@@ -13,6 +13,7 @@
  *
  * 卡片 JSON 2.0：按钮直放 `body.elements`，回调用 `behaviors`。
  */
+import { basename } from "node:path";
 import type { ModelRef, PermissionPreset } from "../types.js";
 import { truncateCardContent } from "./cards.js";
 import { PERMISSION_PRESETS, presetLabel, type PresetInfo } from "./perm-presets.js";
@@ -75,10 +76,6 @@ export const SETUP_FORM_DEFAULT_PERM: PermissionPreset = "edit";
  * 设为默认 `initial_option`，保证用户手填优先、不会误选一个意料外的目录。
  */
 export const SETUP_FORM_DIR_CUSTOM = "__custom__";
-/** 目录下拉最多展示的选项数（含「手动输入」与默认根目录）。 */
-export const SETUP_FORM_MAX_DIR_OPTIONS = 8;
-/** 目录下拉默认展示的「最近使用目录」条数（与 config.recentDirsLimit 默认一致）。 */
-export const SETUP_FORM_DEFAULT_RECENT_DIRS = 5;
 
 function button(text: string, type: "primary" | "default", value: Record<string, unknown>): object {
   return {
@@ -252,10 +249,8 @@ export interface SetupFormCardInput {
   readonly recent: readonly ModelRef[];
   /** 向导中已选模型 / 会话默认模型（`initial_option`）。 */
   readonly defaultModel?: ModelRef;
-  /** 最近使用目录（最新在前，用于目录下拉）。 */
-  readonly recentDirs?: readonly string[];
-  /** 「最近使用目录」下拉展示条数（默认 5）。 */
-  readonly recentDirsLimit?: number;
+  /** 允许根目录的一级子目录（用于目录下拉；由 `scanRootSubdirs` 提供）。 */
+  readonly rootSubdirs?: readonly SetupFormDirEntry[];
   readonly allowedRoots?: readonly string[];
   /** 校验失败时的错误说明（会保留 `values` 已填项）。 */
   readonly error?: string;
@@ -263,38 +258,42 @@ export interface SetupFormCardInput {
   readonly values?: SetupFormValuesInput;
 }
 
+/** 目录下拉里的一个子目录选项（value = 绝对路径）。 */
+export interface SetupFormDirEntry {
+  readonly path: string;
+  /** 含 `.git` → label 前缀加 `📦 `。 */
+  readonly isRepo?: boolean;
+}
+
 /**
- * 目录下拉选项：`__custom__`（手动输入）→ 最近使用目录 → 默认根目录 `allowedRoots[0]`。
+ * 目录下拉选项：`__custom__`（手动输入）→ 默认根目录 `allowedRoots[0]`（就用这个根）→ 一级子目录。
  *
- * - 去重（按路径值）；最近目录条数受 `recentDirsLimit` 限制（默认 5）；
- * - 总选项数上限 `SETUP_FORM_MAX_DIR_OPTIONS`（默认根目录若与最近目录重复则不重复添加）；
- * - label 过长时中间省略。
+ * - 子目录来自 `scanRootSubdirs(allowedRoots[0])`（已过滤/排序/截断）；
+ * - 去重（按路径值）；含 `.git` 的子目录 label 前缀加 `📦 `；
+ * - 根目录若与子目录重复则不重复添加。
  */
 export function buildSetupFormDirOptions(input: {
-  readonly recentDirs?: readonly string[];
-  readonly recentDirsLimit?: number;
+  readonly subdirs?: readonly SetupFormDirEntry[];
   readonly allowedRoots?: readonly string[];
 }): Array<{ text: { tag: string; content: string }; value: string }> {
-  const limit = Math.max(0, input.recentDirsLimit ?? SETUP_FORM_DEFAULT_RECENT_DIRS);
   const seen = new Set<string>([SETUP_FORM_DIR_CUSTOM]);
   const options: Array<{ label: string; value: string }> = [
     { label: "✍️ 手动输入路径（用上面的输入框）", value: SETUP_FORM_DIR_CUSTOM },
   ];
-  const push = (raw: string, label: (path: string) => string): void => {
+  const push = (raw: string, label: string): void => {
     const value = raw.trim();
     if (!value || seen.has(value)) return;
     seen.add(value);
-    options.push({ label: label(value), value });
+    options.push({ label, value });
   };
-  for (const dir of (input.recentDirs ?? []).slice(0, limit)) {
-    push(dir, (p) => shortenMiddle(p, 40));
-  }
-  const root = input.allowedRoots?.[0];
-  if (root) push(root, (p) => `🏠 ${shortenMiddle(p, 34)}（默认）`);
 
-  return options
-    .slice(0, SETUP_FORM_MAX_DIR_OPTIONS)
-    .map((o) => ({ text: { tag: "plain_text", content: o.label }, value: o.value }));
+  const root = input.allowedRoots?.[0];
+  if (root) push(root, `🏠 ${shortenMiddle(root.trim(), 34)}（就用这个根目录）`);
+  for (const sub of input.subdirs ?? []) {
+    push(sub.path, `${sub.isRepo ? "📦 " : ""}${shortenMiddle(basename(sub.path), 40)}`);
+  }
+
+  return options.map((o) => ({ text: { tag: "plain_text", content: o.label }, value: o.value }));
 }
 
 /**
@@ -335,10 +334,9 @@ export function buildSetupFormCard(input: SetupFormCardInput): object {
     value: info.id,
   }));
 
-  // 目录下拉：__custom__（手填优先）+ 最近目录 + 默认根，去重/限长；命中当前 dir 则选中它。
+  // 目录下拉：__custom__（手填优先）+ 默认根目录 + 一级子目录；命中当前 dir 则选中它。
   const dirOptions = buildSetupFormDirOptions({
-    ...(input.recentDirs ? { recentDirs: input.recentDirs } : {}),
-    ...(input.recentDirsLimit !== undefined ? { recentDirsLimit: input.recentDirsLimit } : {}),
+    ...(input.rootSubdirs ? { subdirs: input.rootSubdirs } : {}),
     ...(input.allowedRoots ? { allowedRoots: input.allowedRoots } : {}),
   });
   const dirTrimmed = dirValue.trim();
@@ -348,7 +346,7 @@ export function buildSetupFormCard(input: SetupFormCardInput): object {
 
   const lines = ["一次填好，点「创建会话」即可自动开话题。"];
   lines.push("", "目录留空 = 使用允许根目录；目录不存在会自动创建。");
-  lines.push("", "目录也可从下方下拉选择（最近使用 / 默认根目录）；选「✍️ 手动输入路径」则以输入框为准。");
+  lines.push("", "目录也可从下方下拉选择（允许根目录的一级子目录）；选「✍️ 手动输入路径」则以输入框为准。");
   if (input.allowedRoots && input.allowedRoots.length > 0) {
     lines.push(
       "",

@@ -106,6 +106,11 @@ function setup(over: { allowed?: boolean; threadRouting?: boolean } = {}) {
   const switchSessionModel = vi.fn(async (_sessionID: string, _model: ModelRef) => undefined);
   const applyPermissionPreset = vi.fn(async (_sessionID: string, _preset: PermissionPreset) => undefined);
   const moveSessionDir = vi.fn(async (_sessionID: string, _dir: string) => undefined);
+  // 表单目录下拉来源：注入固定的一级子目录，避免测试触碰真实文件系统。
+  const scanRootSubdirs = vi.fn(async (root: string) => [
+    { path: `${root}/my-app`, isRepo: true },
+    { path: `${root}/other`, isRepo: false },
+  ]);
   const commands = new SessionCommands({
     log,
     sessionMap,
@@ -121,6 +126,7 @@ function setup(over: { allowed?: boolean; threadRouting?: boolean } = {}) {
     moveSessionDir,
     validateDir: fakeValidate,
     allowedRoots: ["/home/ubuntu"],
+    scanRootSubdirs,
     threadRouting: over.threadRouting ?? true,
     now: () => 1000,
   });
@@ -135,6 +141,7 @@ function setup(over: { allowed?: boolean; threadRouting?: boolean } = {}) {
     switchSessionModel,
     applyPermissionPreset,
     moveSessionDir,
+    scanRootSubdirs,
     storage,
   };
 }
@@ -814,14 +821,26 @@ describe("SessionCommands 表单目录下拉（P6.3）", () => {
   const rootElements = (card: object): Array<Record<string, unknown>> =>
     (card as { body: { elements: Array<Record<string, unknown>> } }).body.elements;
 
-  test("/dir 预填后表单下拉 initial_option 命中该最近目录（并回显输入框）", async () => {
+  test("/dir 预填后表单下拉 initial_option 命中该子目录（并回显输入框）", async () => {
     const { commands, sender } = setup();
     await commands.handleText(message("/new"));
-    await commands.handleText(message("/dir /home/ubuntu/work/my-app"));
+    await commands.handleText(message("/dir /home/ubuntu/my-app"));
     const text = JSON.stringify(sender.cards.at(-1)!.card);
     expect(text).toContain("dir_select");
-    expect(text).toContain('"initial_option":"/home/ubuntu/work/my-app"');
-    expect(text).toContain("/home/ubuntu/work/my-app");
+    expect(text).toContain('"initial_option":"/home/ubuntu/my-app"');
+    expect(text).toContain("/home/ubuntu/my-app");
+    // 下拉选项来自允许根目录的一级子目录
+    expect(text).toContain("🏠 /home/ubuntu（就用这个根目录）");
+    expect(text).toContain("📦 my-app");
+  });
+
+  test("/dir 预填任意路径：下拉未命中则回退 __custom__，输入框仍回显", async () => {
+    const { commands, sender } = setup();
+    await commands.handleText(message("/new"));
+    await commands.handleText(message("/dir /home/ubuntu/work/anywhere"));
+    const text = JSON.stringify(sender.cards.at(-1)!.card);
+    expect(text).toContain('"initial_option":"__custom__"');
+    expect(text).toContain("/home/ubuntu/work/anywhere");
   });
 
   test("提交：dir_select 选中目录优先于文本输入", async () => {

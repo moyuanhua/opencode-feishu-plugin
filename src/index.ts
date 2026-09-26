@@ -231,7 +231,6 @@ async function start(
     allowedRoots: config.allowedRoots,
     modelPageSize: 8,
     recentModelsLimit: config.recentModelsLimit,
-    recentDirsLimit: config.recentDirsLimit,
     threadRouting: config.threadRouting,
   });
 

@@ -37,6 +37,7 @@ import {
   resolveSetupFormDir,
   type SetupFormValuesInput,
   type SetupCardValue,
+  type SetupFormDirEntry,
 } from "./feishu/setup-cards.js";
 import {
   defaultSessionTitle,
@@ -62,6 +63,7 @@ import {
 import { matchModel, modelLabel, modelMatchErrorText, type ModelEntry } from "./feishu/models.js";
 import type { WizardStore } from "./feishu/wizard.js";
 import type { RecentStore } from "./feishu/recent.js";
+import { scanRootSubdirs } from "./feishu/root-scan.js";
 
 /** 建会话输入（P6）：标题 + 归属 + 目录/模型/权限。 */
 export interface CreateSessionInput {
@@ -108,8 +110,8 @@ export interface SessionCommandsDeps {
   readonly modelPageSize?: number;
   /** 模型卡片「最近」列表长度（默认 5，与 config.recentModelsLimit 一致）。 */
   readonly recentModelsLimit?: number;
-  /** 表单目录下拉「最近使用目录」长度（默认 5，与 config.recentDirsLimit 一致）。 */
-  readonly recentDirsLimit?: number;
+  /** 扫描允许根目录的一级子目录（目录下拉选项来源，默认 `scanRootSubdirs`；测试可注入）。 */
+  readonly scanRootSubdirs?: (root: string) => Promise<readonly SetupFormDirEntry[]>;
 }
 
 export class SessionCommands {
@@ -868,7 +870,7 @@ export class SessionCommands {
   ): Promise<object> {
     const models = await this.loadModels();
     const recent = await this.deps.recent.listModels();
-    const recentDirs = await this.listRecentDirs();
+    const rootSubdirs = await this.scanRoot(this.deps.allowedRoots?.[0]);
     const values: SetupFormValuesInput =
       over?.values ?? {
         ...(state?.dir ? { dir: state.dir } : {}),
@@ -878,8 +880,7 @@ export class SessionCommands {
       models,
       recent,
       ...(state?.model ? { defaultModel: state.model } : {}),
-      ...(recentDirs.length > 0 ? { recentDirs } : {}),
-      recentDirsLimit: this.recentDirsLimit(),
+      ...(rootSubdirs.length > 0 ? { rootSubdirs } : {}),
       ...(this.deps.allowedRoots ? { allowedRoots: this.deps.allowedRoots } : {}),
       ...(over?.error ? { error: over.error } : {}),
       values,
@@ -927,16 +928,17 @@ export class SessionCommands {
     return this.deps.recentModelsLimit ?? 5;
   }
 
-  private recentDirsLimit(): number {
-    return this.deps.recentDirsLimit ?? 5;
-  }
-
-  /** 最近使用目录（读取失败降级为空列表，表单下拉仍可用）。 */
-  private async listRecentDirs(): Promise<string[]> {
+  /**
+   * 扫描允许根目录的一级子目录（表单目录下拉选项来源）。
+   * 任何失败静默降级为空列表（只保留「手动输入」与根目录两项），绝不抛异常。
+   */
+  private async scanRoot(root: string | undefined): Promise<readonly SetupFormDirEntry[]> {
+    if (!root) return [];
+    const scan = this.deps.scanRootSubdirs ?? scanRootSubdirs;
     try {
-      return [...(await this.deps.recent.listDirs())];
+      return [...(await scan(root))];
     } catch (err) {
-      this.deps.log.warn("最近目录读取失败", { error: errorMessage(err) });
+      this.deps.log.warn("根目录子目录扫描失败", { error: errorMessage(err) });
       return [];
     }
   }

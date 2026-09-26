@@ -13,7 +13,6 @@ import {
   resolveSetupFormDir,
   SETUP_FORM_DIR_CUSTOM,
   SETUP_FORM_FIELDS,
-  SETUP_FORM_MAX_DIR_OPTIONS,
   SETUP_FORM_MAX_MODELS,
   SETUP_FORM_NAME,
 } from "../src/feishu/setup-cards.js";
@@ -255,68 +254,57 @@ const dirOptionValues = (select: Record<string, unknown>): string[] =>
   (select.options as Array<{ value: string }>).map((o) => o.value);
 
 describe("buildSetupFormCard 目录下拉（P6.3）", () => {
-  test("含 dir_select：手动输入 + 最近目录 + 默认根（去重）", () => {
+  const SUBDIRS = [
+    { path: "/home/ubuntu/work/a", isRepo: false },
+    { path: "/home/ubuntu/work/repo", isRepo: true },
+  ];
+
+  test("含 dir_select：手动输入 + 根目录 + 一级子目录（去重）", () => {
     const card = buildSetupFormCard({
       models: MODELS,
       recent: [],
-      recentDirs: ["/home/ubuntu/work/a", "/home/ubuntu/work/b", "/home/ubuntu/work/a"],
+      rootSubdirs: [...SUBDIRS, { path: "/home/ubuntu/work/a", isRepo: false }, { path: "/home/ubuntu", isRepo: false }],
       allowedRoots: ["/home/ubuntu"],
     });
     const select = dirSelectOf(card);
     expect(select.tag).toBe("select_static");
     const values = dirOptionValues(select);
     expect(values[0]).toBe(SETUP_FORM_DIR_CUSTOM);
+    expect(values[1]).toBe("/home/ubuntu");
     expect(values).toEqual(
-      expect.arrayContaining(["/home/ubuntu/work/a", "/home/ubuntu/work/b", "/home/ubuntu"]),
+      expect.arrayContaining(["/home/ubuntu/work/a", "/home/ubuntu/work/repo", "/home/ubuntu"]),
     );
     // 去重：重复项只出现一次
     expect(values.filter((v) => v === "/home/ubuntu/work/a")).toHaveLength(1);
-    // 手动输入文案 + 默认根文案
+    expect(values.filter((v) => v === "/home/ubuntu")).toHaveLength(1);
+    // 手动输入文案 + 根目录文案 + 仓库前缀
     expect(json(card)).toContain("✍️ 手动输入路径");
-    expect(json(card)).toContain("🏠 /home/ubuntu（默认）");
+    expect(json(card)).toContain("🏠 /home/ubuntu（就用这个根目录）");
+    expect(json(card)).toContain("📦 repo");
     // 默认选中「手动输入」（手填优先）
     expect(select.initial_option).toBe(SETUP_FORM_DIR_CUSTOM);
   });
 
-  test("默认根目录与最近目录重复时不重复添加", () => {
-    const card = buildSetupFormCard({
-      models: MODELS,
-      recent: [],
-      recentDirs: ["/home/ubuntu/work/a", "/home/ubuntu"],
-      allowedRoots: ["/home/ubuntu"],
+  test("只保留第一个允许根目录", () => {
+    const options = buildSetupFormDirOptions({
+      subdirs: [],
+      allowedRoots: ["/home/ubuntu", "/home/ubuntu/work"],
     });
-    const values = dirOptionValues(dirSelectOf(card));
-    expect(values.filter((v) => v === "/home/ubuntu")).toHaveLength(1);
+    expect(options.map((o) => o.value)).toEqual([SETUP_FORM_DIR_CUSTOM, "/home/ubuntu"]);
   });
 
-  test("最近目录条数受 recentDirsLimit 限制 + 总选项 ≤ 8 + 过长中间省略", () => {
-    const many = Array.from({ length: 10 }, (_, i) => `/home/ubuntu/work/dir-${i}`);
-    const limited = buildSetupFormDirOptions({ recentDirs: many, recentDirsLimit: 2, allowedRoots: ["/home/ubuntu"] });
-    // __custom__ + 2 个最近 + 1 个根
-    expect(limited).toHaveLength(4);
-    expect(limited.map((o) => o.value)).toEqual([
-      SETUP_FORM_DIR_CUSTOM,
-      "/home/ubuntu/work/dir-0",
-      "/home/ubuntu/work/dir-1",
-      "/home/ubuntu",
-    ]);
-
-    const capped = buildSetupFormDirOptions({ recentDirs: many, recentDirsLimit: 20, allowedRoots: ["/home/ubuntu"] });
-    expect(capped.length).toBeLessThanOrEqual(SETUP_FORM_MAX_DIR_OPTIONS);
-
-    const long = buildSetupFormDirOptions({
-      recentDirs: ["/home/ubuntu/work/some/really/really/long/path/name"],
-      allowedRoots: [],
-    });
-    expect(long[1]!.text.content).toContain("…");
-    expect(long[1]!.text.content.length).toBeLessThanOrEqual(40);
+  test("扫描降级：无子目录时仍有 __custom__ + 根目录两项", () => {
+    const options = buildSetupFormDirOptions({ subdirs: [], allowedRoots: ["/home/ubuntu"] });
+    expect(options).toHaveLength(2);
+    expect(options[0]!.value).toBe(SETUP_FORM_DIR_CUSTOM);
+    expect(options[1]!.value).toBe("/home/ubuntu");
   });
 
-  test("initial_option：状态目录命中最近目录则选中它，否则 __custom__", () => {
+  test("initial_option：状态目录命中子目录则选中它，否则 __custom__", () => {
     const hit = buildSetupFormCard({
       models: MODELS,
       recent: [],
-      recentDirs: ["/home/ubuntu/work/a"],
+      rootSubdirs: SUBDIRS,
       allowedRoots: ["/home/ubuntu"],
       values: { dir: "/home/ubuntu/work/a" },
     });
@@ -329,7 +317,7 @@ describe("buildSetupFormCard 目录下拉（P6.3）", () => {
     const miss = buildSetupFormCard({
       models: MODELS,
       recent: [],
-      recentDirs: ["/home/ubuntu/work/a"],
+      rootSubdirs: SUBDIRS,
       allowedRoots: ["/home/ubuntu"],
       values: { dir: "/home/ubuntu/work/elsewhere" },
     });
@@ -340,7 +328,7 @@ describe("buildSetupFormCard 目录下拉（P6.3）", () => {
     const card = buildSetupFormCard({
       models: MODELS,
       recent: [],
-      recentDirs: ["/home/ubuntu/work/a"],
+      rootSubdirs: SUBDIRS,
       allowedRoots: ["/home/ubuntu"],
       error: "目录不在允许范围内。",
       values: { dir: "/home/ubuntu/work/a" },
