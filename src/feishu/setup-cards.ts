@@ -59,11 +59,26 @@ export const SETUP_FORM_CMD = "setup.form";
 /** 表单容器 name（全局唯一）。 */
 export const SETUP_FORM_NAME = "setup_form";
 /** 表单内交互组件 name（全局唯一）。 */
-export const SETUP_FORM_FIELDS = { dir: "dir", model: "model", perm: "perm", submit: "setup_submit" } as const;
+export const SETUP_FORM_FIELDS = {
+  dir: "dir",
+  dirSelect: "dir_select",
+  model: "model",
+  perm: "perm",
+  submit: "setup_submit",
+} as const;
 /** 模型下拉最多展示的选项数（最近 + 常用）。 */
 export const SETUP_FORM_MAX_MODELS = 15;
 /** 表单默认权限档位（未显式选择时）。 */
 export const SETUP_FORM_DEFAULT_PERM: PermissionPreset = "edit";
+/**
+ * 目录下拉的「手动输入」哨兵值：选中它表示改用文本输入框 `dir` 中的路径。
+ * 设为默认 `initial_option`，保证用户手填优先、不会误选一个意料外的目录。
+ */
+export const SETUP_FORM_DIR_CUSTOM = "__custom__";
+/** 目录下拉最多展示的选项数（含「手动输入」与默认根目录）。 */
+export const SETUP_FORM_MAX_DIR_OPTIONS = 8;
+/** 目录下拉默认展示的「最近使用目录」条数（与 config.recentDirsLimit 默认一致）。 */
+export const SETUP_FORM_DEFAULT_RECENT_DIRS = 5;
 
 function button(text: string, type: "primary" | "default", value: Record<string, unknown>): object {
   return {
@@ -237,11 +252,49 @@ export interface SetupFormCardInput {
   readonly recent: readonly ModelRef[];
   /** 向导中已选模型 / 会话默认模型（`initial_option`）。 */
   readonly defaultModel?: ModelRef;
+  /** 最近使用目录（最新在前，用于目录下拉）。 */
+  readonly recentDirs?: readonly string[];
+  /** 「最近使用目录」下拉展示条数（默认 5）。 */
+  readonly recentDirsLimit?: number;
   readonly allowedRoots?: readonly string[];
   /** 校验失败时的错误说明（会保留 `values` 已填项）。 */
   readonly error?: string;
   /** 预填/回显值。 */
   readonly values?: SetupFormValuesInput;
+}
+
+/**
+ * 目录下拉选项：`__custom__`（手动输入）→ 最近使用目录 → 默认根目录 `allowedRoots[0]`。
+ *
+ * - 去重（按路径值）；最近目录条数受 `recentDirsLimit` 限制（默认 5）；
+ * - 总选项数上限 `SETUP_FORM_MAX_DIR_OPTIONS`（默认根目录若与最近目录重复则不重复添加）；
+ * - label 过长时中间省略。
+ */
+export function buildSetupFormDirOptions(input: {
+  readonly recentDirs?: readonly string[];
+  readonly recentDirsLimit?: number;
+  readonly allowedRoots?: readonly string[];
+}): Array<{ text: { tag: string; content: string }; value: string }> {
+  const limit = Math.max(0, input.recentDirsLimit ?? SETUP_FORM_DEFAULT_RECENT_DIRS);
+  const seen = new Set<string>([SETUP_FORM_DIR_CUSTOM]);
+  const options: Array<{ label: string; value: string }> = [
+    { label: "✍️ 手动输入路径（用上面的输入框）", value: SETUP_FORM_DIR_CUSTOM },
+  ];
+  const push = (raw: string, label: (path: string) => string): void => {
+    const value = raw.trim();
+    if (!value || seen.has(value)) return;
+    seen.add(value);
+    options.push({ label: label(value), value });
+  };
+  for (const dir of (input.recentDirs ?? []).slice(0, limit)) {
+    push(dir, (p) => shortenMiddle(p, 40));
+  }
+  const root = input.allowedRoots?.[0];
+  if (root) push(root, (p) => `🏠 ${shortenMiddle(p, 34)}（默认）`);
+
+  return options
+    .slice(0, SETUP_FORM_MAX_DIR_OPTIONS)
+    .map((o) => ({ text: { tag: "plain_text", content: o.label }, value: o.value }));
 }
 
 /**
@@ -282,8 +335,20 @@ export function buildSetupFormCard(input: SetupFormCardInput): object {
     value: info.id,
   }));
 
+  // 目录下拉：__custom__（手填优先）+ 最近目录 + 默认根，去重/限长；命中当前 dir 则选中它。
+  const dirOptions = buildSetupFormDirOptions({
+    ...(input.recentDirs ? { recentDirs: input.recentDirs } : {}),
+    ...(input.recentDirsLimit !== undefined ? { recentDirsLimit: input.recentDirsLimit } : {}),
+    ...(input.allowedRoots ? { allowedRoots: input.allowedRoots } : {}),
+  });
+  const dirTrimmed = dirValue.trim();
+  const dirInitial = dirOptions.some((o) => o.value !== SETUP_FORM_DIR_CUSTOM && o.value === dirTrimmed)
+    ? dirTrimmed
+    : SETUP_FORM_DIR_CUSTOM;
+
   const lines = ["一次填好，点「创建会话」即可自动开话题。"];
   lines.push("", "目录留空 = 使用允许根目录；目录不存在会自动创建。");
+  lines.push("", "目录也可从下方下拉选择（最近使用 / 默认根目录）；选「✍️ 手动输入路径」则以输入框为准。");
   if (input.allowedRoots && input.allowedRoots.length > 0) {
     lines.push(
       "",
@@ -307,6 +372,15 @@ export function buildSetupFormCard(input: SetupFormCardInput): object {
         content: "工作目录（绝对路径，可留空 = 允许根目录；不存在会自动创建）",
       },
       default_value: dirValue,
+    },
+    {
+      tag: "select_static",
+      name: SETUP_FORM_FIELDS.dirSelect,
+      type: "default",
+      width: "fill",
+      placeholder: { tag: "plain_text", content: "选择目录（可选；选「手动输入路径」则以输入框为准）" },
+      options: dirOptions,
+      initial_option: dirInitial,
     },
     {
       tag: "select_static",
@@ -358,13 +432,38 @@ export function buildSetupFormCard(input: SetupFormCardInput): object {
 
 /** 表单提交数据（已解析/收敛）。 */
 export interface SetupFormSubmission {
+  /** 文本输入框 `dir` 的内容（可能为空）。 */
   readonly dir: string;
+  /** 目录下拉 `dir_select` 的值（`__custom__` 表示用文本输入框）。 */
+  readonly dirSelect?: string;
   readonly model?: ModelRef;
   readonly perm?: PermissionPreset;
 }
 
 /**
- * 解析表单提交 `action.form_value`：`{ dir, model, perm }`。
+ * 表单提交 `action.form_value` 的**目录优先级解析**（纯函数，便于单测）：
+ *
+ * 1. `dir_select` 存在且 ≠ `__custom__` → 用下拉选中的路径；
+ * 2. 否则用文本输入框 `dir`（可能为空）；
+ * 3. 两者皆空 → 回退 `allowedRoots[0]`（默认用户家目录）。
+ *
+ * 返回值随后一律交给 `validateDir`（不存在则创建、越界/系统目录拒绝、创建后 realpath 复核）。
+ */
+export function resolveSetupFormDir(
+  submission: Pick<SetupFormSubmission, "dir" | "dirSelect">,
+  allowedRoots: readonly string[] = [],
+): string {
+  const selected = submission.dirSelect?.trim();
+  if (selected && selected !== SETUP_FORM_DIR_CUSTOM) return selected;
+  const typed = (submission.dir ?? "").trim();
+  if (typed) return typed;
+  return allowedRoots[0]?.trim() ?? "";
+}
+
+/**
+ * 解析表单提交 `action.form_value`：`{ dir, dir_select, model, perm }`。
+ * - `dir`：文本输入框内容（trim，可空）；
+ * - `dir_select`：下拉值（trim，非空才带上）；
  * - `model`：`providerID/modelID`（首个 `/` 切分）；
  * - `perm`：合法档位 key，否则忽略；
  * - 非法/空输入返回 `undefined`；结构合法但 `dir` 为空时返回 `{dir:""}` 交由上层报错。
@@ -373,6 +472,8 @@ export function parseSetupFormValues(formValue: unknown): SetupFormSubmission | 
   if (typeof formValue !== "object" || formValue === null || Array.isArray(formValue)) return undefined;
   const rec = formValue as Record<string, unknown>;
   const dir = typeof rec[SETUP_FORM_FIELDS.dir] === "string" ? (rec[SETUP_FORM_FIELDS.dir] as string).trim() : "";
+  const dirSelectRaw = rec[SETUP_FORM_FIELDS.dirSelect];
+  const dirSelect = typeof dirSelectRaw === "string" ? dirSelectRaw.trim() : "";
 
   let model: ModelRef | undefined;
   const modelRaw = rec[SETUP_FORM_FIELDS.model];
@@ -387,7 +488,12 @@ export function parseSetupFormValues(formValue: unknown): SetupFormSubmission | 
   const permRaw = rec[SETUP_FORM_FIELDS.perm];
   const perm = isPreset(permRaw) ? permRaw : undefined;
 
-  return { dir, ...(model ? { model } : {}), ...(perm ? { perm } : {}) };
+  return {
+    dir,
+    ...(dirSelect ? { dirSelect } : {}),
+    ...(model ? { model } : {}),
+    ...(perm ? { perm } : {}),
+  };
 }
 
 /** 是否为建会话表单的提交回调标记（`value = {cmd:"setup.form"}`）。 */
@@ -470,6 +576,16 @@ function isPreset(value: unknown): value is PermissionPreset {
 function shorten(text: string, max: number): string {
   const one = text.replace(/\s+/g, " ").trim();
   return one.length > max ? `${one.slice(0, max)}…` : one;
+}
+
+/** 中间省略：保留首尾，超出 `max` 时中间用 `…` 替代（目录路径更适合保留尾部）。 */
+function shortenMiddle(text: string, max: number): string {
+  const one = text.trim();
+  if (one.length <= max) return one;
+  const keep = max - 1; // 预留 1 个字符给省略号
+  const head = Math.ceil(keep / 2);
+  const tail = keep - head;
+  return `${one.slice(0, head)}…${one.slice(one.length - tail)}`;
 }
 
 /** 供 SessionCommands 复用：权限档位说明（纯文本）。 */

@@ -16,7 +16,7 @@ Bring [OpenCode](https://opencode.ai) into Feishu/Lark: **one Feishu topic = one
 | 🔐 **Minimal permissions** | Only 2 scopes (read p2p messages + send as bot). **No group scopes at all** — the bot physically cannot receive group messages |
 | 💬 **Topics as sessions** | Each Feishu topic maps to one OpenCode session. The main chat is a management console; work happens inside topics |
 | 🚀 **One-tap entry** | `/new` opens the setup form directly; on submit the bot creates a topic under your message automatically |
-| 📝 **One-shot form** | `/new` and `/form` are **fully equivalent**: fill directory + model + permissions once and submit. **Zero new permissions** |
+| 📝 **One-shot form** | `/new` and `/form` are **fully equivalent**: fill directory + model + permissions once and submit. The directory can be typed or picked from a dropdown of recent / default-root paths. **Zero new permissions** |
 | 🗂 **Directory tolerance** | Empty directory = the allowed root; a non-existent one is created automatically (still constrained by the `allowedRoots` allowlist) |
 | ✅ **In-card approvals** | Permission requests become Feishu cards (allow once / always / reject) with signed, replay-proof buttons |
 | 🪜 **Permission presets** | Read-only / Editable / Ask-on-risky / Trust — pick once per session instead of approving every call |
@@ -146,7 +146,7 @@ One topic = one session. **Plain text inside a topic is a prompt to the agent**;
 /new fix the login bug        (or /form fix the login bug)
   ↓
 📝 setup form card
-   directory: may be empty (= allowed root); auto-created if missing
+   directory: type it, or pick from the dropdown (recent / default root); empty = allowed root, auto-created if missing
    model:     dropdown (defaults to the current/most recent)
    permissions: pick one of four presets
   ↓ tap "Create"
@@ -175,10 +175,14 @@ Jump into the topic and just send a message
 
 `/cd` follows **exactly the same** rules.
 
+**Directory precedence in the form** (dropdown and text input coexist): dropdown pick (other than "✍️ Manually enter a path") > text input > both empty falls back to `allowedRoots[0]`.
+The dropdown defaults to "✍️ Manually enter a path" so typing stays authoritative and you never accidentally pick an unexpected directory; `/dir <path>` writes to the input and, when it matches a recent directory, selects it in the dropdown too.
+
 ### One-shot form (`/form`)
 
 - Send `/form` (or `/new` — they are equivalent) to open the form card.
-- Fill in one go: **directory** (optional text input), **model** (dropdown of recent + popular, defaulting to the current/most recent model) and **permission preset** (dropdown, four presets with descriptions). Tap **Create** to submit.
+- Fill in one go: **directory** (type it, or pick from a dropdown of recent / default-root paths; may be empty), **model** (dropdown of recent + popular, defaulting to the current/most recent model) and **permission preset** (dropdown, four presets with descriptions). Tap **Create** to submit.
+- Directory dropdown options: `✍️ Manually enter a path (use the input above)` + recent directories (count limited by `recentDirsLimit`, default 5) + the default root `🏠 <path> (default)`, de-duplicated and capped at 8 options total; long paths are middle-ellipsized.
 - On submit: `session.create` → `reply_in_thread` on the **form card message** posts the ready card (the form message becomes the topic root) → bind, and you can start working in the new topic.
 - With `/new <title>`, the title is stored in the wizard state and becomes the session title on submit.
 - **Zero new permissions**: form submission reuses the `card.action.trigger` callback (permission requirement: None) — **no new scope, no app re-release**.

@@ -809,3 +809,98 @@ describe("SessionCommands 建会话表单（P6.1）", () => {
     expect(createSession).not.toHaveBeenCalled();
   });
 });
+
+describe("SessionCommands 表单目录下拉（P6.3）", () => {
+  const rootElements = (card: object): Array<Record<string, unknown>> =>
+    (card as { body: { elements: Array<Record<string, unknown>> } }).body.elements;
+
+  test("/dir 预填后表单下拉 initial_option 命中该最近目录（并回显输入框）", async () => {
+    const { commands, sender } = setup();
+    await commands.handleText(message("/new"));
+    await commands.handleText(message("/dir /home/ubuntu/work/my-app"));
+    const text = JSON.stringify(sender.cards.at(-1)!.card);
+    expect(text).toContain("dir_select");
+    expect(text).toContain('"initial_option":"/home/ubuntu/work/my-app"');
+    expect(text).toContain("/home/ubuntu/work/my-app");
+  });
+
+  test("提交：dir_select 选中目录优先于文本输入", async () => {
+    const { commands, createSession } = setup();
+    await commands.handleText(message("/new 下拉优先"));
+    commands.handleCardAction({
+      rawValue: { cmd: "setup.form" },
+      formValue: { dir: "/home/ubuntu/work/typed", dir_select: "/home/ubuntu/work/picked", perm: "edit" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await flush();
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(createSession.mock.calls[0]![0].directory).toBe("/home/ubuntu/work/picked");
+  });
+
+  test("提交：dir_select=__custom__ 时用文本输入", async () => {
+    const { commands, createSession } = setup();
+    await commands.handleText(message("/new 手填"));
+    commands.handleCardAction({
+      rawValue: { cmd: "setup.form" },
+      formValue: { dir: "/home/ubuntu/work/typed", dir_select: "__custom__", perm: "edit" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await flush();
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(createSession.mock.calls[0]![0].directory).toBe("/home/ubuntu/work/typed");
+  });
+
+  test("提交：下拉与输入皆空 → 用允许根目录", async () => {
+    const { commands, createSession } = setup();
+    await commands.handleText(message("/new 空"));
+    commands.handleCardAction({
+      rawValue: { cmd: "setup.form" },
+      formValue: { dir_select: "__custom__", perm: "edit" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await flush();
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(createSession.mock.calls[0]![0].directory).toBe("/home/ubuntu");
+  });
+
+  test("提交：下拉选中不存在的目录 → 仍走目录容错（自动创建）", async () => {
+    const { commands, createSession } = setup();
+    await commands.handleText(message("/new 新目录"));
+    commands.handleCardAction({
+      rawValue: { cmd: "setup.form" },
+      formValue: { dir_select: "/home/ubuntu/work/from-dropdown", perm: "readonly" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await flush();
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(createSession.mock.calls[0]![0].directory).toBe("/home/ubuntu/work/from-dropdown");
+  });
+
+  test("提交：下拉选中越界目录 → 拒绝，不建会话并回错误卡", async () => {
+    const { commands, sender, createSession } = setup();
+    await commands.handleText(message("/new 越界"));
+    commands.handleCardAction({
+      rawValue: { cmd: "setup.form" },
+      formValue: { dir_select: "/etc", perm: "edit" },
+      messageId: "om_form",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await flush();
+    expect(createSession).not.toHaveBeenCalled();
+    const patched = sender.patched.at(-1)!;
+    expect(patched.messageId).toBe("om_form");
+    const text = JSON.stringify(patched.card);
+    expect(text).toContain("不在允许范围内");
+    expect(text).toContain("/etc");
+    expect(rootElements(patched.card)[0]!.tag).toBe("form");
+  });
+});

@@ -6,10 +6,14 @@ import {
   buildPermCard,
   buildSetupDoneCard,
   buildSetupFormCard,
+  buildSetupFormDirOptions,
   isSetupFormAction,
   parseSetupCardValue,
   parseSetupFormValues,
+  resolveSetupFormDir,
+  SETUP_FORM_DIR_CUSTOM,
   SETUP_FORM_FIELDS,
+  SETUP_FORM_MAX_DIR_OPTIONS,
   SETUP_FORM_MAX_MODELS,
   SETUP_FORM_NAME,
 } from "../src/feishu/setup-cards.js";
@@ -242,6 +246,125 @@ describe("buildSetupFormCard（P6.1 表单卡）", () => {
   });
 });
 
+/** 取表单卡里的目录下拉组件。 */
+function dirSelectOf(card: object): Record<string, unknown> {
+  const els = collectFormElements(formRoot(card).elements as Record<string, unknown>[]);
+  return els.find((e) => e.tag === "select_static" && e.name === SETUP_FORM_FIELDS.dirSelect)!;
+}
+const dirOptionValues = (select: Record<string, unknown>): string[] =>
+  (select.options as Array<{ value: string }>).map((o) => o.value);
+
+describe("buildSetupFormCard 目录下拉（P6.3）", () => {
+  test("含 dir_select：手动输入 + 最近目录 + 默认根（去重）", () => {
+    const card = buildSetupFormCard({
+      models: MODELS,
+      recent: [],
+      recentDirs: ["/home/ubuntu/work/a", "/home/ubuntu/work/b", "/home/ubuntu/work/a"],
+      allowedRoots: ["/home/ubuntu"],
+    });
+    const select = dirSelectOf(card);
+    expect(select.tag).toBe("select_static");
+    const values = dirOptionValues(select);
+    expect(values[0]).toBe(SETUP_FORM_DIR_CUSTOM);
+    expect(values).toEqual(
+      expect.arrayContaining(["/home/ubuntu/work/a", "/home/ubuntu/work/b", "/home/ubuntu"]),
+    );
+    // 去重：重复项只出现一次
+    expect(values.filter((v) => v === "/home/ubuntu/work/a")).toHaveLength(1);
+    // 手动输入文案 + 默认根文案
+    expect(json(card)).toContain("✍️ 手动输入路径");
+    expect(json(card)).toContain("🏠 /home/ubuntu（默认）");
+    // 默认选中「手动输入」（手填优先）
+    expect(select.initial_option).toBe(SETUP_FORM_DIR_CUSTOM);
+  });
+
+  test("默认根目录与最近目录重复时不重复添加", () => {
+    const card = buildSetupFormCard({
+      models: MODELS,
+      recent: [],
+      recentDirs: ["/home/ubuntu/work/a", "/home/ubuntu"],
+      allowedRoots: ["/home/ubuntu"],
+    });
+    const values = dirOptionValues(dirSelectOf(card));
+    expect(values.filter((v) => v === "/home/ubuntu")).toHaveLength(1);
+  });
+
+  test("最近目录条数受 recentDirsLimit 限制 + 总选项 ≤ 8 + 过长中间省略", () => {
+    const many = Array.from({ length: 10 }, (_, i) => `/home/ubuntu/work/dir-${i}`);
+    const limited = buildSetupFormDirOptions({ recentDirs: many, recentDirsLimit: 2, allowedRoots: ["/home/ubuntu"] });
+    // __custom__ + 2 个最近 + 1 个根
+    expect(limited).toHaveLength(4);
+    expect(limited.map((o) => o.value)).toEqual([
+      SETUP_FORM_DIR_CUSTOM,
+      "/home/ubuntu/work/dir-0",
+      "/home/ubuntu/work/dir-1",
+      "/home/ubuntu",
+    ]);
+
+    const capped = buildSetupFormDirOptions({ recentDirs: many, recentDirsLimit: 20, allowedRoots: ["/home/ubuntu"] });
+    expect(capped.length).toBeLessThanOrEqual(SETUP_FORM_MAX_DIR_OPTIONS);
+
+    const long = buildSetupFormDirOptions({
+      recentDirs: ["/home/ubuntu/work/some/really/really/long/path/name"],
+      allowedRoots: [],
+    });
+    expect(long[1]!.text.content).toContain("…");
+    expect(long[1]!.text.content.length).toBeLessThanOrEqual(40);
+  });
+
+  test("initial_option：状态目录命中最近目录则选中它，否则 __custom__", () => {
+    const hit = buildSetupFormCard({
+      models: MODELS,
+      recent: [],
+      recentDirs: ["/home/ubuntu/work/a"],
+      allowedRoots: ["/home/ubuntu"],
+      values: { dir: "/home/ubuntu/work/a" },
+    });
+    const select = dirSelectOf(hit);
+    expect(select.initial_option).toBe("/home/ubuntu/work/a");
+    // 目录输入框仍回显
+    const els = collectFormElements(formRoot(hit).elements as Record<string, unknown>[]);
+    expect(els.find((e) => e.tag === "input")!.default_value).toBe("/home/ubuntu/work/a");
+
+    const miss = buildSetupFormCard({
+      models: MODELS,
+      recent: [],
+      recentDirs: ["/home/ubuntu/work/a"],
+      allowedRoots: ["/home/ubuntu"],
+      values: { dir: "/home/ubuntu/work/elsewhere" },
+    });
+    expect(dirSelectOf(miss).initial_option).toBe(SETUP_FORM_DIR_CUSTOM);
+  });
+
+  test("错误重渲染时仍保留目录下拉的 initial_option", () => {
+    const card = buildSetupFormCard({
+      models: MODELS,
+      recent: [],
+      recentDirs: ["/home/ubuntu/work/a"],
+      allowedRoots: ["/home/ubuntu"],
+      error: "目录不在允许范围内。",
+      values: { dir: "/home/ubuntu/work/a" },
+    });
+    expect(dirSelectOf(card).initial_option).toBe("/home/ubuntu/work/a");
+  });
+});
+
+describe("resolveSetupFormDir（提交目录优先级）", () => {
+  test("下拉选中（≠__custom__）优先于文本输入", () => {
+    expect(resolveSetupFormDir({ dir: "/typed", dirSelect: "/picked" }, ["/root"])).toBe("/picked");
+  });
+
+  test("__custom__ → 用文本输入；为空 → 允许根目录", () => {
+    expect(resolveSetupFormDir({ dir: "/typed", dirSelect: SETUP_FORM_DIR_CUSTOM }, ["/root"])).toBe("/typed");
+    expect(resolveSetupFormDir({ dir: "   ", dirSelect: SETUP_FORM_DIR_CUSTOM }, ["/home/ubuntu"])).toBe("/home/ubuntu");
+    expect(resolveSetupFormDir({ dir: "" }, ["/home/ubuntu"])).toBe("/home/ubuntu");
+  });
+
+  test("无下拉且无输入且无允许根 → 空串", () => {
+    expect(resolveSetupFormDir({ dir: "" }, [])).toBe("");
+  });
+});
+
 describe("parseSetupFormValues / isSetupFormAction（P6.1）", () => {
   test("解析 dir / model(provider/id) / perm", () => {
     expect(parseSetupFormValues({ dir: " /home/ubuntu/work ", model: "anthropic/claude-sonnet-4", perm: "readonly" })).toEqual({
@@ -249,6 +372,17 @@ describe("parseSetupFormValues / isSetupFormAction（P6.1）", () => {
       model: { providerID: "anthropic", id: "claude-sonnet-4" },
       perm: "readonly",
     });
+  });
+
+  test("解析 dir_select（下拉），不因存在而改变既有字段", () => {
+    expect(parseSetupFormValues({ dir: "", dir_select: "/home/ubuntu/work/a", perm: "edit" })).toEqual({
+      dir: "",
+      dirSelect: "/home/ubuntu/work/a",
+      perm: "edit",
+    });
+    expect(parseSetupFormValues({ dir: " /x ", dir_select: "__custom__" })).toEqual({ dir: "/x", dirSelect: "__custom__" });
+    // 无 dir_select 时不带该字段（向后兼容旧卡片）
+    expect(parseSetupFormValues({ dir: "/x" })).toEqual({ dir: "/x" });
   });
 
   test("非法 model / perm 被忽略；非对象返回 undefined", () => {

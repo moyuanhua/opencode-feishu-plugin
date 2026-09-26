@@ -34,6 +34,7 @@ import {
   isSetupFormAction,
   parseSetupCardValue,
   parseSetupFormValues,
+  resolveSetupFormDir,
   type SetupFormValuesInput,
   type SetupCardValue,
 } from "./feishu/setup-cards.js";
@@ -107,6 +108,8 @@ export interface SessionCommandsDeps {
   readonly modelPageSize?: number;
   /** 模型卡片「最近」列表长度（默认 5，与 config.recentModelsLimit 一致）。 */
   readonly recentModelsLimit?: number;
+  /** 表单目录下拉「最近使用目录」长度（默认 5，与 config.recentDirsLimit 一致）。 */
+  readonly recentDirsLimit?: number;
 }
 
 export class SessionCommands {
@@ -683,23 +686,27 @@ export class SessionCommands {
       return;
     }
     const title = state.title?.trim() || defaultSessionTitle(this.now());
+    // 目录优先级：下拉选中 → 文本输入 → 允许根目录 allowedRoots[0]（纯函数，便于单测）。
+    const requestedDir = resolveSetupFormDir(values, this.deps.allowedRoots ?? []);
     let preserved: SetupFormValuesInput = {
-      dir: values.dir,
+      dir: requestedDir,
       ...(values.model ? { model: values.model } : {}),
       ...(values.perm ? { perm: values.perm } : {}),
     };
 
     // 保留诊断日志：字段解析。
     this.deps.log.info("表单字段解析", {
-      dir: values.dir,
+      dirInput: values.dir,
+      dirSelect: values.dirSelect,
+      dir: requestedDir,
       model: values.model ? `${values.model.providerID}/${values.model.id}` : undefined,
       perm: values.perm,
       hasState: true,
     });
-    const validation = this.deps.validateDir(values.dir);
+    const validation = this.deps.validateDir(requestedDir);
     if (!validation.ok) {
       // 目录留空/不存在都由 validateDir 处理：留空 → 允许根目录；不存在 → 自动创建。
-      this.deps.log.warn("目录校验失败", { dir: values.dir, reason: validation.message });
+      this.deps.log.warn("目录校验失败", { dir: requestedDir, reason: validation.message });
       await this.patchCard(
         action.messageId,
         await this.renderFormCard(state, { error: validation.message, values: preserved }),
@@ -861,6 +868,7 @@ export class SessionCommands {
   ): Promise<object> {
     const models = await this.loadModels();
     const recent = await this.deps.recent.listModels();
+    const recentDirs = await this.listRecentDirs();
     const values: SetupFormValuesInput =
       over?.values ?? {
         ...(state?.dir ? { dir: state.dir } : {}),
@@ -870,6 +878,8 @@ export class SessionCommands {
       models,
       recent,
       ...(state?.model ? { defaultModel: state.model } : {}),
+      ...(recentDirs.length > 0 ? { recentDirs } : {}),
+      recentDirsLimit: this.recentDirsLimit(),
       ...(this.deps.allowedRoots ? { allowedRoots: this.deps.allowedRoots } : {}),
       ...(over?.error ? { error: over.error } : {}),
       values,
@@ -915,6 +925,20 @@ export class SessionCommands {
 
   private recentModelsLimit(): number {
     return this.deps.recentModelsLimit ?? 5;
+  }
+
+  private recentDirsLimit(): number {
+    return this.deps.recentDirsLimit ?? 5;
+  }
+
+  /** 最近使用目录（读取失败降级为空列表，表单下拉仍可用）。 */
+  private async listRecentDirs(): Promise<string[]> {
+    try {
+      return [...(await this.deps.recent.listDirs())];
+    } catch (err) {
+      this.deps.log.warn("最近目录读取失败", { error: errorMessage(err) });
+      return [];
+    }
   }
 
   private async threadSessionID(message: IncomingMessage): Promise<string | undefined> {
