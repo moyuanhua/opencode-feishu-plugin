@@ -1,0 +1,40 @@
+name: Publish to npm
+
+on:
+  push:
+    tags:
+      - 'v*'          # 打 tag 即发布，例如 git tag v0.1.0 && git push --follow-tags
+  workflow_dispatch:  # 也支持在 Actions 页面手动触发
+
+permissions:
+  contents: read
+  id-token: write     # OIDC：Trusted Publishing 必需
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest        # 必须是 GitHub 托管 runner（自托管不支持 OIDC）
+    steps:
+      - uses: actions/checkout@v4
+
+      # 注意：这里**故意不设 registry-url**。
+      # setup-node 设了 registry-url 会把 GITHUB_TOKEN 注入成 NODE_AUTH_TOKEN，
+      # 那会让 npm 走传统 token 认证、跳过 OIDC 交换，导致 ENEEDAUTH。
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'      # Node 22.14+ 才有 OIDC 支持；24 自带 npm 11
+          package-manager-cache: false
+
+      - name: Upgrade npm (trusted publishing 需要 npm >= 11.5.1)
+        run: npm install -g npm@latest
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Verify (typecheck + build + test)
+        run: |
+          npm run typecheck
+          npm run build
+          npm test
+
+      - name: Publish (OIDC trusted publishing + provenance)
+        run: npm publish --access public --provenance
