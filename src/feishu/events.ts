@@ -166,3 +166,49 @@ export function parseCardAction(data: unknown): CardAction | undefined {
 export function isP2PChat(chatType: string | undefined): boolean {
   return chatType === "p2p";
 }
+
+/**
+ * `card.action.trigger` 载荷诊断信息（P5.2）：**只记录键名与布尔**，
+ * 绝不记录 token / value / open_id 的值。
+ *
+ * 目的：确认回调事件里是否真的带 `thread_id`（P5 存疑项）。
+ */
+export interface CardActionDiagnostics {
+  readonly topKeys: readonly string[];
+  readonly contextKeys: readonly string[];
+  readonly actionKeys: readonly string[];
+  readonly operatorKeys: readonly string[];
+  readonly hasThreadId: boolean;
+  readonly hasRootId: boolean;
+  readonly hasOpenMessageId: boolean;
+  readonly hasOpenChatId: boolean;
+  readonly hasOperator: boolean;
+  readonly hasToken: boolean;
+}
+
+function keysOf(value: unknown): string[] {
+  return isRecord(value) ? Object.keys(value).slice(0, 30) : [];
+}
+
+export function describeCardActionEvent(data: unknown): CardActionDiagnostics {
+  const top = isRecord(data) ? data : {};
+  const context = isRecord(top.context) ? top.context : {};
+  const action = isRecord(top.action) ? top.action : {};
+  const operator = isRecord(top.operator) ? top.operator : {};
+  const threadId = context.thread_id ?? top.thread_id;
+  const rootId = context.root_id ?? top.root_id;
+  const openMessageId = context.open_message_id ?? top.open_message_id;
+  const openChatId = context.open_chat_id ?? top.open_chat_id;
+  return {
+    topKeys: keysOf(top),
+    contextKeys: keysOf(context),
+    actionKeys: keysOf(action),
+    operatorKeys: keysOf(operator),
+    hasThreadId: typeof threadId === "string" && threadId.length > 0,
+    hasRootId: typeof rootId === "string" && rootId.length > 0,
+    hasOpenMessageId: typeof openMessageId === "string" && openMessageId.length > 0,
+    hasOpenChatId: typeof openChatId === "string" && openChatId.length > 0,
+    hasOperator: Object.keys(operator).length > 0,
+    hasToken: typeof top.token === "string" && top.token.length > 0,
+  };
+}

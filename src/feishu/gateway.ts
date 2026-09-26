@@ -10,7 +10,7 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { errorMessage } from "../logger.js";
 import type { CardAction, IncomingMessage, LogLevel, Logger } from "../types.js";
-import { parseCardAction, parseIncomingMessage } from "./events.js";
+import { parseCardAction, parseIncomingMessage, describeCardActionEvent } from "./events.js";
 
 export interface GatewayOptions {
   readonly appId: string;
@@ -58,6 +58,8 @@ export function startGateway(options: GatewayOptions): Gateway {
 
     "card.action.trigger": (data: unknown) => {
       try {
+        // P5.2 诊断：只记录键名与布尔，确认回调是否带 thread_id（不记录 token/value/open_id 值）。
+        log.info("卡片回调诊断", { ...describeCardActionEvent(data) } as Record<string, unknown>);
         const action = parseCardAction(data);
         if (!action) return {};
         // 必须 3 秒内同步返回；onCardAction 内部只做同步校验 + 后台 reply。

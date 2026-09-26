@@ -34,6 +34,8 @@ export interface BeginRunInput {
    * 缺省则维持 `im.message.create`。
    */
   readonly replyToMessageId?: string;
+  /** 当前会话模型展示名（P6：运行卡页脚显示）。 */
+  readonly model?: string;
 }
 
 export interface BeginRunResult {
@@ -45,6 +47,8 @@ export interface BeginRunResult {
 export interface RunController {
   beginRun(input: BeginRunInput): Promise<BeginRunResult>;
   apply(sessionID: string, event: RunEvent): void;
+  /** 记录/更新会话当前模型（P6），并同步到正在运行的卡片页脚。 */
+  setModel(sessionID: string, model: string): void;
   hasActive(sessionID: string): boolean;
   dispose(): void;
 }
@@ -68,6 +72,8 @@ interface SessionRuns {
 export function createRunController(deps: RunControllerDeps): RunController {
   const sessions = new Map<string, SessionRuns>();
   const throttlers = new Map<string, ReturnType<typeof createThrottler>>();
+  /** sessionID → 当前模型展示名（P6）。 */
+  const sessionModels = new Map<string, string>();
   const throttleMs = Math.max(400, deps.throttleMs);
   let disposed = false;
 
@@ -137,7 +143,10 @@ export function createRunController(deps: RunControllerDeps): RunController {
       if (!deps.enabled || disposed) return { ok: false };
       const runs = sessionRuns(input.sessionID);
       const runID = `${input.sessionID}:${runs.seq++}`;
-      const state = reduce(initialRunState(), input.delivery === "queue" ? { type: "queued" } : { type: "execution.started" });
+      let state = reduce(initialRunState(), input.delivery === "queue" ? { type: "queued" } : { type: "execution.started" });
+      const model = input.model ?? sessionModels.get(input.sessionID);
+      if (model) state = reduce(state, { type: "model.set", model });
+      if (model) sessionModels.set(input.sessionID, model);
 
       const res = input.replyToMessageId
         ? await deps.sender.replyCard(input.replyToMessageId, renderRunCard(state))
@@ -203,8 +212,16 @@ export function createRunController(deps: RunControllerDeps): RunController {
       return sessions.get(sessionID)?.active !== undefined;
     },
 
+    setModel(sessionID, model): void {
+      if (disposed || !model) return;
+      sessionModels.set(sessionID, model);
+      const runs = sessions.get(sessionID);
+      if (runs?.active) update(runs.active, { type: "model.set", model }, false);
+    },
+
     dispose(): void {
       disposed = true;
+      sessionModels.clear();
       for (const throttler of throttlers.values()) throttler.cancel();
       throttlers.clear();
       for (const runs of sessions.values()) {

@@ -104,4 +104,17 @@ describe("renderRunCard", () => {
     const card = renderRunCard(run(...events));
     expect(Buffer.byteLength(json(card), "utf8")).toBeLessThanOrEqual(MAX_CARD_BYTES);
   });
+
+  test("运行页脚含当前模型；终态保留模型行", () => {
+    const running = run({ type: "execution.started" }, { type: "model.set", model: "GPT-5" });
+    expect(json(renderRunCard(running))).toContain("🤖 GPT-5");
+    const done = run(
+      { type: "execution.started" },
+      { type: "model.set", model: "GPT-5" },
+      { type: "execution.succeeded" },
+    );
+    const text = json(renderRunCard(done));
+    expect(text).toContain("🤖 GPT-5");
+    expect(text).not.toContain("正在思考");
+  });
 });

@@ -153,4 +153,20 @@ describe("run controller", () => {
     expect(lastPatchFor(sender, "om_1")).toBe("");
     controller.dispose();
   });
+
+  test("beginRun 带 model → 页脚显示模型", async () => {
+    const { sender, controller } = setup();
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "steer", model: "GPT-5" });
+    expect(cardText(sender.sent[0]!.card)).toContain("🤖 GPT-5");
+    controller.dispose();
+  });
+
+  test("setModel 更新运行中卡片页脚", async () => {
+    const { sender, controller } = setup();
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "steer" });
+    controller.setModel("ses_1", "Claude Sonnet 4");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lastPatchFor(sender, "om_0")).toContain("🤖 Claude Sonnet 4");
+    controller.dispose();
+  });
 });

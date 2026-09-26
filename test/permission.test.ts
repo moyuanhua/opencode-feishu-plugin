@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { decideEffect, parseApprovalValue, type GateConfig } from "../src/permission.js";
+import { decideEffect, decideEffectForSession, parseApprovalValue, type GateConfig } from "../src/permission.js";
 
 const cfg = (over: Partial<GateConfig> = {}): GateConfig => ({
   permissionGate: "gate",
@@ -36,6 +36,34 @@ describe("decideEffect", () => {
   test("支持通配 *", () => {
     expect(decideEffect("anything", cfg({ allowTools: ["*"] })).effect).toBe("allow");
     expect(decideEffect("bashx", cfg({ denyTools: ["bash*"] })).effect).toBe("deny");
+  });
+});
+
+describe("decideEffectForSession（P6 会话预设）", () => {
+  test("无会话预设 → 回退全局 decideEffect", () => {
+    expect(decideEffectForSession("bash", cfg(), undefined)).toEqual(decideEffect("bash", cfg()));
+    expect(decideEffectForSession("read", cfg(), undefined)).toEqual({ effect: "allow" });
+  });
+
+  test("gateMode=off → 完全不介入（即使全局 gate）", () => {
+    expect(decideEffectForSession("bash", cfg(), { gateMode: "off" })).toEqual({});
+    expect(decideEffectForSession("edit", cfg(), { gateMode: "off" })).toEqual({});
+  });
+
+  test("gateMode=gate → 仅对 askActions 升级为 ask，其余继承", () => {
+    const session = { gateMode: "gate" as const, askActions: ["shell", "bash", "edit", "external_directory"] };
+    expect(decideEffectForSession("bash", cfg(), session).effect).toBe("ask");
+    expect(decideEffectForSession("edit", cfg(), session).effect).toBe("ask");
+    expect(decideEffectForSession("external_directory", cfg(), session).effect).toBe("ask");
+    // 白名单仍放行
+    expect(decideEffectForSession("read", cfg(), session).effect).toBe("allow");
+    // 其余继承（不改写），不像全局 gate 那样一律 ask
+    expect(decideEffectForSession("task", cfg(), session)).toEqual({});
+  });
+
+  test("denyTools 仍优先于会话 ask", () => {
+    const session = { gateMode: "gate" as const, askActions: ["bash"] };
+    expect(decideEffectForSession("bash", cfg({ denyTools: ["bash"] }), session).effect).toBe("deny");
   });
 });
 

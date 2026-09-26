@@ -41,6 +41,8 @@ export interface RunState {
   readonly errorMsg?: string;
   /** 当前正在输出的 assistant 消息 id（用于区分 step）。 */
   readonly assistantMessageID?: string;
+  /** 当前会话模型展示名（P6，运行卡页脚展示）。 */
+  readonly model?: string;
 }
 
 /** 归一化事件：把 SSE 事件名 + 关键字段收敛成 reducer 可直接消费的形状。 */
@@ -49,6 +51,7 @@ export type RunEvent =
   | { readonly type: "execution.started" }
   | { readonly type: "execution.succeeded" }
   | { readonly type: "execution.failed"; readonly error?: string }
+  | { readonly type: "model.set"; readonly model: string }
   | { readonly type: "text.started"; readonly assistantMessageID?: string }
   | { readonly type: "text.delta"; readonly delta: string; readonly assistantMessageID?: string }
   | { readonly type: "text.ended"; readonly text?: string; readonly assistantMessageID?: string }
@@ -115,6 +118,9 @@ export function reduce(state: RunState, event: RunEvent): RunState {
         errorMsg: event.error ?? "未知错误",
         footer: null,
       };
+
+    case "model.set":
+      return { ...state, model: event.model };
 
     case "text.started": {
       const next = withAssistantID(state, event.assistantMessageID);

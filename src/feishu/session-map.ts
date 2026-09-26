@@ -88,16 +88,29 @@ export class SessionMap {
   async resolveBySession(sessionID: string): Promise<SessionLink | undefined> {
     const cached = this.sessionToChat.get(sessionID);
     if (cached) return cached;
-    const stored = (await this.safeGet(`${SESSION_KEY_PREFIX}${sessionID}`)) as
-      | { chatId?: unknown; openId?: unknown; replyMessageId?: unknown }
-      | undefined;
-    const chatId = typeof stored?.chatId === "string" ? stored.chatId : "";
-    const openId = typeof stored?.openId === "string" ? stored.openId : "";
-    if (!chatId) return undefined;
-    const replyMessageId = typeof stored?.replyMessageId === "string" ? stored.replyMessageId : "";
-    const link: SessionLink = { chatId, openId, ...(replyMessageId ? { replyMessageId } : {}) };
+    const stored = await this.safeGet(`${SESSION_KEY_PREFIX}${sessionID}`);
+    const link = parseSessionLink(stored);
+    if (!link) return undefined;
     this.remember(sessionID, link);
     return link;
+  }
+
+  /**
+   * 更新会话元数据（P6：perm/gateMode/dir/model），保留 chatId/openId/replyMessageId。
+   * 会话不存在返回 false。patch 中值为 `undefined` 表示删除该字段。
+   */
+  async setSessionMeta(sessionID: string, patch: Partial<Omit<SessionLink, "chatId" | "openId">>): Promise<boolean> {
+    const existing = await this.resolveBySession(sessionID);
+    if (!existing) return false;
+    const next: Record<string, unknown> = { ...existing };
+    for (const [key, value] of Object.entries(patch)) {
+      if (value === undefined) delete next[key];
+      else next[key] = value;
+    }
+    const link = next as unknown as SessionLink;
+    this.remember(sessionID, link);
+    await this.safeSet(`${SESSION_KEY_PREFIX}${sessionID}`, serializeSession(link));
+    return true;
   }
 
   /**
@@ -116,7 +129,14 @@ export class SessionMap {
     this.threadCache.set(threadId, link);
     await this.safeSet(`${THREAD_KEY_PREFIX}${threadId}`, serializeThread(link));
 
-    const sessionLink: SessionLink = { chatId, openId, ...(anchorMessageId ? { replyMessageId: anchorMessageId } : {}) };
+    // 保留已有的会话元数据（perm/gateMode/dir/model），只更新 chat/openId/锚点。
+    const existing = this.sessionToChat.get(sessionID) ?? (await this.readSessionLink(sessionID));
+    const sessionLink: SessionLink = {
+      ...existing,
+      chatId,
+      openId,
+      ...(anchorMessageId ? { replyMessageId: anchorMessageId } : {}),
+    };
     this.remember(sessionID, sessionLink);
     await this.safeSet(`${SESSION_KEY_PREFIX}${sessionID}`, serializeSession(sessionLink));
   }
@@ -199,13 +219,9 @@ export class SessionMap {
     } else {
       record.active = sessionID;
     }
-    // 保留已有的话题锚点（若该会话已绑定话题），避免把 replyMessageId 冲掉。
-    const existingReplyMessageId = this.sessionToChat.get(sessionID)?.replyMessageId;
-    const link: SessionLink = {
-      chatId,
-      openId,
-      ...(existingReplyMessageId ? { replyMessageId: existingReplyMessageId } : {}),
-    };
+    // 保留已有的会话元数据（replyMessageId/perm/gateMode/dir/model），避免被冲掉。
+    const existing = this.sessionToChat.get(sessionID) ?? (await this.readSessionLink(sessionID));
+    const link: SessionLink = { ...existing, chatId, openId };
     this.remember(sessionID, link);
     await this.persist(chatId, record);
     await this.safeSet(`${SESSION_KEY_PREFIX}${sessionID}`, serializeSession(link));
@@ -253,6 +269,14 @@ export class SessionMap {
 
   private remember(sessionID: string, link: SessionLink): void {
     this.sessionToChat.set(sessionID, link);
+  }
+
+  /** 只从 storage 读取会话索引（写入缓存并返回）。 */
+  private async readSessionLink(sessionID: string): Promise<SessionLink | undefined> {
+    const stored = await this.safeGet(`${SESSION_KEY_PREFIX}${sessionID}`);
+    const link = parseSessionLink(stored);
+    if (link) this.remember(sessionID, link);
+    return link;
   }
 
   private cacheChat(chatId: string, record: ChatSessionsRecord): void {
@@ -332,12 +356,59 @@ function serialize(record: ChatSessionsRecord): { sessions: SessionEntry[]; acti
   return { sessions: record.sessions, ...(record.active ? { active: record.active } : {}) };
 }
 
-function serializeSession(link: SessionLink): { chatId: string; openId: string; replyMessageId?: string } {
+function serializeSession(link: SessionLink): {
+  chatId: string;
+  openId: string;
+  replyMessageId?: string;
+  perm?: SessionLink["perm"];
+  gateMode?: SessionLink["gateMode"];
+  dir?: string;
+  model?: SessionLink["model"];
+} {
   return {
     chatId: link.chatId,
     openId: link.openId,
     ...(link.replyMessageId ? { replyMessageId: link.replyMessageId } : {}),
+    ...(link.perm ? { perm: link.perm } : {}),
+    ...(link.gateMode ? { gateMode: link.gateMode } : {}),
+    ...(link.dir ? { dir: link.dir } : {}),
+    ...(link.model ? { model: link.model } : {}),
   };
+}
+
+/** 解析 session 索引；缺 chatId 视为非法。 */
+function parseSessionLink(value: unknown): SessionLink | undefined {
+  if (!isRecord(value)) return undefined;
+  const chatId = str(value.chatId);
+  if (!chatId) return undefined;
+  const openId = str(value.openId);
+  const replyMessageId = str(value.replyMessageId);
+  const perm = isPreset(value.perm) ? value.perm : undefined;
+  const gateMode = value.gateMode === "off" || value.gateMode === "gate" ? value.gateMode : undefined;
+  const dir = str(value.dir);
+  const model = parseModelRef(value.model);
+  return {
+    chatId,
+    openId,
+    ...(replyMessageId ? { replyMessageId } : {}),
+    ...(perm ? { perm } : {}),
+    ...(gateMode ? { gateMode } : {}),
+    ...(dir ? { dir } : {}),
+    ...(model ? { model } : {}),
+  };
+}
+
+function isPreset(value: unknown): value is NonNullable<SessionLink["perm"]> {
+  return value === "readonly" || value === "edit" || value === "askHigh" || value === "trust";
+}
+
+function parseModelRef(value: unknown): NonNullable<SessionLink["model"]> | undefined {
+  if (!isRecord(value)) return undefined;
+  const providerID = str(value.providerID);
+  const id = str(value.id);
+  if (!providerID || !id) return undefined;
+  const name = str(value.name);
+  return { providerID, id, ...(name ? { name } : {}) };
 }
 
 function serializeThread(link: ThreadLink): { sessionID: string; chatId: string; openId: string; anchorMessageId?: string } {

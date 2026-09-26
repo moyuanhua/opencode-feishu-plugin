@@ -212,3 +212,55 @@ describe("SessionMap 话题 / root 映射（P5）", () => {
     expect((await map.getActive("oc_2"))?.sessionID).toBe("ses_3");
   });
 });
+
+describe("SessionMap 会话元数据（P6）", () => {
+  test("setSessionMeta 持久化 perm/gateMode/dir/model，并保留其它字段", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.addSession("oc_1", "ses_1", "t", "ou_1");
+    await map.bindThread("omt_1", "ses_1", "oc_1", "ou_1", "om_root");
+
+    expect(
+      await map.setSessionMeta("ses_1", {
+        perm: "edit",
+        gateMode: "gate",
+        dir: "/home/ubuntu/work/app",
+        model: { providerID: "openai", id: "gpt-5", name: "GPT-5" },
+      }),
+    ).toBe(true);
+    expect(storage.raw(`${SESSION_KEY_PREFIX}ses_1`)).toEqual({
+      chatId: "oc_1",
+      openId: "ou_1",
+      replyMessageId: "om_root",
+      perm: "edit",
+      gateMode: "gate",
+      dir: "/home/ubuntu/work/app",
+      model: { providerID: "openai", id: "gpt-5", name: "GPT-5" },
+    });
+    // 冷启动回填元数据
+    const fresh = new SessionMap(storage, log);
+    const link = await fresh.resolveBySession("ses_1");
+    expect(link?.perm).toBe("edit");
+    expect(link?.gateMode).toBe("gate");
+    expect(link?.dir).toBe("/home/ubuntu/work/app");
+    expect(link?.model?.id).toBe("gpt-5");
+  });
+
+  test("addSession / bindThread 不冲掉已有元数据", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.addSession("oc_1", "ses_1", "t", "ou_1");
+    await map.setSessionMeta("ses_1", { perm: "readonly", gateMode: "off" });
+    await map.addSession("oc_1", "ses_1", "t2", "ou_1");
+    await map.bindThread("omt_1", "ses_1", "oc_1", "ou_1", "om_root");
+    const link = map.getLink("ses_1");
+    expect(link?.perm).toBe("readonly");
+    expect(link?.gateMode).toBe("off");
+    expect(link?.replyMessageId).toBe("om_root");
+  });
+
+  test("setSessionMeta 未知会话返回 false", async () => {
+    const map = new SessionMap(new FakeStorage(), log);
+    expect(await map.setSessionMeta("ses_x", { perm: "edit" })).toBe(false);
+  });
+});

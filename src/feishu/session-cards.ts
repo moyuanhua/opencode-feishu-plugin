@@ -81,27 +81,33 @@ export function parseSessionCardValue(raw: unknown): SessionCardValue | undefine
  * `/new` 的一键进入卡：机器人把这张卡 reply 到用户消息并 `reply_in_thread`，
  * 卡片即落在新话题内；用户直接在话题里发消息即可。无任何按钮（话题内不做会话管理）。
  */
-export function buildSessionReadyCard(input: { readonly title: string; readonly sessionID: string }): object {
+export function buildSessionReadyCard(input: {
+  readonly title: string;
+  readonly sessionID: string;
+  readonly dir?: string;
+  readonly model?: string;
+  readonly perm?: string;
+}): object {
   const title = input.title.trim() || "(未命名)";
+  const lines = [`会话「${title}」已创建：\`${input.sessionID}\``];
+  const setup: string[] = [];
+  if (input.dir) setup.push(`- 目录：\`${input.dir}\``);
+  if (input.model) setup.push(`- 模型：${input.model}`);
+  if (input.perm) setup.push(`- 权限：${input.perm}`);
+  if (setup.length > 0) lines.push("", ...setup);
+  lines.push(
+    "",
+    "**在本话题内直接发消息**，OpenCode 就在这个会话里干活。",
+    "",
+    "话题内可用：`/current` `/stop` `/model` `/perm` `/cd` `/help`。",
+    "会话管理（`/new` `/sessions` `/use`）请回到主聊天流。",
+  );
   return {
     schema: "2.0",
     config: { update_multi: true },
     header: { title: { tag: "plain_text", content: "✅ 会话已就绪" }, template: "green" },
     body: {
-      elements: [
-        {
-          tag: "markdown",
-          content: truncateCardContent(
-            [
-              `会话「${title}」已创建：\`${input.sessionID}\``,
-              "",
-              "**在本话题内直接发消息**，OpenCode 就在这个会话里干活。",
-              "",
-              "会话管理（`/new` `/sessions` `/use`）请回到主聊天流。",
-            ].join("\n"),
-          ),
-        },
-      ],
+      elements: [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }],
     },
   };
 }

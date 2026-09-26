@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  describeCardActionEvent,
   extractMessageText,
   isP2PChat,
   parseCardAction,
@@ -117,5 +118,43 @@ describe("parseCardAction", () => {
 
   test("无 operator 返回 undefined", () => {
     expect(parseCardAction({ action: { value: {} } })).toBeUndefined();
+  });
+});
+
+describe("describeCardActionEvent（P5.2 回调诊断）", () => {
+  test("只返回键名与布尔，不泄露 token / open_id / value 的值", () => {
+    const diag = describeCardActionEvent({
+      token: "SECRET_TOKEN",
+      context: { open_message_id: "om_1", open_chat_id: "oc_1", thread_id: "omt_1" },
+      operator: { open_id: "ou_secret" },
+      action: { value: { t: "approval-token", d: "once" } },
+      extra: true,
+    });
+    expect(diag.hasThreadId).toBe(true);
+    expect(diag.hasRootId).toBe(false);
+    expect(diag.hasOpenMessageId).toBe(true);
+    expect(diag.hasOpenChatId).toBe(true);
+    expect(diag.hasOperator).toBe(true);
+    expect(diag.hasToken).toBe(true);
+    expect(diag.contextKeys).toEqual(expect.arrayContaining(["open_message_id", "open_chat_id", "thread_id"]));
+    const serialized = JSON.stringify(diag);
+    expect(serialized).not.toContain("SECRET_TOKEN");
+    expect(serialized).not.toContain("ou_secret");
+    expect(serialized).not.toContain("approval-token");
+  });
+
+  test("主聊天流回调（无 thread_id）", () => {
+    const diag = describeCardActionEvent({
+      context: { open_message_id: "om_1", open_chat_id: "oc_1" },
+      operator: { open_id: "ou_1" },
+      action: { value: {} },
+    });
+    expect(diag.hasThreadId).toBe(false);
+    expect(diag.hasOpenMessageId).toBe(true);
+  });
+
+  test("非对象输入不抛异常", () => {
+    expect(() => describeCardActionEvent(null)).not.toThrow();
+    expect(describeCardActionEvent(null).hasOperator).toBe(false);
   });
 });

@@ -16,7 +16,7 @@ import * as Lark from "@larksuiteoapi/node-sdk";
 import { createWriteStream, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { Plugin } from "@opencode/plugin";
-import { hasSecret, resolveConfig, shouldHandlePermissionEvents, shouldRegisterEvaluate } from "./config.js";
+import { hasSecret, resolveConfig } from "./config.js";
 import { createLogger, errorMessage, maskId } from "./logger.js";
 import { acquireProcessGuard, releaseProcessGuard } from "./lifecycle.js";
 import { OwnerPolicy } from "./security/allowlist.js";
@@ -33,9 +33,22 @@ import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js
 import { decideRoute } from "./feishu/routing.js";
 import { buildConsoleHintCard } from "./feishu/cards.js";
 import { parseSessionCardValue } from "./feishu/session-cards.js";
-import { ApprovalManager, decideEffect, type ReplyInput } from "./permission.js";
+import { parseSetupCardValue } from "./feishu/setup-cards.js";
+import { validateDirectory } from "./feishu/dirs.js";
+import { WizardStore } from "./feishu/wizard.js";
+import { RecentStore } from "./feishu/recent.js";
+import { modelLabel, normalizeModelList } from "./feishu/models.js";
+import { presetAskActions, presetGateMode, presetToRuleset } from "./feishu/perm-presets.js";
+import { ApprovalManager, decideEffectForSession, type ReplyInput } from "./permission.js";
 import { SessionCommands } from "./session-commands.js";
-import type { IncomingMessage, PermissionRepliedLike, PermissionRequestLike, StorageLike } from "./types.js";
+import type {
+  IncomingMessage,
+  ModelRef,
+  PermissionRepliedLike,
+  PermissionRequestLike,
+  PermissionPreset,
+  StorageLike,
+} from "./types.js";
 
 export default Plugin.define({
   id: "feishu",
@@ -127,55 +140,133 @@ async function start(
     throttleMs: config.streamThrottleMs,
   });
 
-  // ── 会话管理（文本命令 + 会话卡片按钮） ──────────────────────────────
+  // ── 会话管理 / 建会话向导（P6） ───────────────────────────────────────
+  const wizard = new WizardStore(storage, log);
+  const recent = new RecentStore(storage, log, {
+    dirs: config.recentDirsLimit,
+    models: config.recentModelsLimit,
+  });
+
+  /** 目录校验闭包：绑定 config.allowedRoots。 */
+  const validateDir = (path: string) => validateDirectory(path, config.allowedRoots);
+
+  /**
+   * 建会话统一入口：ctx.session.create（title/model/location/permissions）→ 会话映射 + 元数据。
+   * 供向导、话题自动建会话、会话卡「新建」共用。
+   */
+  async function createSessionInternal(input: {
+    title: string;
+    chatId: string;
+    openId: string;
+    setActive?: boolean;
+    model?: ModelRef;
+    directory?: string;
+    permissions?: readonly { action: string; resource: string; effect: "allow" | "ask" | "deny" }[];
+    perm?: PermissionPreset;
+    gateMode?: "off" | "gate";
+  }): Promise<{ id: string }> {
+    const created = await ctx.session.create({
+      title: input.title,
+      ...(input.model ? { model: { id: input.model.id, providerID: input.model.providerID } } : {}),
+      ...(input.directory ? { location: { directory: input.directory } } : {}),
+      ...(input.permissions && input.permissions.length > 0 ? { permissions: [...input.permissions] } : {}),
+    });
+    await sessionMap.addSession(input.chatId, created.id, input.title, input.openId, {
+      setActive: input.setActive ?? true,
+    });
+    await sessionMap.setSessionMeta(created.id, {
+      ...(input.perm ? { perm: input.perm } : {}),
+      ...(input.gateMode ? { gateMode: input.gateMode } : {}),
+      ...(input.directory ? { dir: input.directory } : {}),
+      ...(input.model ? { model: input.model } : {}),
+    });
+    return { id: created.id };
+  }
+
+  async function listModels(): Promise<readonly import("./feishu/models.js").ModelEntry[]> {
+    try {
+      const raw = await (ctx.model.list as unknown as () => Promise<unknown>)();
+      return normalizeModelList(raw);
+    } catch (err) {
+      log.warn("模型列表获取失败", { error: errorMessage(err) });
+      return [];
+    }
+  }
+
+  async function switchSessionModel(sessionID: string, model: ModelRef): Promise<void> {
+    await ctx.session.switchModel({ sessionID, model: { id: model.id, providerID: model.providerID } });
+    await sessionMap.setSessionMeta(sessionID, { model });
+    runs.setModel(sessionID, modelLabel(model));
+  }
+
+  async function applyPermissionPreset(sessionID: string, preset: PermissionPreset): Promise<void> {
+    const permissions = presetToRuleset(preset);
+    // 即使是空 ruleset（askHigh「继承」）也要显式写入，以清掉上一次预设残留的规则。
+    await ctx.session.update({ sessionID, permissions });
+    await sessionMap.setSessionMeta(sessionID, { perm: preset, gateMode: presetGateMode(preset) });
+  }
+
+  async function moveSessionDir(sessionID: string, directory: string): Promise<void> {
+    await ctx.session.move({ sessionID, directory });
+    await sessionMap.setSessionMeta(sessionID, { dir: directory });
+  }
+
   const commands = new SessionCommands({
     log,
     sessionMap,
     sender,
+    wizard,
+    recent,
     isAllowed: (openId) => owner.isAllowed(openId),
-    createSession: async (title) => {
-      const created = await ctx.session.create({ title });
-      return { id: created.id };
-    },
+    createSession: (input) => createSessionInternal(input),
     interruptSession: async (sessionID) => {
       // V2 的字段是 `resume`（缺省 false 即中断后不续跑）；兼容文档中曾提到的 `continue`。
       await ctx.session.interrupt({ sessionID, resume: false });
     },
+    listModels,
+    switchSessionModel,
+    applyPermissionPreset,
+    moveSessionDir,
+    validateDir,
+    allowedRoots: config.allowedRoots,
+    modelPageSize: 8,
+    recentModelsLimit: config.recentModelsLimit,
     threadRouting: config.threadRouting,
   });
 
   // ── 审批门 ────────────────────────────────────────────────────────────
-  let approvals: ApprovalManager | undefined;
-  if (shouldHandlePermissionEvents(config.permissionGate)) {
-    approvals = new ApprovalManager({
-      config,
-      log,
-      sign: ({ requestID, sessionID, openId }) =>
-        signApproval({ r: requestID, s: sessionID, u: openId, ttlMs: config.approvalTtlMs }, config.signSecret),
-      verify: (token, expect) => verifyApproval(token, config.signSecret, { expect }),
-      replay: new ReplayGuard(config.approvalTtlMs),
-      sender,
-      getLink: (sessionID) => sessionMap.resolveBySession(sessionID),
-      isAllowed: (openId) => owner.isAllowed(openId),
-      reply: (input) => replyPermission(ctx, input),
-    });
-  }
+  // P6 起 gate 按会话生效（会话预设可产生 ask），因此即使全局 permissionGate=off
+  // 也要挂 evaluate hook + 订阅审批事件；无预设的会话仍走全局判定（off → 不改写，零行为变化）。
+  const approvals = new ApprovalManager({
+    config,
+    log,
+    sign: ({ requestID, sessionID, openId }) =>
+      signApproval({ r: requestID, s: sessionID, u: openId, ttlMs: config.approvalTtlMs }, config.signSecret),
+    verify: (token, expect) => verifyApproval(token, config.signSecret, { expect }),
+    replay: new ReplayGuard(config.approvalTtlMs),
+    sender,
+    getLink: (sessionID) => sessionMap.resolveBySession(sessionID),
+    isAllowed: (openId) => owner.isAllowed(openId),
+    reply: (input) => replyPermission(ctx, input),
+  });
 
-  let evaluateRegistration: { dispose(): Promise<void> } | undefined;
-  if (shouldRegisterEvaluate(config.permissionGate)) {
-    evaluateRegistration = await ctx.permission.hook("evaluate", async (event) => {
-      const decision = decideEffect(event.action, config);
-      if (decision.effect === undefined) return;
-      // 关键安全边界：只有「能投递到飞书」的会话才允许置为 ask，
-      // 否则 TUI/其他来源的会话会因为没有审批出口而永久挂起。
-      if (decision.effect === "ask" && !(await sessionMap.resolveBySession(event.sessionID))) {
-        log.debug("跳过 ask：会话无飞书映射", { sessionID: event.sessionID, action: event.action });
-        return;
-      }
-      event.effect = decision.effect;
-      if (decision.message) event.message = decision.message;
-    });
-  }
+  const evaluateRegistration = await ctx.permission.hook("evaluate", async (event) => {
+    const link = await sessionMap.resolveBySession(event.sessionID);
+    const sessionGate =
+      link && link.gateMode
+        ? { gateMode: link.gateMode, ...(link.perm ? { askActions: presetAskActions(link.perm) } : {}) }
+        : undefined;
+    const decision = decideEffectForSession(event.action, config, sessionGate);
+    if (decision.effect === undefined) return;
+    // 关键安全边界：只有「能投递到飞书」的会话才允许置为 ask，
+    // 否则 TUI/其他来源的会话会因为没有审批出口而永久挂起。
+    if (decision.effect === "ask" && !link) {
+      log.debug("跳过 ask：会话无飞书映射", { sessionID: event.sessionID, action: event.action });
+      return;
+    }
+    event.effect = decision.effect;
+    if (decision.message) event.message = decision.message;
+  });
 
   // ── 入站消息 ──────────────────────────────────────────────────────────
   async function handleMessage(message: IncomingMessage): Promise<void> {
@@ -249,8 +340,12 @@ async function start(
 
     // create-in-thread：话题内第一条消息 → 新建会话并绑定 thread/root。
     const title = topicTitle(message.text);
-    const created = await ctx.session.create({ title });
-    await sessionMap.addSession(message.chatId, created.id, title, message.senderOpenId, { setActive: false });
+    const created = await createSessionInternal({
+      title,
+      chatId: message.chatId,
+      openId: message.senderOpenId,
+      setActive: false,
+    });
     const anchor = message.rootId ?? message.messageId;
     await sessionMap.bindThread(message.threadId!, created.id, message.chatId, message.senderOpenId, anchor);
     await sessionMap.bindRoot(anchor, created.id);
@@ -266,8 +361,12 @@ async function start(
     let active = await sessionMap.getActive(message.chatId);
     if (!active) {
       const title = defaultSessionTitle(Date.now());
-      const created = await ctx.session.create({ title });
-      await sessionMap.addSession(message.chatId, created.id, title, message.senderOpenId);
+      const created = await createSessionInternal({
+        title,
+        chatId: message.chatId,
+        openId: message.senderOpenId,
+        setActive: true,
+      });
       active = { sessionID: created.id, title, updatedAt: Date.now() };
       log.info("新建 opencode 会话", { sessionID: created.id, chatId: message.chatId });
     }
@@ -285,6 +384,9 @@ async function start(
   ): Promise<void> {
     // 原生排队：该 session 正在跑 execution 就 queue，否则 steer。
     const delivery: Delivery = decideDelivery(executions.isRunning(sessionID));
+    // P6：运行卡页脚展示当前模型（会话元数据里记录的）。
+    const link = await sessionMap.resolveBySession(sessionID);
+    const model = link?.model ? modelLabel(link.model) : undefined;
 
     // 关键顺序：**先**发回执卡（含状态页脚），再发起 prompt。
     const receipt = await runs.beginRun({
@@ -292,6 +394,7 @@ async function start(
       chatId: message.chatId,
       delivery,
       ...(replyToMessageId ? { replyToMessageId } : {}),
+      ...(model ? { model } : {}),
     });
     if (!receipt.ok) log.warn("回执卡未发送，仍继续 prompt", { sessionID, delivery });
 
@@ -312,9 +415,10 @@ async function start(
     logLevel: config.logLevel,
     onMessage: (message) => handleMessage(message),
     onCardAction: (action) => {
-      // 会话卡片优先；其余交给审批卡（value 里带 `cmd` 的才是会话操作）。
-      if (parseSessionCardValue(action.rawValue)) return commands.handleCardAction(action);
-      return approvals ? approvals.handleCardAction(action) : {};
+      // 会话卡 / 向导卡优先；其余交给审批卡（value 里带 `cmd` / `wizard` 的才是管理操作）。
+      const value = action.rawValue;
+      if (parseSessionCardValue(value) || parseSetupCardValue(value)) return commands.handleCardAction(action);
+      return approvals.handleCardAction(action);
     },
   });
 
@@ -334,14 +438,12 @@ async function start(
     switch (event.type) {
       case "permission.asked":
         // 发卡是网络 IO，不能阻塞事件流（否则会拖慢后续 text.delta）。
-        if (approvals) {
-          void approvals
-            .onAsked(event.data as PermissionRequestLike)
-            .catch((err) => log.warn("处理 permission.asked 失败", { error: errorMessage(err) }));
-        }
+        void approvals
+          .onAsked(event.data as PermissionRequestLike)
+          .catch((err) => log.warn("处理 permission.asked 失败", { error: errorMessage(err) }));
         break;
       case "permission.replied":
-        approvals?.onReplied(event.data as PermissionRepliedLike);
+        approvals.onReplied(event.data as PermissionRepliedLike);
         break;
       case "session.text.started": {
         const data = event.data as { sessionID: string; assistantMessageID?: string };
@@ -455,10 +557,8 @@ async function start(
     await subscription.catch(() => undefined);
     runs.dispose();
     executions.clear();
-    approvals?.dispose();
-    if (evaluateRegistration) {
-      await evaluateRegistration.dispose().catch((err) => log.warn("evaluate hook 释放失败", { error: errorMessage(err) }));
-    }
+    approvals.dispose();
+    await evaluateRegistration.dispose().catch((err) => log.warn("evaluate hook 释放失败", { error: errorMessage(err) }));
     gateway.stop();
     logSink?.close();
     releaseProcessGuard();

@@ -6,7 +6,19 @@
  */
 import type { SessionEntry } from "./session-map.js";
 
-export type CommandName = "new" | "sessions" | "use" | "current" | "stop" | "help" | "unknown";
+export type CommandName =
+  | "new"
+  | "sessions"
+  | "use"
+  | "current"
+  | "stop"
+  | "help"
+  | "dir"
+  | "model"
+  | "perm"
+  | "cd"
+  | "cancel"
+  | "unknown";
 
 export interface ParsedCommand {
   readonly name: CommandName;
@@ -24,6 +36,13 @@ const ALIASES: Readonly<Record<string, CommandName>> = {
   current: "current",
   stop: "stop",
   help: "help",
+  dir: "dir",
+  cd: "cd",
+  model: "model",
+  perm: "perm",
+  permission: "perm",
+  permissions: "perm",
+  cancel: "cancel",
 };
 
 /** 是否是命令（以 `/` 开头）。 */
@@ -106,14 +125,21 @@ export function helpText(scope: "main" | "thread" = "main"): string {
       "**OpenCode 话题命令**",
       "`/current` — 查看本话题对应的会话",
       "`/stop` — 中断本话题会话正在跑的任务",
+      "`/model [关键词]` — 查看 / 切换本话题会话的模型",
+      "`/perm [档位]` — 查看 / 修改本话题会话的权限预设",
+      "`/cd <绝对路径>` — 切换本话题会话的工作目录",
       "`/help` — 显示本帮助",
       "",
-      "会话管理（`/new` `/sessions` `/use`）请回到**主聊天流**操作。",
+      "建会话与会话管理（`/new` `/sessions` `/use` `/dir` `/cancel`）请回到**主聊天流**操作。",
     ].join("\n");
   }
   return [
     "**OpenCode 会话命令**",
-    "`/new [标题]` — 新建会话并自动开好话题（缺省标题为时间戳）",
+    "`/new [标题]` — 开始建会话向导（目录 → 模型 → 权限 → 确认，自动开话题）",
+    "`/dir <绝对路径>` — 向导内设置工作目录",
+    "`/model [关键词]` — 向导内选模型；话题内切换当前会话模型",
+    "`/perm [档位]` — 向导内选权限；话题内修改当前会话权限",
+    "`/cancel` — 放弃建会话向导",
     "`/sessions`（别名 `/ls`）— 会话列表卡片",
     "`/use <序号|会话id前缀>` — 切换当前会话",
     "`/current` — 查看当前会话",
@@ -122,10 +148,18 @@ export function helpText(scope: "main" | "thread" = "main"): string {
   ].join("\n");
 }
 
-/** 话题内允许的命令白名单（决策 2）。 */
-const THREAD_ALLOWED: ReadonlySet<CommandName> = new Set<CommandName>(["current", "stop", "help", "unknown"]);
+/** 话题内允许的命令白名单（P5.2 更新）：current/stop/help + 会话内操作 model/perm/cd。 */
+const THREAD_ALLOWED: ReadonlySet<CommandName> = new Set<CommandName>([
+  "current",
+  "stop",
+  "help",
+  "model",
+  "perm",
+  "cd",
+  "unknown",
+]);
 
-/** 话题内该命令是否可用；`/new` `/sessions` `/use` 在话题内被禁。 */
+/** 话题内该命令是否可用；`/new` `/sessions` `/use` `/dir` `/cancel` 在话题内被禁。 */
 export function isCommandAllowedInThread(name: CommandName): boolean {
   return THREAD_ALLOWED.has(name);
 }
@@ -133,7 +167,7 @@ export function isCommandAllowedInThread(name: CommandName): boolean {
 /** 话题内敲了被禁命令时的提示文案（引导去主聊天流）。 */
 export function threadForbiddenText(raw: string): string {
   const name = raw ? `\`/${raw}\`` : "该命令";
-  return `话题内不支持 ${name}。\n\n会话管理请回到**主聊天流**操作（\`/new\`、\`/sessions\`、\`/use\`）。`;
+  return `话题内不支持 ${name}。\n\n建会话/会话管理请回到**主聊天流**操作（\`/new\`、\`/sessions\`、\`/use\`、\`/dir\`、\`/cancel\`）。`;
 }
 
 /** 话题会话标题：取首条消息摘要，如 `话题: 帮我看看这个 bug`。 */

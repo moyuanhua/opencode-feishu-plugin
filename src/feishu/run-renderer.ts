@@ -10,7 +10,7 @@
  * （`enforceSize`），保证序列化 ≤ `MAX_CARD_BYTES`。
  */
 import { MAX_CARD_BYTES, truncateCardContent, type CardTemplate } from "./cards.js";
-import type { FooterStatus, RunBlock, RunState, ToolEntry } from "./run-state.js";
+import type { RunBlock, RunState, ToolEntry } from "./run-state.js";
 
 const COLLAPSE_TOOL_THRESHOLD = 3;
 const HEADER_SUMMARY_MAX = 80;
@@ -47,7 +47,12 @@ export function renderRunCard(state: RunState): object {
     elements.push(note("_（未返回内容）_"));
   }
 
-  if (state.terminal === "running" && state.footer) elements.push(footerElement(state.footer));
+  if (state.terminal === "running" && (state.footer || state.model)) {
+    elements.push(footerElement(state));
+  } else if (state.terminal !== "running" && state.model) {
+    // 终态也保留模型信息，方便回看这条运行用的是哪个模型。
+    elements.push(note(`🤖 ${state.model}`));
+  }
 
   const card = {
     schema: "2.0",
@@ -205,7 +210,8 @@ function note(content: string): object {
   return { tag: "markdown", content, text_size: "notation" };
 }
 
-function footerElement(status: Exclude<FooterStatus, null>): object {
+function footerElement(state: RunState): object {
+  const status = state.footer;
   const text =
     status === "thinking"
       ? "🧠 正在思考…"
@@ -213,8 +219,11 @@ function footerElement(status: Exclude<FooterStatus, null>): object {
         ? "🧰 正在调用工具…"
         : status === "queued"
           ? "⏳ 已排队，等待当前任务结束…"
-          : "✍️ 正在输出…";
-  return note(text);
+          : status === "streaming"
+            ? "✍️ 正在输出…"
+            : "⏳ 处理中…";
+  const model = state.model ? `　·　🤖 ${state.model}` : "";
+  return note(`${text}${model}`);
 }
 
 function template(state: RunState): CardTemplate {

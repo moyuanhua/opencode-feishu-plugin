@@ -48,6 +48,15 @@ describe("parseCommand", () => {
     expect(parseCommand("/")?.name).toBe("help");
   });
 
+  test("P6 新命令：dir/model/perm/cd/cancel 与别名", () => {
+    expect(parseCommand("/dir /home/ubuntu/x")).toEqual({ name: "dir", args: "/home/ubuntu/x", raw: "dir" });
+    expect(parseCommand("/model claude")?.name).toBe("model");
+    expect(parseCommand("/perm edit")?.name).toBe("perm");
+    expect(parseCommand("/permissions edit")?.name).toBe("perm");
+    expect(parseCommand("/cd /home/ubuntu/x")?.name).toBe("cd");
+    expect(parseCommand("/cancel")?.name).toBe("cancel");
+  });
+
   test("isCommand 只看前导 /", () => {
     expect(isCommand("/new")).toBe(true);
     expect(isCommand("  /new")).toBe(true);
@@ -104,7 +113,7 @@ describe("文案与展示", () => {
   });
 
   test("helpText 覆盖全部命令", () => {
-    for (const cmd of ["/new", "/sessions", "/use", "/current", "/stop", "/help"]) {
+    for (const cmd of ["/new", "/dir", "/model", "/perm", "/cancel", "/sessions", "/use", "/current", "/stop", "/help"]) {
       expect(helpText()).toContain(cmd);
     }
   });
@@ -113,19 +122,28 @@ describe("文案与展示", () => {
     const text = helpText("thread");
     expect(text).toContain("/current");
     expect(text).toContain("/stop");
+    expect(text).toContain("/model");
+    expect(text).toContain("/perm");
+    expect(text).toContain("/cd");
     expect(text).not.toContain("/new [标题]");
     expect(text).not.toContain("/use <序号");
+    expect(text).not.toContain("`/dir <绝对路径>`");
     expect(text).toContain("主聊天流");
   });
 
-  test("话题命令白名单：只允许 current/stop/help/unknown", () => {
+  test("话题命令白名单：current/stop/help/model/perm/cd/unknown 允许", () => {
     expect(isCommandAllowedInThread("current")).toBe(true);
     expect(isCommandAllowedInThread("stop")).toBe(true);
     expect(isCommandAllowedInThread("help")).toBe(true);
+    expect(isCommandAllowedInThread("model")).toBe(true);
+    expect(isCommandAllowedInThread("perm")).toBe(true);
+    expect(isCommandAllowedInThread("cd")).toBe(true);
     expect(isCommandAllowedInThread("unknown")).toBe(true);
     expect(isCommandAllowedInThread("new")).toBe(false);
     expect(isCommandAllowedInThread("sessions")).toBe(false);
     expect(isCommandAllowedInThread("use")).toBe(false);
+    expect(isCommandAllowedInThread("dir")).toBe(false);
+    expect(isCommandAllowedInThread("cancel")).toBe(false);
   });
 
   test("threadForbiddenText 指向主聊天流", () => {

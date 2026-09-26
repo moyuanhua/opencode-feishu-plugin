@@ -75,6 +75,44 @@ export interface PermissionRepliedLike {
   readonly reply: "once" | "always" | "reject";
 }
 
+/** 权限预设四档（P6）。 */
+export type PermissionPreset = "readonly" | "edit" | "askHigh" | "trust";
+
+/** 会话级 gate 模式：off = 不介入（依赖 ruleset/原生）；gate = 对指定动作升级为 ask。 */
+export type SessionGateMode = "off" | "gate";
+
+/** 规则集条目（与 SessionCreateInput.permissions 对齐，最后匹配优先）。 */
+export interface PermissionRule {
+  readonly action: string;
+  readonly resource: string;
+  readonly effect: "allow" | "ask" | "deny";
+}
+
+/** 模型引用（providerID + id；name 仅用于展示）。 */
+export interface ModelRef {
+  readonly providerID: string;
+  readonly id: string;
+  readonly name?: string;
+}
+
+/** 建会话向导步骤（P6）。 */
+export type WizardStep = "dir" | "model" | "perm" | "confirm";
+
+/**
+ * 建会话向导状态，持久化在 `feishu:v2:setup:<chatId>`。
+ * `anchorMessageId` 是触发 `/new` 的用户消息 id，确认时对它 `reply_in_thread` 开话题。
+ */
+export interface WizardState {
+  readonly step: WizardStep;
+  readonly dir?: string;
+  readonly model?: ModelRef;
+  readonly perm?: PermissionPreset;
+  readonly title?: string;
+  /** 模型卡片分页：0 = 最近/当前视图，>=1 = 全量分页。 */
+  readonly page?: number;
+  readonly anchorMessageId?: string;
+}
+
 /** 会话 ↔ 飞书会话映射，持久化在 ctx.storage。 */
 export interface SessionLink {
   readonly chatId: string;
@@ -85,6 +123,14 @@ export interface SessionLink {
    * 异步出站（审批卡 / 失败提示）通过 `im.message.reply` 引用它，回复自然留在话题内。
    */
   readonly replyMessageId?: string;
+  /** 会话创建时选择的权限预设（P6，用于展示与 gate 决策）。 */
+  readonly perm?: PermissionPreset;
+  /** 会话级 gate 模式（P6）。 */
+  readonly gateMode?: SessionGateMode;
+  /** 会话工作目录（P6，`/cd` 后更新）。 */
+  readonly dir?: string;
+  /** 当前模型（P6，`/model` 后更新；运行卡页脚展示）。 */
+  readonly model?: ModelRef;
 }
 
 /** 话题 / 话题根 → 会话映射（P5：话题 = 会话）。 */

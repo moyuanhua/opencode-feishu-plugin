@@ -20,6 +20,9 @@
 | 原生排队 | session 正在执行时用 `delivery:"queue"` 排队，空闲时 `delivery:"steer"` |
 | 工具可见 | 工具调用以折叠面板回填卡片（≥3 自动折叠，最新一个展开） |
 | 跨实例去重 | 按 `messageId` 经 `ctx.storage` 去重，防重复投递导致双处理 |
+| 建会话向导（P6） | 主聊天流 `/new` 起向导：目录 → 模型 → 权限 → 确认，确认后自动开话题「一键进入」 |
+| 权限预设（P6） | 只读 / 可编辑 / 高风险审批 / 完全信任 四档，落到会话级 ruleset + gate，话题内 `/perm` 可改 |
+| 会话内操作（P6） | 话题内 `/model` 切换模型、`/perm` 改权限、`/cd` 迁移工作目录；运行卡页脚显示当前模型 |
 
 ---
 
@@ -164,12 +167,15 @@ chmod 600 ~/.config/opencode/plugins/feishu.json
 | `domain` | `feishu`\|`lark` | `feishu` | 飞书 / Lark 国际版 |
 | `signSecret` | string | 由 appSecret 派生 | 审批按钮 token 的 HMAC 密钥（一般不用配） |
 | `maxResourcesShown` | number | `8` | 审批卡最多展示的 resource 行数 |
+| `allowedRoots` | string[] | `["/home/ubuntu"]` | 允许作为会话工作目录的根目录（P6）。目录须在其之下；`/`、家目录根、系统目录一律拒绝 |
+| `recentDirsLimit` | number | `5` | 「最近使用目录」列表长度（P6，夹取 1–20） |
+| `recentModelsLimit` | number | `5` | 「最近使用模型」列表长度（P6，夹取 1–20） |
 
 ### `permissionGate` 档位
 
 | 档位 | 行为 |
 | --- | --- |
-| `off` | 完全不介入：不注册 hook、不订阅权限事件，零副作用 |
+| `off` | 全局不介入；**但**带权限预设（P6）的会话仍按预设生效（需要 evaluate hook） |
 | `notify` | 不改变原生判定；但**本来就产生**的 `permission.asked` 会推送审批卡 |
 | `gate` | 白名单外一律置为 `ask` → 弹飞书审批卡（推荐默认） |
 | `lockdown` | 白名单外一律 `deny`（不弹卡，最严格） |
@@ -216,7 +222,12 @@ denyTools / lockdown → deny                            │
 
 | 命令 | 说明 |
 | --- | --- |
-| `/new [标题]` | 新建 opencode 会话并设为当前；缺省标题为时间戳 |
+| `/new [标题]` | 开始**建会话向导**（P6）：目录 → 模型 → 权限 → 确认；确认后自动开话题 |
+| `/dir <绝对路径>` | 向导内设置工作目录（须在 `allowedRoots` 之下） |
+| `/model [关键词]` | 向导内选模型；话题内切换当前会话模型（无参会发模型选择卡） |
+| `/perm [档位]` | 向导内选权限；话题内修改当前会话权限（档位：`readonly`/`edit`/`askHigh`/`trust`） |
+| `/cd <绝对路径>` | **仅话题内**：迁移当前会话工作目录 |
+| `/cancel` | 放弃建会话向导 |
 | `/sessions`（别名 `/ls`） | 发送**会话列表卡片**（见下） |
 | `/use <序号\|会话id前缀>` | 切换当前会话，例如 `/use 2`、`/use ses_abc` |
 | `/current` | 查看当前会话（标题 + id + 会话总数） |
@@ -279,7 +290,9 @@ opencode 会按 location 多次加载全局插件，导致同一进程内 `setup
   | --- | --- | --- |
   | `feishu:v2:thread:<threadId>` | `{sessionID, chatId, openId, anchorMessageId?}` | 话题 → 会话主键 |
   | `feishu:v2:root:<rootId>` | `{sessionID}` | 话题根消息 → 会话（手动从卡片建话题） |
-  | `feishu:v2:session:<sid>` | `{chatId, openId, replyMessageId?}` | 权限路由；话题会话额外带锚点，审批卡也 reply 落话题 |
+  | `feishu:v2:session:<sid>` | `{chatId, openId, replyMessageId?, perm?, gateMode?, dir?, model?}` | 权限路由；话题会话带锚点，审批卡也 reply 落话题；P6 还记录预设/目录/模型 |
+  | `feishu:v2:setup:<chatId>` | `{step, dir?, model?, perm?, title?, page?, anchorMessageId?}` | 建会话向导状态（P6） |
+  | `feishu:v2:recent:dirs` / `recent:models` | `string[]` / `ModelRef[]` | 最近使用目录 / 模型（LRU，P6） |
 
 - 路由决策（`src/feishu/routing.ts`，纯函数）：
 
@@ -302,13 +315,48 @@ opencode 会按 location 多次加载全局插件，导致同一进程内 `setup
 
 | 命令 | 主聊天流 | 话题内 |
 | --- | --- | --- |
-| `/new [标题]` | ✅ 建会话并自动开话题 | ❌ 提示去主聊天流 |
+| `/new [标题]` | ✅ 起建会话向导 → 确认后自动开话题 | ❌ 提示去主聊天流 |
+| `/dir <路径>` | ✅ 向导内设置目录 | ❌ 同上 |
+| `/model [关键词]` | ✅ 向导内选模型 | ✅ 切换本话题会话模型 |
+| `/perm [档位]` | ✅ 向导内选权限 | ✅ 修改本话题会话权限 |
+| `/cd <路径>` | ❌ 提示只能话题内用 | ✅ 迁移本话题会话目录 |
+| `/cancel` | ✅ 放弃向导 | ❌ 同上 |
 | `/sessions`（`/ls`） | ✅ 管理面板 | ❌ 同上 |
 | `/use <n\|id>` | ✅ | ❌ 同上 |
 | `/current` | ✅（当前会话） | ✅（本话题会话） |
 | `/stop` | ✅（当前会话） | ✅（本话题会话） |
 | `/help` | ✅ | ✅（只列话题内可用命令） |
 | 普通文本 | ❌ 回提示卡 | ✅ 进入该话题的会话 |
+
+### 建会话向导与权限预设（P6）
+
+**向导流程**（主聊天流，`threadRouting: true`）：
+
+```
+/new [标题] ──▶ 📁 选目录 ──▶ 🧠 选模型 ──▶ 🔐 选权限 ──▶ ✅ 确认 ──▶ 建会话 + 自动开话题
+   │              │(可点最近目录/发 /dir)  │(可点按钮/发 /model)  │(四档按钮/发 /perm)
+   └─ /cancel 随时放弃；状态存 `feishu:v2:setup:<chatId>`（跨实例共享）
+```
+
+- **不依赖表单**：所有选择走卡片按钮；自由文本走斜杠命令（`/dir <path>`、`/model <query>`）。
+- 卡片（纯函数，`src/feishu/setup-cards.ts`）：目录选择卡、模型选择卡（当前/最近 5 + 「更多」分页）、权限选择卡（四档一句话说明）、确认卡（目录/模型/权限汇总）。
+- 确认后调用 `ctx.session.create({ title, model, location, permissions })`，对触发消息 `reply_in_thread` 发「会话已就绪」卡，读回 `thread_id` 后 `bindThread`，卡片 `bindRoot`；`dir/model/perm` 记入 `feishu:v2:session:<sid>`。
+- **目录校验**（`src/feishu/dirs.ts`）：存在、是目录、在 `allowedRoots` 之下、拒绝 `/` / 家目录根 / 系统目录（`/etc /usr /bin /sbin /boot /dev /proc /sys …`）；对 `realpath` 再校验一次，防符号链接逃逸。
+- **权限预设 → (ruleset, gateMode)**：
+
+  | 预设 | ruleset（会话级） | gateMode | 效果 |
+  | --- | --- | --- | --- |
+  | `readonly` 🔒 | 禁 `edit`/`write`/`shell`/`bash` | `off` | 最安全，不弹审批 |
+  | `edit` ✏️ | allow `edit`，`shell`/`bash`→ask | `gate` | 可改文件，执行命令需审批 |
+  | `askHigh` ⚠️ | 空（继承） | `gate`，对 `shell`/`bash`/`edit`/`external_directory` 置 ask | 高风险动作逐次审批 |
+  | `trust` 🔓 | allow `*` | `off` | 完全放行 |
+
+- **gate 按会话生效**（`decideEffectForSession`）：`permission.evaluate` 先读 `session:<sid>.gateMode`；
+  - `off`：完全不介入（依赖 ruleset/原生）；
+  - `gate`：`denyTools`→deny、`allowTools`→allow、`askActions`→ask、其余**继承**（不会把只读工具误伤）；
+  - 无预设会话 → 回退全局 `permissionGate` 行为。**安全边界保留**：无飞书映射的会话不降级为 `ask`。
+- 话题内 `/model`、`/perm` 通过卡片按钮或命令直接改当前会话；`/cd` 调 `ctx.session.move` 并再次校验目录；切换模型后运行卡页脚显示 `🤖 <模型>`。
+- 「最近使用」：`feishu:v2:recent:dirs` / `feishu:v2:recent:models`（LRU、去重、限长，见 `recentDirsLimit`/`recentModelsLimit`）。
 
 ### 回退开关
 
@@ -436,7 +484,13 @@ src/
     events.ts           # 飞书事件 → 归一化模型（纯函数）
     cards.ts            # 审批卡 / 流式卡 / 结果卡构建（纯函数）
     session-cards.ts    # 会话列表卡片构建 + 按钮 value 解析（纯函数）
+    setup-cards.ts      # P6 建会话向导卡片（目录/模型/权限/确认）构建 + value 解析（纯函数）
     commands.ts         # 会话命令解析 / 匹配 / 文案（纯函数）
+    dirs.ts             # P6 工作目录校验（allowedRoots / 系统目录 / realpath 防逃逸）
+    perm-presets.ts     # P6 权限预设 → ruleset / gateMode（纯函数）
+    models.ts           # P6 模型列表归一化 + 模糊匹配（纯函数）
+    wizard.ts           # P6 建会话向导状态机 + storage 持久化
+    recent.ts           # P6 最近使用目录/模型（LRU）
     routing.ts          # P5 话题路由决策（有/无 threadId、thread/root 命中，纯函数）
     sender.ts           # im.message.create/reply/patch/delete/get 薄封装
     session-map.ts      # chat ↔ 多会话映射 + 话题/root 映射（ctx.storage 持久化 + 旧格式迁移）
@@ -463,7 +517,13 @@ src/
 - 运行卡片体积保护会**丢弃最旧**的 body 元素（保证 ≤30KB），超长会话早期内容可能不出现在卡片上；完整内容仍在日志/会话里。
 - **主聊天流不再直接干活**（决策 1）：主聊天流只做会话管理，普通文本回「管理台」提示卡，需 `/new` 或从会话卡进入话题。想恢复旧行为设 `threadRouting: false`。
 - **孤儿话题映射**：话题被删除后映射不主动清理（惰性忽略），后续再提供 `/forget`。
-- **审批卡话题归属**：`card.action.trigger` 不带 `thread_id`，话题会话靠 `replyMessageId` 锚点落话题；卡片按钮 value 尚未编入 threadId（P5.2）。
+- **审批卡话题归属**：`card.action.trigger` 不带 `thread_id`（P5.2 已加回调诊断日志确认，仅记录键与布尔、不含 token），
+  话题会话靠 `replyMessageId` 锚点落话题；卡片按钮 value 仍以 `sessionID`/向导状态路由，不依赖 thread_id。
+- **向导与命令双轨**：第一版不依赖表单提交（`form_value` 未支持）；自由文本用 `/dir`、`/model` 输入，
+  按钮只做离散选择。确认建会话目前只能通过「✅ 创建」按钮（无 `/confirm` 命令）。
+- **模型 action id 命名**：设计稿的 `shell` 与 OpenCode 实测工具 id `bash` 均已覆盖，规则可真正生效。
+- **`permissionGate: "off"` 语义微调**：为支持会话权限预设，evaluate hook 始终注册；
+  无预设的会话仍保持 off 行为（不改写 effect、零行为变化）。
 
 ## 许可证
 

@@ -67,6 +67,42 @@ export function decideEffect(action: string, config: GateConfig): EffectDecision
   return { effect: "ask", message: `opencode-feishu-v2: 需要人工批准 ${action}` };
 }
 
+/** 会话级 gate（P6）：由 `session:<sid>` 上的权限预设推导。 */
+export interface SessionGate {
+  readonly gateMode: "off" | "gate";
+  /** gate 模式下强制升级为 ask 的动作（如 shell/edit/external_directory）。 */
+  readonly askActions?: readonly string[];
+}
+
+/**
+ * 会话级权限策略（P6）。无会话预设时**回退**到全局 `decideEffect`。
+ *
+ * 有预设时：
+ * - `off`：完全不介入（ruleset/原生判定生效）；
+ * - `gate`：denyTools → deny；allowTools → allow；askActions → ask；其余**继承**（不改写），
+ *   因此不会把只读类工具误伤成 ask（与全局 gate 的「其余一律 ask」不同）。
+ *
+ * 安全边界（`ask` 是否可投递）仍由调用方判定，本函数不做飞书映射检查。
+ */
+export function decideEffectForSession(
+  action: string,
+  config: GateConfig,
+  session: SessionGate | undefined,
+): EffectDecision {
+  if (!session) return decideEffect(action, config);
+  if (session.gateMode === "off") return {};
+  if (matchesAny(action, config.denyTools)) {
+    return { effect: "deny", message: `feishu policy: ${action} 已在 denyTools` };
+  }
+  if (matchesAny(action, config.allowTools)) {
+    return { effect: "allow" };
+  }
+  if (session.askActions && matchesAny(action, session.askActions)) {
+    return { effect: "ask", message: `opencode-feishu-v2: 会话预设需人工批准 ${action}` };
+  }
+  return {};
+}
+
 export interface ApprovalActionValue {
   readonly token: string;
   readonly decision: PermissionReply;

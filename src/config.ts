@@ -59,9 +59,19 @@ export interface ResolvedConfig {
   readonly signSecret: string;
   /** 审批卡最多展示的 resource 行数。 */
   readonly maxResourcesShown: number;
+  /**
+   * 允许作为会话工作目录的根目录白名单（P6）。默认 `["/home/ubuntu"]`。
+   * 目录必须位于其中之一之下；`/`、家目录根、系统目录会被单独拒绝。
+   */
+  readonly allowedRoots: readonly string[];
+  /** 「最近使用目录」列表长度（P6，默认 5）。 */
+  readonly recentDirsLimit: number;
+  /** 「最近使用模型」列表长度（P6，默认 5）。 */
+  readonly recentModelsLimit: number;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
+const DEFAULT_ALLOWED_ROOTS = ["/home/ubuntu"];
 const GENESIS_SECRET_SALT = "opencode-feishu-v2/approval/v1";
 const VALID_GATES: readonly PermissionGate[] = ["off", "notify", "gate", "lockdown"];
 const VALID_LOG_LEVELS: readonly LogLevel[] = ["debug", "info", "warn", "error"];
@@ -112,6 +122,11 @@ export function resolveConfig(
   const throttle = clamp(asNumber(merged.streamThrottleMs, 400), 400, 60_000);
   const approvalTtlMs = clamp(asNumber(merged.approvalTtlMs, 10 * 60 * 1000), 30_000, 24 * 60 * 60 * 1000);
   const maxResourcesShown = clamp(asNumber(merged.maxResourcesShown, 8), 1, 50);
+  const allowedRootsRaw = asStringArray(merged.allowedRoots);
+  const allowedRootsCandidates = (allowedRootsRaw.length > 0 ? allowedRootsRaw : [...DEFAULT_ALLOWED_ROOTS]).filter(isAbsolute);
+  const allowedRoots = allowedRootsCandidates.length > 0 ? allowedRootsCandidates : [...DEFAULT_ALLOWED_ROOTS];
+  const recentDirsLimit = clamp(asNumber(merged.recentDirsLimit, 5), 1, 20);
+  const recentModelsLimit = clamp(asNumber(merged.recentModelsLimit, 5), 1, 20);
   const domain = merged.domain === "lark" ? "lark" : "feishu";
   const logFile = resolveLogFile(merged.logFile, env, deps);
   const gatewayLocation = asString(merged.gatewayLocation).trim() || undefined;
@@ -150,6 +165,9 @@ export function resolveConfig(
     approvalTtlMs,
     signSecret,
     maxResourcesShown,
+    allowedRoots,
+    recentDirsLimit,
+    recentModelsLimit,
   };
 }
 

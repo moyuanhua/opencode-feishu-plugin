@@ -79,7 +79,25 @@ describe("resolveConfig", () => {
     expect(cfg.streamThrottleMs).toBe(400);
     expect(cfg.domain).toBe("feishu");
     expect(cfg.threadRouting).toBe(true);
+    expect(cfg.allowedRoots).toEqual(["/home/ubuntu"]);
+    expect(cfg.recentDirsLimit).toBe(5);
+    expect(cfg.recentModelsLimit).toBe(5);
     expect(cfg.warnings).toEqual([]);
+  });
+
+  test("P6：allowedRoots / recent 限制可配置并夹取", () => {
+    const cfg = resolve(
+      { appId: "a", appSecret: "s", allowedRoots: ["/home/ubuntu/work", "/data"], recentDirsLimit: 2, recentModelsLimit: 30 },
+      {},
+    );
+    expect(cfg.allowedRoots).toEqual(["/home/ubuntu/work", "/data"]);
+    expect(cfg.recentDirsLimit).toBe(2);
+    expect(cfg.recentModelsLimit).toBe(20); // 夹到上限
+    // 非法（非绝对路径）根被过滤，全部非法则回退默认。
+    const bad = resolve({ appId: "a", appSecret: "s", allowedRoots: ["relative/path"] }, {});
+    expect(bad.allowedRoots).toEqual(["/home/ubuntu"]);
+    const lower = resolve({ appId: "a", appSecret: "s", recentDirsLimit: 0 }, {});
+    expect(lower.recentDirsLimit).toBe(1); // 夹到下限
   });
 
   test("threadRouting 默认 true，显式 false 可回退；字符串 'false' 也识别", () => {
