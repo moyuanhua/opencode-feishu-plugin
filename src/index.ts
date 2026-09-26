@@ -63,6 +63,14 @@ export default Plugin.define({
       hasAppSecret: hasSecret(config.appSecret),
     });
 
+    // 网关门控：只让指定 location 的实例启动（跨 location 是独立 VM context，无法用进程内单例收敛）。
+    const here = (ctx.location as { directory?: string } | undefined)?.directory;
+    if (config.gatewayLocation && here !== config.gatewayLocation) {
+      log.debug("跳过非网关 location", { here, expected: config.gatewayLocation });
+      logSink?.close();
+      return async () => {};
+    }
+
     if (!acquireProcessGuard()) {
       // 同进程重复 setup（opencode 按 location 加载全局插件）：只跳过，绝不能碰第一份的资源。
       log.debug("检测到同进程重复 setup，跳过启动（仅首个实例生效）");

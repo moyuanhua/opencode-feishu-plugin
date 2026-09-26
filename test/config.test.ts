@@ -270,3 +270,15 @@ describe("gate helpers", () => {
     expect(shouldRegisterEvaluate("lockdown")).toBe(true);
   });
 });
+
+describe("gatewayLocation", () => {
+  const base = { appId: "a", appSecret: "b" };
+  test("缺省为 undefined（所有 location 启动）", () => {
+    const cfg = resolveConfig(base, {}, { configDir: "/nonexistent", readFile: () => "" });
+    expect(cfg.gatewayLocation).toBeUndefined();
+  });
+  test("显式配置时保留并 trim", () => {
+    const cfg = resolveConfig({ ...base, gatewayLocation: "  /home/ubuntu  " }, {}, { configDir: "/nonexistent", readFile: () => "" });
+    expect(cfg.gatewayLocation).toBe("/home/ubuntu");
+  });
+});

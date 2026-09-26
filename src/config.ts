@@ -39,6 +39,14 @@ export interface ResolvedConfig {
    * 配置为 `true` 时默认 `<configDir>/plugins/feishu.log`。secret 始终脱敏。
    */
   readonly logFile: string | undefined;
+  /**
+   * 只在该 location 启动飞书网关与事件订阅；`undefined` = 所有 location 都启动。
+   *
+   * 背景：opencode 按 location 加载全局插件，每个 location 是独立 VM context，
+   * 会各起一份 WS 客户端与事件订阅 → 同一事件被多个实例重复渲染成多张卡片。
+   * 指定本机工作目录（如 `/home/ubuntu`）即可收敛为唯一实例。
+   */
+  readonly gatewayLocation: string | undefined;
   /** 审批 token / 卡片有效期。 */
   readonly approvalTtlMs: number;
   /** HMAC 密钥；未显式配置时从 appSecret 派生（不落盘、不打印）。 */
@@ -99,6 +107,7 @@ export function resolveConfig(
   const maxResourcesShown = clamp(asNumber(merged.maxResourcesShown, 8), 1, 50);
   const domain = merged.domain === "lark" ? "lark" : "feishu";
   const logFile = resolveLogFile(merged.logFile, env, deps);
+  const gatewayLocation = asString(merged.gatewayLocation).trim() || undefined;
 
   const signSecretRaw = expandEnv(asString(merged.signSecret), env);
   const signSecret =
@@ -129,6 +138,7 @@ export function resolveConfig(
     streamThrottleMs: throttle,
     logLevel,
     logFile,
+    gatewayLocation,
     approvalTtlMs,
     signSecret,
     maxResourcesShown,
