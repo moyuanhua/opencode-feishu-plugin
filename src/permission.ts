@@ -124,6 +124,12 @@ export interface ReplyInput {
   readonly requestID: string;
   readonly reply: PermissionReply;
   readonly message?: string;
+  /**
+   * 该会话工作目录（`SessionLink.dir`）。opencode 的权限请求按 **location** 存储，
+   * 而飞书网关只在一个 location 运行；跨 location 会话必须带上
+   * `x-opencode-directory` 才能命中请求，否则报 `Permission request not found`。
+   */
+  readonly directory?: string;
 }
 
 export interface ApprovalDeps {
@@ -142,6 +148,8 @@ export interface ApprovalDeps {
 interface TrackedCard {
   readonly messageId: string;
   readonly input: ApprovalCardInput;
+  /** 审批回复需要按会话所在 location 路由（跨 location 会话）。 */
+  readonly directory?: string;
   resolved: boolean;
 }
 
@@ -192,8 +200,18 @@ export class ApprovalManager {
       this.deps.log.warn("审批卡发送失败", { requestID, error: result.error ?? "unknown" });
       return;
     }
-    this.cards.set(requestID, { messageId: result.messageId, input, resolved: false });
-    this.deps.log.info("审批卡已发送", { requestID, action: request.action, canPersistAlways });
+    this.cards.set(requestID, {
+      messageId: result.messageId,
+      input,
+      ...(link.dir ? { directory: link.dir } : {}),
+      resolved: false,
+    });
+    this.deps.log.info("审批卡已发送", {
+      requestID,
+      action: request.action,
+      canPersistAlways,
+      hasDir: Boolean(link.dir),
+    });
   }
 
   /** 处理 permission.replied：把卡片收敛为结果态（若尚未由点击更新）。 */
@@ -247,7 +265,7 @@ export class ApprovalManager {
     };
 
     // 后台回复 + 更新卡片，绝不阻塞回调 3 秒窗口。
-    void this.applyReply(claims.r, claims.s, parsed.decision, tracked, outcome);
+    void this.applyReply(claims.r, claims.s, parsed.decision, tracked, outcome, tracked?.directory);
 
     return toast(
       parsed.decision === "reject" ? "warning" : "success",
@@ -266,11 +284,16 @@ export class ApprovalManager {
     reply: PermissionReply,
     tracked: TrackedCard | undefined,
     outcome: ApprovalOutcome,
+    directory: string | undefined,
   ): Promise<void> {
     try {
-      await this.deps.reply({ sessionID, requestID, reply });
+      await this.deps.reply({ sessionID, requestID, reply, ...(directory ? { directory } : {}) });
     } catch (err) {
-      this.deps.log.error("permission.reply 失败", { requestID, error: errorMessage(err) });
+      this.deps.log.error("permission.reply 失败", {
+        requestID,
+        hasDir: Boolean(directory),
+        error: errorMessage(err),
+      });
       return;
     }
     if (tracked && !tracked.resolved) {

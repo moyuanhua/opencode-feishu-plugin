@@ -128,6 +128,24 @@ describe("ApprovalManager.handleCardAction", () => {
     expect((sender.patched[0]!.card as { header: { template: string } }).header.template).toBe("green");
   });
 
+  test("会话带 dir 时 reply 携带目录（跨 location 路由）", async () => {
+    const { manager, sender, replies } = setup({
+      link: { chatId: "oc_1", openId: "ou_1", dir: "/home/ubuntu/.config/opencode" },
+    });
+    await manager.onAsked(REQUEST);
+    const token = tokenFrom(sender);
+    manager.handleCardAction({
+      rawValue: { t: token, d: "once" },
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await tick();
+    expect(replies).toEqual([
+      { sessionID: "ses_1", requestID: "per_1", reply: "once", directory: "/home/ubuntu/.config/opencode" },
+    ]);
+  });
+
   test("非白名单用户被拒，且不 reply", async () => {
     const { manager, sender, replies } = setup();
     await manager.onAsked(REQUEST);

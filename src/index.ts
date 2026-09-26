@@ -47,6 +47,7 @@ import type {
   PermissionRepliedLike,
   PermissionRequestLike,
   PermissionPreset,
+  SessionLink,
   StorageLike,
 } from "./types.js";
 
@@ -222,6 +223,10 @@ async function start(
     interruptSession: async (sessionID) => {
       // V2 的字段是 `resume`（缺省 false 即中断后不续跑）；兼容文档中曾提到的 `continue`。
       await ctx.session.interrupt({ sessionID, resume: false });
+      // resume:false 会 park 住队列消息且不保证 interrupted 事件到达；主动收尾避免永久排队。
+      executions.markEnded(sessionID);
+      runs.apply(sessionID, { type: "execution.failed", error: "已中断（/stop）" });
+      await cancelQueuedPrompts(ctx, sessionID, await sessionMap.resolveBySession(sessionID), log);
     },
     listModels,
     switchSessionModel,
@@ -449,6 +454,10 @@ async function start(
   })();
 
   async function handleEvent(event: { type: string; data: unknown }): Promise<void> {
+    // 任意 session 事件都刷新活动时间，避免看门狗误杀仍在产出的事件流。
+    const touched = (event.data as { sessionID?: unknown } | undefined)?.sessionID;
+    if (typeof touched === "string") executions.touch(touched);
+
     switch (event.type) {
       case "permission.asked":
         // 发卡是网络 IO，不能阻塞事件流（否则会拖慢后续 text.delta）。
@@ -537,6 +546,26 @@ async function start(
         void notifyFailure(data.sessionID, data.error);
         break;
       }
+      case "session.execution.interrupted": {
+        // /stop、shutdown、被 steer 取代等都会走这里；漏处理会让执行态永远卡在 running，
+        // 之后每条飞书消息都被判为 queue → 永久排队（历史 bug）。
+        const data = event.data as { sessionID: string; reason?: string };
+        executions.markEnded(data.sessionID);
+        runs.apply(data.sessionID, { type: "execution.failed", error: `已中断（${data.reason ?? "unknown"}）` });
+        break;
+      }
+      case "session.status": {
+        // 执行态权威信号（busy/retry/idle）。execution.* 事件可能丢失或错配，用状态事件兜底。
+        const data = event.data as { sessionID: string; status?: { type?: string } };
+        const statusType = data.status?.type;
+        if (statusType === "idle") {
+          executions.markEnded(data.sessionID);
+          runs.apply(data.sessionID, { type: "execution.succeeded" });
+        } else if (statusType === "busy" || statusType === "retry") {
+          executions.markStarted(data.sessionID);
+        }
+        break;
+      }
       case "session.idle": {
         // 兜底收尾：某些路径可能没有 execution.succeeded，避免页脚悬挂。
         const data = event.data as { sessionID: string };
@@ -560,6 +589,38 @@ async function start(
     await sender.sendText(link.chatId, text);
   }
 
+  /**
+   * 看门狗：清理长时间无任何事件的执行态兜底。
+   *
+   * 触发场景：服务端事件丢失、交互式工具（question/permission）永久挂起等。
+   * 不清会让该会话后续消息永远判为 queue（卡死 + 排队）。只放开插件侧排队判定，
+   * 不主动中断服务端执行；卡片收尾为失败态并提示可用 `/stop`。
+   */
+  const WATCHDOG_INTERVAL_MS = 60_000;
+  const STALE_EXECUTION_MS = 30 * 60_000;
+  const watchdog = setInterval(() => {
+    for (const sessionID of executions.stale(STALE_EXECUTION_MS)) {
+      log.warn("执行态疑似卡死，已放开排队判定", { sessionID, idleMs: STALE_EXECUTION_MS });
+      runs.apply(sessionID, {
+        type: "execution.failed",
+        error: "长时间无进展，可能卡死（可发送 /stop 中断）",
+      });
+      void notifyStuck(sessionID);
+    }
+  }, WATCHDOG_INTERVAL_MS);
+  (watchdog as { unref?: () => void }).unref?.();
+
+  async function notifyStuck(sessionID: string): Promise<void> {
+    const link = await sessionMap.resolveBySession(sessionID);
+    if (!link) return;
+    const text = "⚠️ 该会话已长时间无响应，后续消息不再排队。发送 `/stop` 可强制中断后重试。";
+    if (link.replyMessageId) {
+      await sender.replyText(link.replyMessageId, text);
+      return;
+    }
+    await sender.sendText(link.chatId, text);
+  }
+
   log.info("飞书插件已就绪");
 
   let cleanedUp = false;
@@ -568,6 +629,7 @@ async function start(
     cleanedUp = true;
     log.info("飞书插件卸载中");
     abort.abort();
+    clearInterval(watchdog);
     await subscription.catch(() => undefined);
     runs.dispose();
     executions.clear();
@@ -611,19 +673,58 @@ function createLogSink(logFile: string | undefined): { sink: (line: string) => v
  * V2 的 .d.ts 由 HTTP client 生成，字段名写成 decision；运行时以 reply 为准。
  * 这里做一次防御式回退：reply 失败且疑似字段名错误时用 decision 重试（校验失败不会产生副作用）。
  */
+/**
+ * 尽力取消该会话尚未投递的队列消息（`/stop` 收尾）。
+ *
+ * `session.interrupt({resume:false})` 只中断当前执行，**队列里的 prompt 会被 park**
+ * （见 openapi：queued prompts remain parked），所以卡死恢复必须显式取消它们。
+ * `session.inbox` 不在插件 SessionDomain 的公开 Pick 内，运行时可能缺失 → 全程 best-effort。
+ */
+async function cancelQueuedPrompts(
+  ctx: Plugin.Context,
+  sessionID: string,
+  link: SessionLink | undefined,
+  log: ReturnType<typeof createLogger>,
+): Promise<void> {
+  const inbox = (ctx.session as unknown as {
+    inbox?: {
+      list?: (input: { sessionID: string }, options?: unknown) => Promise<unknown>;
+      cancel?: (input: { sessionID: string; inboxID: string }, options?: unknown) => Promise<unknown>;
+    };
+  }).inbox;
+  if (!inbox?.list || !inbox.cancel) return;
+  const options = link?.dir ? { headers: { "x-opencode-directory": link.dir } } : undefined;
+  try {
+    const items = (await inbox.list({ sessionID }, options)) as Array<{ id?: string }>;
+    for (const item of items ?? []) {
+      if (item?.id) await inbox.cancel({ sessionID, inboxID: item.id }, options);
+    }
+  } catch (err) {
+    log.debug("取消排队消息失败（忽略）", { sessionID, error: errorMessage(err) });
+  }
+}
+
 async function replyPermission(ctx: Plugin.Context, input: ReplyInput): Promise<void> {
-  const api = ctx.permission.reply as unknown as (arg: Record<string, unknown>) => Promise<void>;
+  const api = ctx.permission.reply as unknown as (
+    arg: Record<string, unknown>,
+    requestOptions?: { headers?: Record<string, string> },
+  ) => Promise<void>;
+  // 权限请求按 location 存储：跨 location 会话（网关在 A、会话在 B）必须带上目录头，
+  // 否则服务端在网关 location 找不到请求 → Permission request not found → 执行永久卡死。
+  const requestOptions = input.directory
+    ? { headers: { "x-opencode-directory": input.directory } }
+    : undefined;
   const base = {
     sessionID: input.sessionID,
     requestID: input.requestID,
     ...(input.message ? { message: input.message } : {}),
   };
   try {
-    await api({ ...base, reply: input.reply });
+    await api({ ...base, reply: input.reply }, requestOptions);
   } catch (err) {
     const text = errorMessage(err);
     if (/decision|missing key|invalid|validation/i.test(text)) {
-      await api({ ...base, decision: input.reply });
+      await api({ ...base, decision: input.reply }, requestOptions);
       return;
     }
     throw err;
