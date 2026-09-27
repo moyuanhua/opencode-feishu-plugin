@@ -28,6 +28,7 @@ import { MessageDedup } from "./feishu/dedup.js";
 import { decideDelivery, ExecutionTracker, type Delivery } from "./feishu/delivery.js";
 import { createRunController } from "./feishu/run-controller.js";
 import { FormRelay, type FormReplyInput } from "./feishu/form-relay.js";
+import { replyFormOverHttp } from "./feishu/form-reply.js";
 import type { RunEvent } from "./feishu/run-state.js";
 import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js";
@@ -148,7 +149,7 @@ async function start(
     log,
     getLink: (sessionID) => sessionMap.resolveBySession(sessionID),
     isAllowed: (openId) => owner.isAllowed(openId),
-    reply: (input) => replyForm(ctx, input),
+    reply: (input) => replyForm(ctx, input, log),
   });
 
   // ── 会话管理 / 建会话向导（P6） ───────────────────────────────────────
@@ -743,8 +744,17 @@ async function cancelQueuedPrompts(
   }
 }
 
-/** 提交 opencode 表单答复（`session.form.reply`），带目录头跨 location 路由。 */
-async function replyForm(ctx: Plugin.Context, input: FormReplyInput): Promise<void> {
+/**
+ * 提交 opencode 表单答复，带目录头跨 location 路由。
+ *
+ * `ctx.session.form` 在 2.0.16–2.0.18 的运行时不暴露（见 `feishu/form-reply.ts`），
+ * 所以优先用原生域，缺失时回退到本机 HTTP API——否则表单会永久卡在待回答态。
+ */
+async function replyForm(
+  ctx: Plugin.Context,
+  input: FormReplyInput,
+  log: ReturnType<typeof createLogger>,
+): Promise<void> {
   const form = (ctx.session as unknown as {
     form?: {
       reply?: (
@@ -753,14 +763,17 @@ async function replyForm(ctx: Plugin.Context, input: FormReplyInput): Promise<vo
       ) => Promise<void>;
     };
   }).form;
-  if (!form?.reply) throw new Error("session.form.reply 不可用");
-  const options = input.directory
-    ? { headers: { "x-opencode-directory": input.directory } }
-    : undefined;
-  await form.reply(
-    { sessionID: input.sessionID, formID: input.formID, answer: input.answer },
-    options,
-  );
+  if (form?.reply) {
+    const options = input.directory
+      ? { headers: { "x-opencode-directory": input.directory } }
+      : undefined;
+    await form.reply(
+      { sessionID: input.sessionID, formID: input.formID, answer: input.answer },
+      options,
+    );
+    return;
+  }
+  await replyFormOverHttp(input, { log });
 }
 
 /**
