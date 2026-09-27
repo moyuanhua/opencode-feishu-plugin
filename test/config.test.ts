@@ -122,6 +122,13 @@ describe("resolveConfig", () => {
     const cfg = resolve({ appId: "a", appSecret: "s", allowUsers: "ou_1, ou_2" }, {});
     expect(cfg.allowUsers).toEqual(["ou_1", "ou_2"]);
   });
+
+  test("staleExecutionMs：默认 5 分钟，夹取 1–60 分钟", () => {
+    expect(resolve({ appId: "a", appSecret: "s" }, {}).staleExecutionMs).toBe(5 * 60_000);
+    expect(resolve({ appId: "a", appSecret: "s", staleExecutionMs: 10 * 60_000 }, {}).staleExecutionMs).toBe(10 * 60_000);
+    expect(resolve({ appId: "a", appSecret: "s", staleExecutionMs: 1000 }, {}).staleExecutionMs).toBe(60_000);
+    expect(resolve({ appId: "a", appSecret: "s", staleExecutionMs: 99_999_999 }, {}).staleExecutionMs).toBe(60 * 60_000);
+  });
 });
 
 describe("resolveConfig 配置文件回退", () => {

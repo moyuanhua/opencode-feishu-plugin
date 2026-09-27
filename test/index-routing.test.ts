@@ -1,13 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import type { IncomingMessage } from "../src/types.js";
+import type { CardAction, IncomingMessage } from "../src/types.js";
+import { deriveSignSecret } from "../src/config.js";
+import { signStop } from "../src/security/token.js";
 import { FakeStorage } from "./helpers.js";
 
 /**
  * index 级路由集成测试：只 mock 长连接与飞书 SDK，走真实 handleMessage 决策树。
- * 校验：主聊天流提示卡、话题内新建会话并绑定、话题命中复用会话、去重。
+ * 校验：主聊天流提示卡、话题内新建会话并绑定、话题命中复用会话、去重、强停按钮路由。
  */
 const h = vi.hoisted(() => ({
-  gatewayOptions: undefined as { onMessage: (m: IncomingMessage) => void | Promise<void> } | undefined,
+  gatewayOptions: undefined as
+    | { onMessage: (m: IncomingMessage) => void | Promise<void>; onCardAction: (a: CardAction) => object | void }
+    | undefined,
   created: [] as unknown[],
   replied: [] as unknown[],
 }));
@@ -45,6 +49,7 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
 
 const storage = new FakeStorage();
 const promptCalls: Array<{ sessionID: string; text: string }> = [];
+const interruptCalls: string[] = [];
 const createSession = vi.fn(async (_input: { title?: string }) => ({ id: `ses_${createSession.mock.calls.length - 1}` }));
 
 function makeCtx(overrides: Record<string, unknown> = {}) {
@@ -84,7 +89,10 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       prompt: async (input: { sessionID: string; text: string }) => {
         promptCalls.push({ sessionID: input.sessionID, text: input.text });
       },
-      interrupt: async () => undefined,
+      interrupt: async (input: { sessionID: string }) => {
+        interruptCalls.push(input.sessionID);
+        return undefined;
+      },
     },
     permission: {
       hook: async () => ({ dispose: async () => undefined }),
@@ -118,6 +126,17 @@ async function deliver(message: IncomingMessage): Promise<void> {
   await h.gatewayOptions!.onMessage(message);
 }
 
+function click(rawValue: unknown, operatorOpenId = "ou_1"): object {
+  return (
+    h.gatewayOptions!.onCardAction({
+      rawValue,
+      messageId: "om_card",
+      chatId: "oc_1",
+      operatorOpenId,
+    }) ?? {}
+  );
+}
+
 describe("index 话题路由（集成）", () => {
   let cleanup: (() => Promise<void>) | undefined;
 
@@ -128,6 +147,7 @@ describe("index 话题路由（集成）", () => {
     h.replied.length = 0;
     h.gatewayOptions = undefined;
     promptCalls.length = 0;
+    interruptCalls.length = 0;
     createSession.mockClear();
   });
 
@@ -205,5 +225,34 @@ describe("index 话题路由（集成）", () => {
     await deliver(msg("/new 回退新会话", { messageId: "om_f2", threadId: "omt_fallback", rootId: "omr_f" }));
     expect(createSession).toHaveBeenCalledTimes(2);
     expect(storage.raw("feishu:v2:thread:omt_fallback")).toBeUndefined();
+  });
+
+  test("运行卡强停按钮：白名单 → 验签 → 绑定 sessionID（伪造/陌生人拒绝）", async () => {
+    cleanup = await setup();
+    await deliver(msg("干活", { messageId: "om_t1", threadId: "omt_a", rootId: "omr_a" }));
+
+    const secret = deriveSignSecret("secret_test");
+    const token = signStop({ sessionID: "ses_0", ttlMs: 600_000 }, secret);
+
+    // 合法点击：运行卡处于 active（思考中）→ success toast，并在后台中断服务端。
+    const stopped = click({ cmd: "stop", sid: "ses_0", t: token }) as { toast: { type: string; content: string } };
+    expect(stopped.toast).toEqual({ type: "success", content: "正在停止…" });
+    await vi.waitFor(() => expect(interruptCalls).toContain("ses_0"));
+
+    // 伪造 token → 拒绝。
+    const forged = click({ cmd: "stop", sid: "ses_0", t: `${token}x` }) as { toast: { content: string } };
+    expect(forged.toast.content).toContain("操作凭证无效");
+
+    // 非白名单 operator → 连验签都不做，直接拒绝。
+    const stranger = click({ cmd: "stop", sid: "ses_0", t: token }, "ou_intruder") as { toast: { content: string } };
+    expect(stranger.toast.content).toContain("无操作权限");
+
+    // sessionID 不匹配（token 绑定别的会话）→ 拒绝。
+    const mismatch = click({
+      cmd: "stop",
+      sid: "ses_0",
+      t: signStop({ sessionID: "ses_other", ttlMs: 600_000 }, secret),
+    }) as { toast: { content: string } };
+    expect(mismatch.toast.content).toContain("session-mismatch");
   });
 });

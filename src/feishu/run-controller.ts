@@ -23,6 +23,11 @@ export interface RunControllerDeps {
   readonly log: Logger;
   readonly enabled: boolean;
   readonly throttleMs: number;
+  /**
+   * 构建运行卡「强制停止」按钮 value（含当次签名 token）。
+   * 每次 patch 都会调用 → 长任务 token 始终保持新鲜；缺省不渲染按钮。
+   */
+  readonly buildStopValue?: (sessionID: string) => Record<string, unknown> | undefined;
 }
 
 export interface BeginRunInput {
@@ -50,6 +55,13 @@ export interface RunController {
   /** 记录/更新会话当前模型（P6），并同步到正在运行的卡片页脚。 */
   setModel(sessionID: string, model: string): void;
   hasActive(sessionID: string): boolean;
+  /**
+   * 返回「有排队卡但超过 maxIdleMs 仍无 execution.started」的会话。
+   * 每个会话在超时窗口内只上报一次（收到 execution.started 后重置）。
+   */
+  staleQueued(maxIdleMs: number, now?: number): string[];
+  /** 把某会话所有排队卡收尾（看门狗中断时避免排队卡永久悬挂）。 */
+  finalizeQueued(sessionID: string, error: string): void;
   dispose(): void;
 }
 
@@ -61,6 +73,8 @@ interface Card {
   state: RunState;
   chain: Promise<void>;
   finalized: boolean;
+  /** 进入排队队列的时间（ms）；用于排队超时检测。 */
+  readonly queuedAt: number;
 }
 
 interface SessionRuns {
@@ -74,6 +88,8 @@ export function createRunController(deps: RunControllerDeps): RunController {
   const throttlers = new Map<string, ReturnType<typeof createThrottler>>();
   /** sessionID → 当前模型展示名（P6）。 */
   const sessionModels = new Map<string, string>();
+  /** 已就排队超时上报过的会话（收到 execution.started 后清除）。 */
+  const notifiedQueued = new Set<string>();
   const throttleMs = Math.max(400, deps.throttleMs);
   let disposed = false;
 
@@ -86,9 +102,13 @@ export function createRunController(deps: RunControllerDeps): RunController {
     return runs;
   };
 
+  /** 渲染一张卡片（每次重签强停 token）。 */
+  const renderCard = (sessionID: string, state: RunState): object =>
+    renderRunCard(state, deps.buildStopValue?.(sessionID));
+
   const patch = async (card: Card): Promise<void> => {
     if (disposed) return;
-    const res = await deps.sender.patchCard(card.messageId, renderRunCard(card.state));
+    const res = await deps.sender.patchCard(card.messageId, renderCard(card.sessionID, card.state));
     if (!res.ok) {
       deps.log.warn("运行卡片更新失败", {
         sessionID: card.sessionID,
@@ -149,8 +169,8 @@ export function createRunController(deps: RunControllerDeps): RunController {
       if (model) sessionModels.set(input.sessionID, model);
 
       const res = input.replyToMessageId
-        ? await deps.sender.replyCard(input.replyToMessageId, renderRunCard(state))
-        : await deps.sender.sendCard(input.chatId, renderRunCard(state));
+        ? await deps.sender.replyCard(input.replyToMessageId, renderCard(input.sessionID, state))
+        : await deps.sender.sendCard(input.chatId, renderCard(input.sessionID, state));
       if (!res.ok || !res.messageId) {
         deps.log.warn("回执卡片发送失败", { sessionID: input.sessionID, error: res.error ?? "unknown" });
         return { ok: false };
@@ -164,6 +184,7 @@ export function createRunController(deps: RunControllerDeps): RunController {
         state,
         chain: Promise.resolve(),
         finalized: false,
+        queuedAt: Date.now(),
       };
 
       if (input.delivery === "queue") {
@@ -183,6 +204,7 @@ export function createRunController(deps: RunControllerDeps): RunController {
       if (!runs) return;
 
       if (event.type === "execution.started") {
+        notifiedQueued.delete(sessionID);
         if (runs.active) {
           update(runs.active, event, true);
           return;
@@ -212,6 +234,30 @@ export function createRunController(deps: RunControllerDeps): RunController {
       return sessions.get(sessionID)?.active !== undefined;
     },
 
+    staleQueued(maxIdleMs, now = Date.now()): string[] {
+      const out: string[] = [];
+      for (const [sessionID, runs] of sessions) {
+        if (runs.active) continue;
+        const first = runs.queued[0];
+        if (!first || now - first.queuedAt < maxIdleMs) continue;
+        if (notifiedQueued.has(sessionID)) continue;
+        notifiedQueued.add(sessionID);
+        out.push(sessionID);
+      }
+      return out;
+    },
+
+    finalizeQueued(sessionID, error): void {
+      const runs = sessions.get(sessionID);
+      if (!runs || runs.queued.length === 0) return;
+      for (const card of runs.queued) {
+        if (card.finalized) continue;
+        update(card, { type: "execution.failed", error }, true);
+        finalize(card);
+      }
+      runs.queued.length = 0;
+    },
+
     setModel(sessionID, model): void {
       if (disposed || !model) return;
       sessionModels.set(sessionID, model);
@@ -222,6 +268,7 @@ export function createRunController(deps: RunControllerDeps): RunController {
     dispose(): void {
       disposed = true;
       sessionModels.clear();
+      notifiedQueued.clear();
       for (const throttler of throttlers.values()) throttler.cancel();
       throttlers.clear();
       for (const runs of sessions.values()) {

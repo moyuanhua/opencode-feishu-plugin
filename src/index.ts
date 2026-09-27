@@ -20,20 +20,23 @@ import { hasSecret, resolveConfig } from "./config.js";
 import { createLogger, errorMessage, maskId } from "./logger.js";
 import { acquireProcessGuard, releaseProcessGuard } from "./lifecycle.js";
 import { OwnerPolicy } from "./security/allowlist.js";
-import { ReplayGuard, signApproval, verifyApproval } from "./security/token.js";
+import { ReplayGuard, signApproval, signStop, verifyApproval, verifyStop } from "./security/token.js";
 import { startGateway } from "./feishu/gateway.js";
 import { createFeishuSender } from "./feishu/sender.js";
 import { SessionMap } from "./feishu/session-map.js";
 import { MessageDedup } from "./feishu/dedup.js";
 import { decideDelivery, ExecutionTracker, type Delivery } from "./feishu/delivery.js";
 import { createRunController } from "./feishu/run-controller.js";
+import { createSessionRecovery, type CancelQueuedResult } from "./feishu/session-recovery.js";
+import { StopController, parseStopActionValue } from "./feishu/run-stop.js";
+import { startWatchdog } from "./feishu/watchdog.js";
 import { FormRelay, type FormReplyInput } from "./feishu/form-relay.js";
 import { replyFormOverHttp } from "./feishu/form-reply.js";
 import type { RunEvent } from "./feishu/run-state.js";
 import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js";
 import { decideRoute } from "./feishu/routing.js";
-import { buildConsoleHintCard } from "./feishu/cards.js";
+import { buildConsoleHintCard, buildStopNoticeCard } from "./feishu/cards.js";
 import { parseSessionCardValue } from "./feishu/session-cards.js";
 import { isSetupFormAction, parseSetupCardValue } from "./feishu/setup-cards.js";
 import { validateDirectory } from "./feishu/dirs.js";
@@ -141,6 +144,43 @@ async function start(
     log,
     enabled: config.stream,
     throttleMs: config.streamThrottleMs,
+    // 每次 patch 重签强停 token（`stop` 在下方定义，闭包运行时才求值）。
+    buildStopValue: (sessionID) => stop.buildStopValue(sessionID),
+  });
+
+  /**
+   * 会话恢复例程：任务 A（卡片强停按钮）与任务 B（看门狗）共用同一中断路径。
+   * 中断 + 取消排队消息 + 清执行态 + 运行卡收尾；失败时 log.warn 并在卡片注明。
+   */
+  const recovery = createSessionRecovery({
+    log,
+    resolveLink: (sessionID) => sessionMap.resolveBySession(sessionID),
+    interrupt: async (sessionID, directory) => {
+      const api = ctx.session.interrupt as unknown as (
+        input: { sessionID: string; resume?: boolean },
+        options?: { headers?: Record<string, string> },
+      ) => Promise<unknown>;
+      // resume:false = 中断后不续跑；带目录头以便跨 location 命中。
+      await api({ sessionID, resume: false }, directory ? { headers: { "x-opencode-directory": directory } } : undefined);
+    },
+    cancelQueued: (sessionID, directory) => cancelQueuedPrompts(ctx, sessionID, directory),
+    markEnded: (sessionID) => executions.markEnded(sessionID),
+    finalizeCard: (sessionID, error) => {
+      runs.apply(sessionID, { type: "execution.failed", error });
+      runs.finalizeQueued(sessionID, error);
+    },
+    notify: (sessionID, reason, ok) => notifyStuck(sessionID, reason, ok),
+  });
+
+  /** 运行卡「强制停止」按钮：白名单 → 验签 → 绑定 sessionID → 防重放。 */
+  const stop = new StopController({
+    log,
+    isAllowed: (openId) => owner.isAllowed(openId),
+    verify: (token, sessionID) => verifyStop(token, config.signSecret, { expectSessionID: sessionID }),
+    replay: new ReplayGuard(config.approvalTtlMs),
+    sign: (sessionID) => signStop({ sessionID, ttlMs: config.approvalTtlMs }, config.signSecret),
+    isRunning: (sessionID) => executions.isRunning(sessionID) || runs.hasActive(sessionID),
+    interrupt: (sessionID, reason) => recovery.interrupt(sessionID, reason),
   });
 
   // 表单（含 question 工具）中继：避免 agent 反问时执行永久挂起。
@@ -232,12 +272,8 @@ async function start(
     isAllowed: (openId) => owner.isAllowed(openId),
     createSession: (input) => createSessionInternal(input),
     interruptSession: async (sessionID) => {
-      // V2 的字段是 `resume`（缺省 false 即中断后不续跑）；兼容文档中曾提到的 `continue`。
-      await ctx.session.interrupt({ sessionID, resume: false });
-      // resume:false 会 park 住队列消息且不保证 interrupted 事件到达；主动收尾避免永久排队。
-      executions.markEnded(sessionID);
-      runs.apply(sessionID, { type: "execution.failed", error: "已中断（/stop）" });
-      await cancelQueuedPrompts(ctx, sessionID, await sessionMap.resolveBySession(sessionID), log);
+      // 与卡片强停共用同一恢复例程：中断 + 取消排队 + 清执行态 + 卡片收尾。
+      await recovery.interrupt(sessionID, "/stop");
     },
     steerPrompt: async (message, sessionID, text) => {
       // 强制 steer：打断当前步骤，把这条消息插入执行。
@@ -449,6 +485,12 @@ async function start(
 
       // 会话卡 / 向导卡 / 表单提交优先；其余交给审批卡（value 里带 `cmd` / `wizard` 的才是管理操作）。
       const value = action.rawValue;
+
+      // 运行卡「强制停止」按钮（与审批卡/会话卡并列，独立校验路径）。
+      if (parseStopActionValue(value)) {
+        return stop.handleCardAction(action);
+      }
+
       const hasForm = action.formValue !== undefined;
       const routed =
         hasForm ||
@@ -629,35 +671,44 @@ async function start(
   }
 
   /**
-   * 看门狗：清理长时间无任何事件的执行态兜底。
-   *
-   * 触发场景：服务端事件丢失、交互式工具（question/permission）永久挂起等。
-   * 不清会让该会话后续消息永远判为 queue（卡死 + 排队）。只放开插件侧排队判定，
-   * 不主动中断服务端执行；卡片收尾为失败态并提示可用 `/stop`。
+   * 看门狗（任务 B）：真正「救会话」，不再只是放开插件侧排队判定。
+   * - 陈旧执行（长时间无事件）→ 走共享恢复例程主动中断 + 取消排队 + 卡片收尾；
+   * - 排队超时（排队超过阈值仍无 execution.started）→ 同样中断 + 提示卡。
+   * 阈值可配置（`staleExecutionMs`，默认 5 分钟，夹取 1–60 分钟）。
    */
-  const WATCHDOG_INTERVAL_MS = 60_000;
-  const STALE_EXECUTION_MS = 30 * 60_000;
-  const watchdog = setInterval(() => {
-    for (const sessionID of executions.stale(STALE_EXECUTION_MS)) {
-      log.warn("执行态疑似卡死，已放开排队判定", { sessionID, idleMs: STALE_EXECUTION_MS });
-      runs.apply(sessionID, {
-        type: "execution.failed",
-        error: "长时间无进展，可能卡死（可发送 /stop 中断）",
-      });
-      void notifyStuck(sessionID);
-    }
-  }, WATCHDOG_INTERVAL_MS);
-  (watchdog as { unref?: () => void }).unref?.();
+  const stopWatchdog = startWatchdog({
+    log,
+    staleExecutionMs: config.staleExecutionMs,
+    staleExecutions: () => executions.stale(config.staleExecutionMs),
+    staleQueued: () => runs.staleQueued(config.staleExecutionMs),
+    recover: (sessionID, reason) => recovery.recover(sessionID, reason),
+  });
 
-  async function notifyStuck(sessionID: string): Promise<void> {
+  /** 卡死 / 排队超时提示卡：带「强制停止」按钮，自动恢复失败时可手动重试。 */
+  async function notifyStuck(sessionID: string, reason: string, ok: boolean): Promise<void> {
     const link = await sessionMap.resolveBySession(sessionID);
     if (!link) return;
-    const text = "⚠️ 该会话已长时间无响应，后续消息不再排队。发送 `/stop` 可强制中断后重试。";
-    if (link.replyMessageId) {
-      await sender.replyText(link.replyMessageId, text);
-      return;
-    }
-    await sender.sendText(link.chatId, text);
+    const lines = ok
+      ? [
+          `该会话**${reason}**，已自动中断并收尾，后续消息不再排队。`,
+          "",
+          "若仍无响应，可点下方「⏹ 强制停止」重试，或直接发新消息。",
+        ]
+      : [
+          `该会话**${reason}**，自动中断可能未完全成功。`,
+          "",
+          "可点下方「⏹ 强制停止」重试，或直接发新消息。",
+        ];
+    const card = buildStopNoticeCard({
+      title: ok ? "⏹ 已自动中断卡死会话" : "⚠️ 卡死会话自动恢复失败",
+      lines,
+      stopValue: stop.buildStopValue(sessionID),
+      template: ok ? "orange" : "red",
+    });
+    const res = link.replyMessageId
+      ? await sender.replyCard(link.replyMessageId, card)
+      : await sender.sendCard(link.chatId, card);
+    if (!res.ok) log.warn("卡死提示卡发送失败", { sessionID, error: res.error ?? "unknown" });
   }
 
   log.info("飞书插件已就绪");
@@ -668,7 +719,7 @@ async function start(
     cleanedUp = true;
     log.info("飞书插件卸载中");
     abort.abort();
-    clearInterval(watchdog);
+    stopWatchdog();
     await subscription.catch(() => undefined);
     runs.dispose();
     executions.clear();
@@ -714,33 +765,39 @@ function createLogSink(logFile: string | undefined): { sink: (line: string) => v
  * 这里做一次防御式回退：reply 失败且疑似字段名错误时用 decision 重试（校验失败不会产生副作用）。
  */
 /**
- * 尽力取消该会话尚未投递的队列消息（`/stop` 收尾）。
+ * 尽力取消该会话尚未投递的队列消息（`/stop` 收尾 / 强停 / 看门狗）。
  *
  * `session.interrupt({resume:false})` 只中断当前执行，**队列里的 prompt 会被 park**
  * （见 openapi：queued prompts remain parked），所以卡死恢复必须显式取消它们。
- * `session.inbox` 不在插件 SessionDomain 的公开 Pick 内，运行时可能缺失 → 全程 best-effort。
+ * `session.inbox` 不在插件 SessionDomain 的公开 Pick 内，运行时可能缺失 → 全程 best-effort，
+ * 不抛异常，失败信息放在返回值里由调用方 log.warn。
  */
 async function cancelQueuedPrompts(
   ctx: Plugin.Context,
   sessionID: string,
-  link: SessionLink | undefined,
-  log: ReturnType<typeof createLogger>,
-): Promise<void> {
+  directory: string | undefined,
+): Promise<CancelQueuedResult> {
   const inbox = (ctx.session as unknown as {
     inbox?: {
       list?: (input: { sessionID: string }, options?: unknown) => Promise<unknown>;
       cancel?: (input: { sessionID: string; inboxID: string }, options?: unknown) => Promise<unknown>;
     };
   }).inbox;
-  if (!inbox?.list || !inbox.cancel) return;
-  const options = link?.dir ? { headers: { "x-opencode-directory": link.dir } } : undefined;
+  if (!inbox?.list || !inbox.cancel) return { cancelled: 0 };
+  const options = directory ? { headers: { "x-opencode-directory": directory } } : undefined;
+  let cancelled = 0;
   try {
     const items = (await inbox.list({ sessionID }, options)) as Array<{ id?: string }>;
     for (const item of items ?? []) {
-      if (item?.id) await inbox.cancel({ sessionID, inboxID: item.id }, options);
+      if (item?.id) {
+        await inbox.cancel({ sessionID, inboxID: item.id }, options);
+        cancelled += 1;
+      }
     }
+    return { cancelled };
   } catch (err) {
-    log.debug("取消排队消息失败（忽略）", { sessionID, error: errorMessage(err) });
+    // 部分取消成功后失败：报出已取消条数 + 错误，由调用方决定是否在卡片注明。
+    return { cancelled, error: errorMessage(err) };
   }
 }
 

@@ -9,7 +9,7 @@
  * 体积保护：先按字段截断，再对整个卡片做 markdown 内容的降级截断
  * （`enforceSize`），保证序列化 ≤ `MAX_CARD_BYTES`。
  */
-import { MAX_CARD_BYTES, truncateCardContent, type CardTemplate } from "./cards.js";
+import { cardButton, MAX_CARD_BYTES, truncateCardContent, type CardTemplate } from "./cards.js";
 import type { RunBlock, RunState, ToolEntry } from "./run-state.js";
 
 const COLLAPSE_TOOL_THRESHOLD = 3;
@@ -29,8 +29,13 @@ interface TextGroup {
 }
 type Group = ToolGroup | TextGroup;
 
-/** 渲染整张运行卡片。 */
-export function renderRunCard(state: RunState): object {
+/**
+ * 渲染整张运行卡片。
+ *
+ * `stopValue` 由调用方（RunController）构建并**每次 patch 重签**，保持本函数纯函数可单测；
+ * 缺省不渲染停止按钮（向后兼容）。按钮为 JSON 2.0：直放 `body.elements`、回调走 `behaviors`。
+ */
+export function renderRunCard(state: RunState, stopValue?: Record<string, unknown>): object {
   const elements: object[] = [];
 
   for (const group of groupBlocks(state.blocks)) {
@@ -52,6 +57,13 @@ export function renderRunCard(state: RunState): object {
   } else if (state.terminal !== "running" && state.model) {
     // 终态也保留模型信息，方便回看这条运行用的是哪个模型。
     elements.push(note(`🤖 ${state.model}`));
+  }
+
+  // 强制停止按钮：运行中/排队中用 danger；已结束用 default（点击只回「该任务已结束」）。
+  // 始终放在最后，`enforceSize` 丢弃最旧元素时按钮不会被裁掉。
+  if (stopValue) {
+    const active = state.terminal === "running";
+    elements.push(cardButton(active ? "⏹ 强制停止" : "⏹ 停止", active ? "danger" : "default", stopValue));
   }
 
   const card = {

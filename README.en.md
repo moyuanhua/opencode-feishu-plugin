@@ -22,6 +22,7 @@ Bring [OpenCode](https://opencode.ai) into Feishu/Lark: **one Feishu topic = one
 | 🪜 **Permission presets** | Read-only / Editable / Ask-on-risky / Trust — pick once per session instead of approving every call |
 | 📊 **Live visibility** | Instant ack card, live tool calls (auto-collapsed when ≥3), streaming text, current model in the footer |
 | 🧵 **Native queueing** | Busy session → messages queue via OpenCode's native `delivery:"queue"` |
+| ⏹ **One-tap force stop** | **Every AI reply card carries a "force stop" button** — one tap interrupts (whitelist + HMAC signed). The watchdog auto-interrupts stuck sessions instead of queueing forever |
 | 🚫 **No ports** | Everything over a long connection; nothing to expose |
 
 ---
@@ -135,7 +136,7 @@ The main chat is management-only; plain text never enters a session.
 | `/sessions` (`/ls`) | Session list card (switch / create) |
 | `/use <n\|id-prefix>` | Switch current session |
 | `/current` | Show current session |
-| `/stop` | Interrupt the running task in the current session |
+| `/stop` | Interrupt the running task in the current session (every run card also has a "⏹ force stop" button) |
 | `/steer <text>` | Send a message that **cuts in immediately** (steers into the running step instead of queuing) |
 | `/now` | Promote this session's already-queued, not-yet-delivered messages to run immediately |
 | `/dir <path>` | **Pre-fill** the form's working directory (empty = allowed root; a missing path is auto-created) |
@@ -224,6 +225,20 @@ While a session is busy, new messages use OpenCode's native queue (`delivery:"qu
 - `/steer <text>` — send this message with `delivery:"steer"` to insert it immediately (interrupts the current step, like steering in the TUI).
 - `/now` — promote this session's already-queued, not-yet-delivered messages to `steer` (via OpenCode's `session.inbox.update`; content is neither lost nor re-sent).
 
+### Force-stop button and the watchdog
+
+**Every AI reply card has a "⏹ force stop" button at the bottom** (ack card, streaming run card, terminal card and stuck-notice card):
+
+- running / queued: a **red danger** "⏹ Force stop" button; tapping it interrupts the session's current execution and cancels not-yet-delivered queued messages;
+- done / failed / interrupted: still rendered, but as a `default` "⏹ Stop" button; tapping only shows the toast "this task has ended" (so it never looks like you can still stop it).
+
+The button is a **signed action** `{ cmd:"stop", sid:<sessionID>, t:<token> }`. The token reuses the approval-card HMAC mechanism and binds `sessionID + purpose + expiry + nonce`; the card **re-signs on every patch**, so long tasks never become un-stoppable due to an expired token.
+Validation order: **allowlist (allowUsers/owner) → signature → sessionID binding → replay guard**; forged, cross-session and replayed clicks are rejected.
+
+**Watchdog (5-minute threshold, configurable)**: when an execution has produced no event for longer than the threshold it is treated as stuck; the plugin **actually interrupts the server-side session** (`session.interrupt`) + **cancels queued inbox messages** + finalizes the run card + sends a notice card with a force-stop button. If a session stays queued past the same threshold without an `execution.started`, the same recovery runs and a notice is sent — no more "session stuck once, every later message queues forever".
+
+The threshold is `staleExecutionMs` (default 5 minutes, clamped to 1–60 minutes).
+
 ### Forms and questions (`question` tool)
 
 When the agent calls the `question` tool (or any form interaction), OpenCode creates a pending form that blocks execution. The plugin relays it as a Feishu card:
@@ -259,6 +274,7 @@ Without this relay, any clarifying question would stall the Feishu session forev
 | `logFile` | string \| boolean | — | `true` writes `<configDir>/plugins/feishu.log`. **Plugin stderr is discarded in service mode — enable this when debugging** |
 | `gatewayLocation` | string | — | Only start the gateway in this location. OpenCode loads global plugins per location (separate VM contexts, so an in-process singleton cannot dedupe). **Set this to your usual working directory**, otherwise you get multiple long connections |
 | `approvalTtlMs` | number | `600000` | Approval token / card TTL |
+| `staleExecutionMs` | number | `300000` | Watchdog threshold: an execution with no event for this long is treated as stuck and auto-interrupted; a queue stuck this long without `execution.started` also triggers a notice. Clamped to 1–60 minutes |
 | `maxResourcesShown` | number | `8` | Max resource lines shown on an approval card |
 
 ---
@@ -283,6 +299,7 @@ otherwise (per session preset) → ask ─────────────�
 ```
 
 - **Signed tokens**: HMAC-SHA256 binding `requestID + sessionID + operator openId + expiry + nonce`; forgery, forwarding and replay are rejected.
+- **Force-stop uses the same signature scheme**: its token binds `sessionID + purpose + expiry + nonce`, the click passes the open_id allowlist before verification, and it is purpose-isolated from approval tokens (neither works for the other).
 - **Only Feishu-originated sessions**: sessions without a chat↔session mapping (e.g. your local TUI) are **never downgraded to `ask`**, otherwise they would hang forever with no approval channel.
 - **Three layers of single-user isolation**: platform availability (only you) + no group scopes + code-level open_id allowlist with silent ignore.
 - **`always` semantics**: persisted only when the request carries `save[]`; otherwise it behaves like "once" (the card says so).
@@ -306,6 +323,7 @@ otherwise (per session preset) → ask ─────────────�
 | No topic after creating a session | If auto-opening the topic fails, the form card is rewritten to "✅ Created · …" with manual-topic guidance; you can also create a topic manually from the `/sessions` card |
 | No plugin logs | Plugin stderr is discarded in service mode; set `logFile: true` and read `<configDir>/plugins/feishu.log` |
 | Main chat replies with a hint card | Expected: the main chat is management-only. Use `/new` and work inside a topic; set `threadRouting: false` to revert |
+| Session looks stuck and messages only queue | The watchdog auto-interrupts it after `staleExecutionMs` (default 5 min) and cancels the queue, then sends a notice card; you can also tap the card's "⏹ force stop" or send `/stop` |
 
 ---
 

@@ -169,4 +169,48 @@ describe("run controller", () => {
     expect(lastPatchFor(sender, "om_0")).toContain("🤖 Claude Sonnet 4");
     controller.dispose();
   });
+
+  test("注入 buildStopValue → 回执卡/运行卡带「强制停止」按钮", async () => {
+    const sender = new FakeSender();
+    const controller = createRunController({
+      sender,
+      log,
+      enabled: true,
+      throttleMs: 400,
+      buildStopValue: (sessionID) => ({ cmd: "stop", sid: sessionID, t: `signed_${sessionID}` }),
+    });
+    const res = await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "steer" });
+    expect(res.ok).toBe(true);
+    const text = cardText(sender.sent[0]!.card);
+    expect(text).toContain("强制停止");
+    expect(text).toContain("signed_ses_1");
+    controller.apply("ses_1", { type: "execution.succeeded" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lastPatchFor(sender, "om_0")).toContain("⏹ 停止");
+    controller.dispose();
+  });
+
+  test("staleQueued：排队超时只上报一次，execution.started 后重置", async () => {
+    const { controller } = setup();
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "queue" });
+    const base = Date.now();
+    expect(controller.staleQueued(60_000, base + 120_000)).toEqual(["ses_1"]);
+    expect(controller.staleQueued(60_000, base + 120_000)).toEqual([]);
+    // 执行开始（晋升为 active）→ 重置标记；结束后再次排队可重新上报。
+    controller.apply("ses_1", { type: "execution.started" });
+    controller.apply("ses_1", { type: "execution.succeeded" });
+    await vi.advanceTimersByTimeAsync(0);
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "queue" });
+    expect(controller.staleQueued(60_000, Date.now() + 120_000)).toEqual(["ses_1"]);
+    controller.dispose();
+  });
+
+  test("finalizeQueued：排队卡收尾为失败/中断态", async () => {
+    const { sender, controller } = setup();
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "queue" });
+    controller.finalizeQueued("ses_1", "已中断（排队超时）");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lastPatchFor(sender, "om_0")).toContain("已中断");
+    controller.dispose();
+  });
 });

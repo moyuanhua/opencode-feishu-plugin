@@ -118,3 +118,69 @@ describe("renderRunCard", () => {
     expect(text).not.toContain("正在思考");
   });
 });
+
+describe("renderRunCard 强制停止按钮", () => {
+  const stopValue = { cmd: "stop", sid: "ses_1", t: "signed-token" };
+
+  const stopButton = (card: object): Record<string, unknown> | undefined =>
+    bodyElements(card).find((e) => e.tag === "button");
+
+  test("运行中：danger 强停按钮，JSON 2.0 callback，无 1.0 tag:action", () => {
+    const card = renderRunCard(run({ type: "execution.started" }), stopValue);
+    const btn = stopButton(card);
+    expect(btn).toBeTruthy();
+    expect(btn!.type).toBe("danger");
+    expect((btn!.behaviors as Array<Record<string, unknown>>)[0]).toEqual({
+      type: "callback",
+      value: stopValue,
+    });
+    const text = json(card);
+    expect(text).toContain("⏹ 强制停止");
+    expect(text).not.toContain('"tag":"action"');
+    expect(text).not.toContain('"actions"');
+  });
+
+  test("排队中也是 danger 强停按钮", () => {
+    const card = renderRunCard(run({ type: "queued" }), stopValue);
+    const btn = stopButton(card);
+    expect(btn?.type).toBe("danger");
+    expect(json(card)).toContain("强制停止");
+  });
+
+  test("终态：default 样式「停止」，点击由上层回「已结束」", () => {
+    const card = renderRunCard(
+      run({ type: "execution.started" }, { type: "text.delta", delta: "hi" }, { type: "execution.succeeded" }),
+      stopValue,
+    );
+    const btn = stopButton(card);
+    expect(btn?.type).toBe("default");
+    const text = json(card);
+    expect(text).toContain("⏹ 停止");
+    expect(text).not.toContain("强制停止");
+  });
+
+  test("失败终态也带 default 停止按钮", () => {
+    const card = renderRunCard(
+      run({ type: "execution.started" }, { type: "execution.failed", error: "boom" }),
+      stopValue,
+    );
+    expect(stopButton(card)?.type).toBe("default");
+  });
+
+  test("缺省不渲染按钮（向后兼容）", () => {
+    expect(stopButton(renderRunCard(run({ type: "execution.started" })))).toBeUndefined();
+  });
+
+  test("带强停按钮的超长卡片仍 ≤ 30KB 且按钮保留", () => {
+    const events: RunEvent[] = [{ type: "text.started", assistantMessageID: "m1" }];
+    for (let i = 0; i < 40; i += 1) {
+      events.push({ type: "text.delta", delta: "x".repeat(2000), assistantMessageID: "m1" });
+      events.push({ type: "tool.input.started", id: `t${i}`, name: "bash" });
+      events.push({ type: "tool.input.ended", id: `t${i}`, input: { command: "y".repeat(3000) } });
+      events.push({ type: "tool.success", id: `t${i}`, output: "z".repeat(3000) });
+    }
+    const card = renderRunCard(run(...events), stopValue);
+    expect(Buffer.byteLength(json(card), "utf8")).toBeLessThanOrEqual(MAX_CARD_BYTES);
+    expect(stopButton(card)).toBeTruthy();
+  });
+});

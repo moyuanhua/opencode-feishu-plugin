@@ -143,6 +143,28 @@ export function buildResolvedCard(input: ApprovalCardInput, outcome: ApprovalOut
 }
 
 /**
+ * 卡死 / 排队超时提示卡（任务 B）：提示已自动中断，并带「强制停止」按钮供重试。
+ * 与运行卡一致：JSON 2.0，按钮直放 `body.elements`，回调走 `behaviors`。
+ */
+export function buildStopNoticeCard(input: {
+  readonly title: string;
+  readonly lines: readonly string[];
+  readonly stopValue?: Record<string, unknown>;
+  readonly template?: CardTemplate;
+}): object {
+  const elements: object[] = [
+    { tag: "markdown", content: truncateCardContent(input.lines.join("\n") || "(无)") },
+  ];
+  if (input.stopValue) elements.push(cardButton("⏹ 强制停止", "danger", input.stopValue));
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    header: { title: { tag: "plain_text", content: input.title }, template: input.template ?? "orange" },
+    body: { elements },
+  };
+}
+
+/**
  * 飞书卡片 JSON 2.0 按钮。
  *
  * 2.0 **不再支持** 1.0 的 `tag:"action"` / `actions` 容器（会直接 400），
