@@ -68,7 +68,7 @@ export function sessionRowLine(row: SessionListRow, now: number): string {
 
 /**
  * 构建全量会话列表卡片：
- * - 每行一个「▶️ 进入话题 / ▶️ 再开话题」按钮（值 `{cmd:"open"}`）；
+ * - 每行 = 左列会话文字 + 右列「▶️ 进入 / ▶️ 再开话题」按钮（`column_set` 并排，值 `{cmd:"open"}`）；
  * - 底部翻页按钮（`{cmd:"list"}`）与「➕ 新建会话」（`{cmd:"new"}`，发 `/form` 表单卡）。
  */
 export function buildSessionListCard(input: SessionListCardInput): object {
@@ -83,17 +83,37 @@ export function buildSessionListCard(input: SessionListCardInput): object {
       ),
     });
   } else {
-    const lines = input.rows.map((row) => sessionRowLine(row, now)).join("\n");
-    elements.push({ tag: "markdown", content: truncateCardContent(lines) });
-    for (const row of input.rows) {
-      elements.push(
-        button(row.bound ? "▶️ 再开话题" : "▶️ 进入话题", row.active ? "primary" : "default", {
-          cmd: "open",
-          s: row.sessionID,
-          c: input.chatId,
-        }),
-      );
-    }
+    // 每行一个「文字 + 按钮」并排结构（column_set）：
+    // 避免"一列按钮堆在列表下方、无法对应到具体会话"的观感。
+    input.rows.forEach((row, i) => {
+      if (i > 0) elements.push({ tag: "hr", margin: "2px 0px 2px 0px" });
+      elements.push({
+        tag: "column_set",
+        flex_mode: "none",
+        horizontal_spacing: "small",
+        columns: [
+          {
+            tag: "column",
+            width: "weighted",
+            weight: 5,
+            vertical_align: "center",
+            elements: [{ tag: "markdown", content: truncateCardContent(sessionRowLine(row, now)) }],
+          },
+          {
+            tag: "column",
+            width: "auto",
+            vertical_align: "center",
+            elements: [
+              button(row.bound ? "▶️ 再开" : "▶️ 进入", row.active ? "primary" : "default", {
+                cmd: "open",
+                s: row.sessionID,
+                c: input.chatId,
+              }),
+            ],
+          },
+        ],
+      });
+    });
   }
 
   // 分页控件（仅在有需要时出现）。

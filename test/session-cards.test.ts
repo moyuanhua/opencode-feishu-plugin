@@ -11,9 +11,18 @@ import {
 
 const NOW = 1_700_000_000_000;
 
+/** 递归收集所有按钮：会话行按钮现在嵌在 column_set → column 内。 */
 function buttonsOf(card: object): Array<Record<string, unknown>> {
-  const elements = (card as { body: { elements: Array<Record<string, unknown>> } }).body.elements;
-  return elements.filter((e) => e.tag === "button");
+  const out: Array<Record<string, unknown>> = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) { for (const n of node) walk(n); return; }
+    if (!node || typeof node !== "object") return;
+    const rec = node as Record<string, unknown>;
+    if (rec.tag === "button") out.push(rec);
+    for (const v of Object.values(rec)) walk(v);
+  };
+  walk((card as { body: { elements: unknown } }).body.elements);
+  return out;
 }
 
 function rows(): SessionListRow[] {
@@ -59,13 +68,37 @@ describe("buildSessionListCard", () => {
       now: NOW,
     });
     const text = JSON.stringify(card);
-    expect(text).toContain("▶️ 进入话题");
-    expect(text).toContain("▶️ 再开话题");
+    expect(text).toContain("▶️ 进入");
+    expect(text).toContain("▶️ 再开");
     expect(text).toContain("1 分钟前");
     expect(text).toContain("3 小时前");
     expect(text).toContain("💬 已绑话题");
     expect(text).toContain("📍 app");
     expect(text).toContain("第 1/1 页 · 共 2 个会话");
+  });
+
+
+  test("每行是「文字+按钮」并排（column_set），按钮与会话一一对应", () => {
+    const card = buildSessionListCard({ chatId: "oc_1", rows: rows(), page: 0, pageCount: 1, total: 2, now: NOW });
+    const elements = (card as { body: { elements: Array<Record<string, unknown>> } }).body.elements;
+    const rowsets = elements.filter((e) => e.tag === "column_set");
+    expect(rowsets).toHaveLength(2); // 两个会话 → 两个并排行
+    for (const rs of rowsets) {
+      const cols = (rs.columns as Array<{ elements: Array<Record<string, unknown>> }>) ?? [];
+      expect(cols).toHaveLength(2); // 左文字 + 右按钮
+      const btn = cols[1]!.elements.find((e) => e.tag === "button");
+      expect(btn).toBeDefined();
+      const value = (btn!.behaviors as Array<{ value: Record<string, unknown> }>)[0]!.value;
+      expect(value.cmd).toBe("open");
+      expect(["ses_aaa", "ses_bbb"]).toContain(value.s);
+      // 左列必须是 markdown（会话文字），保证"按钮能对应到具体会话"
+      expect(cols[0]!.elements[0]!.tag).toBe("markdown");
+    }
+    // 行内按钮与会话一一对应：每个会话 id 只出现一次
+    const ids = rowsets
+      .map((rs) => ((rs.columns as Array<{ elements: Array<Record<string, unknown>> }>)[1]!.elements[0] as { behaviors: Array<{ value: { s: string } }> }).behaviors[0]!.value.s)
+      .sort();
+    expect(ids).toEqual(["ses_aaa", "ses_bbb"]);
   });
 
   test("分页：第一页无上一页、末页无下一页", () => {

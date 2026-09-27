@@ -773,10 +773,17 @@ describe("SessionCommands 会话卡片回调", () => {
 });
 
 function buttonValues(card: object): unknown[] {
-  const elements = (card as { body: { elements: Array<Record<string, unknown>> } }).body.elements;
-  return elements
-    .filter((e) => e.tag === "button")
-    .map((e) => (e.behaviors as Array<{ value: unknown }>)[0]?.value);
+  // 递归收集：会话行按钮现在嵌在 column_set → column 内。
+  const out: unknown[] = [];
+  const walk = (node: unknown): void => {
+    if (Array.isArray(node)) { for (const n of node) walk(n); return; }
+    if (!node || typeof node !== "object") return;
+    const rec = node as Record<string, unknown>;
+    if (rec.tag === "button") out.push((rec.behaviors as Array<{ value: unknown }>)[0]?.value);
+    for (const v of Object.values(rec)) walk(v);
+  };
+  walk((card as { body: { elements: unknown } }).body.elements);
+  return out;
 }
 
 describe("SessionCommands /sessions（全量列表 + 分页 + 已绑标记）", () => {
@@ -816,8 +823,8 @@ describe("SessionCommands /sessions（全量列表 + 分页 + 已绑标记）", 
     await commands.handleText(message("/ls"));
     const text = JSON.stringify(sender.cards[0]!.card);
     expect(text).toContain("💬 已绑话题");
-    expect(text).toContain("▶️ 再开话题");
-    expect(text).toContain("▶️ 进入话题");
+    expect(text).toContain("▶️ 再开");
+    expect(text).toContain("▶️ 进入");
     expect(await sessionMap.threadIdForSession("ses_00")).toBe("omt_0");
   });
 
