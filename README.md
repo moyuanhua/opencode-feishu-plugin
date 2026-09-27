@@ -45,48 +45,45 @@
 
 ## 二、安装
 
-### 1. 安装插件
+### 1. 安装插件（V2：由 npm 自动加载，推荐）
 
-**方式 A：npm（推荐）**
-
-```bash
-cd ~/.config/opencode
-npm init -y                       # 若尚无 package.json
-npm install opencode-feishu-plugin
-```
-
-**方式 B：本地构建**
+OpenCode V2 通过配置 `plugins` 数组声明要加载的包，启动时自动用 Bun 安装
+（缓存于 `~/.cache/opencode/node_modules/`）。两种等价写法：
 
 ```bash
-git clone https://github.com/moyuanhua/opencode-feishu-plugin.git
-cd opencode-feishu-plugin && npm install && npm run build
+# 方式 A：CLI（推荐）
+opencode plugin add opencode-feishu-plugin
 ```
 
-> 构建产物 `dist/index.js` **已自包含**飞书 SDK 等依赖，运行时不需要额外 `node_modules`。
+```jsonc
+// 方式 B：手写 ~/.config/opencode/opencode.jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-feishu-plugin"]
+}
+```
 
-### 2. 让 OpenCode 加载插件（关键：必须是 `index.js`）
+插件入口由 `package.json#exports` 指向**自包含**的 `dist/index.js`（含飞书 SDK 等依赖），
+运行时不需要你手动 `npm install`，也不需要额外 `node_modules`。
 
-OpenCode 会**自动加载 `<configDir>/plugins/<任意名>/index.js`**——它**不会**读取 `package.json` 的 `main`。
-所以插件目录根部必须有一个 `index.js`（本包已经带了这个根入口，转发到 `dist/`）。
+**本地开发（不走 npm）**：克隆后 `npm install && npm run build`，把本地目录写进 `plugins`：
+
+```jsonc
+{ "plugins": ["./path/to/opencode-feishu-plugin"] }
+```
+
+### 2. 另一种加载方式：全局插件目录（离线 / 固定目录）
+
+也可把构建产物放进 `<configDir>/plugins/<任意名>/`（`configDir` = `OPENCODE_CONFIG_DIR` 或 `~/.config/opencode`）。
+OpenCode 会自动发现该目录下的 `index.js`（本包根部已带该入口，转发到 `dist/`）：
 
 ```bash
-# 方式 A：从 npm 包安装后拷贝（推荐）
-cd ~/.config/opencode
-npm install opencode-feishu-plugin
-mkdir -p plugins/feishu
-cp -r node_modules/opencode-feishu-plugin/{index.js,dist,package.json} plugins/feishu/
-
-# 方式 B：本地构建后拷贝
-# cd /path/to/opencode-feishu-plugin && npm install && npm run build
-# mkdir -p ~/.config/opencode/plugins/feishu
-# cp -r dist index.js package.json ~/.config/opencode/plugins/feishu/
+cd /path/to/opencode-feishu-plugin && npm install && npm run build
+mkdir -p ~/.config/opencode/plugins/feishu
+cp -r dist index.js package.json ~/.config/opencode/plugins/feishu/
 ```
 
-> ⚠️ 两个常见坑：
-> 1. 只拷 `dist/` 和 `package.json`（没有根 `index.js`）→ **插件不会被加载**，且没有明显报错。
-> 2. 在 `opencode.json` 的 `plugins` 数组里写本地路径（`.`/绝对路径）→ **无效**；写包名会触发 `npm install`（私有包会 404）。正确做法就是上面放进 `plugins/<名>/` 目录。
->
-> **升级插件后需要重启服务**：`opencode reload` 只重跑 `setup`，**不会重新 import 同路径模块**。
+> 无论用哪种方式加载，**升级后都需要重启服务**才会重新 import 模块：
 > ```bash
 > opencode service restart
 > ```
@@ -300,8 +297,8 @@ permission.evaluate (插件 hook)                 permission.asked (事件流)
 |---|---|
 | 发消息没反应 | ① 应用是否**已发布**、可用范围是否勾了你；② 事件/回调订阅是否选了**长连接**（不是 Webhook）；③ 是否开通 `im:message.p2p_msg:readonly` |
 | 改了 `feishu.json` 不生效 | 确认路径是 `<configDir>/plugins/feishu.json`，然后 `opencode reload` |
-| 放了插件但完全没被加载（无日志、无报错） | 插件目录根部**缺少 `index.js`**。OpenCode 只加载 `plugins/<名>/index.js`，不读 `package.json#main`；确认拷贝了根 `index.js` |
-| 改了插件代码不生效 | `opencode reload` **只重跑 `setup`，不会重新 import 模块**。升级插件要换 `plugins/` 下的目录名，或重启服务（`opencode service restart`） |
+| 放了插件但完全没被加载（无日志、无报错） | npm 方式：确认包名已写进配置 `plugins` 数组（`opencode plugin list` 可见）。目录方式：确认 `plugins/<名>/index.js` 存在（OpenCode 不读 `package.json#main`） |
+| 改了插件代码不生效 | `opencode reload` **只重跑 `setup`，不会重新 import 同路径模块**。升级插件用 `opencode plugin update opencode-feishu-plugin`，或重启服务（`opencode service restart`） |
 | 出现多个长连接 / 重复回复 | 设置 `gatewayLocation` 为你常用的工作目录（OpenCode 按 location 多次加载全局插件） |
 | 审批卡收不到 | 该会话不是从飞书发起的（无映射）；插件按安全设计不接管 |
 | 点按钮提示凭证无效 | token 过期（默认 10 分钟）或点击者不在白名单 |
