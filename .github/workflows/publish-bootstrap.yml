@@ -1,0 +1,51 @@
+name: Publish to npm (bootstrap via NPM_TOKEN)
+
+# 仅用于「首次发布」。
+#
+# 背景：npm 的 Trusted Publisher（OIDC）只能在**包已存在**后在 npmjs.com 配置，
+# 所以首包必须先走传统 token 认证。流程：
+#   1. 在 npmjs.com 建一个 granular access token（仅 opencode-feishu-plugin 的 publish 权限）；
+#   2. 存入本仓库 Actions secret：`NPM_TOKEN`；
+#   3. Actions 页面手动运行本 workflow（Run workflow）完成 0.1.0 首发；
+#   4. 到 npmjs.com → 包 Settings → Publishing access → Trusted Publisher，
+#      配 GitHub Actions：owner=moyuanhua repo=opencode-feishu-plugin workflow=publish.yml；
+#   5. 删除本文件，之后统一用 publish.yml（tag v* → OIDC + provenance，无需任何 secret）；
+#   6. npmjs 上开启 “Require 2FA and disallow tokens”，并撤销 bootstrap token。
+#
+# 注意：这里**必须**设 registry-url，让 setup-node 把 NODE_AUTH_TOKEN 写进 .npmrc 走 token 认证。
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # provenance 仍需要 OIDC token
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      - name: Install
+        run: npm install --no-audit --no-fund
+
+      - name: Verify (typecheck + build + test)
+        run: |
+          npm run typecheck
+          npm run build
+          npm test
+
+      - name: Publish (bootstrap token)
+        run: npm publish --access public --provenance
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
