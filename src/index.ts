@@ -54,6 +54,7 @@ import { ApprovalManager, decideEffectForSession, type ReplyInput } from "./perm
 import { SessionCommands } from "./session-commands.js";
 import { routeEvent, extractErrorText, type EventRouterDeps } from "./runtime/event-router.js";
 import { routeCardAction } from "./runtime/card-action-router.js";
+import { createTopicStatusController } from "./runtime/topic-status.js";
 import {
   summarizeSession as summarizeSessionImpl,
   type SessionSummaryOutcome,
@@ -196,6 +197,29 @@ async function start(
     sign: (sessionID) => signStop({ sessionID, ttlMs: config.approvalTtlMs }, config.signSecret),
     isRunning: (sessionID) => executions.isRunning(sessionID) || runs.hasActive(sessionID),
     interrupt: (sessionID, reason) => recovery.interrupt(sessionID, reason),
+  });
+
+  /**
+   * 话题根卡工作状态（`topicStatus`，默认开）：header 颜色 + 正文页脚，**标题默认不变**。
+   *
+   * 与运行卡完全独立：只更新会话**最近一次**根卡（`SessionLink.replyMessageId`），
+   * 并用 `SessionMap` 持久化的 `rootCard` 基础内容重渲染 —— 状态刷新**不丢摘要/元信息**。
+   * 无 `rootCard`（旧会话）或无 `replyMessageId`（非飞书会话）时控制器内部跳过。
+   */
+  const topicStatus = createTopicStatusController({
+    log,
+    enabled: config.topicStatus,
+    statusInTitle: config.topicStatusInTitle,
+    throttleMs: config.topicStatusThrottleMs,
+    getRoot: async (sessionID) => {
+      const link = await sessionMap.resolveBySession(sessionID);
+      if (!link?.rootCard || !link.replyMessageId) return undefined;
+      return { base: link.rootCard, messageId: link.replyMessageId };
+    },
+    patch: (messageId, card) => sender.patchCard(messageId, card),
+    ...(config.resumeSummary
+      ? { compactToken: (sessionID: string) => signCompactToken(sessionID, config.signSecret) }
+      : {}),
   });
 
   // 表单（含 question 工具）中继：避免 agent 反问时执行永久挂起。
@@ -750,6 +774,8 @@ async function start(
       log.warn("prompt 发送失败", { sessionID, error: errorMessage(err) });
       // 卡片收尾为失败态，避免页脚永久停在「思考中」。
       runs.apply(sessionID, { type: "execution.failed", error: errorMessage(err) });
+      // 话题根卡同样收尾为失败态（运行卡自身的终态来源之一）。
+      topicStatus.markTerminal(sessionID, "failed");
     }
   }
 
@@ -795,6 +821,7 @@ async function start(
     onFormReplied: (data) => formRelay.onReplied(data),
     onFormCancelled: (data) => formRelay.onCancelled(data),
     notifyFailure: (sessionID, error) => notifyFailure(sessionID, error),
+    onTopicStatus: (event) => topicStatus.onEvent(event),
   };
 
   async function handleEvent(event: { type: string; data: unknown }): Promise<void> {
@@ -865,6 +892,7 @@ async function start(
     await subscription.catch(() => undefined);
     runs.dispose();
     executions.clear();
+    topicStatus.dispose();
     approvals.dispose();
     formRelay.dispose();
     await evaluateRegistration.dispose().catch((err) => log.warn("evaluate hook 释放失败", { error: errorMessage(err) }));
@@ -1141,6 +1169,9 @@ async function patchResumeCompactPendingCard(
 ): Promise<void> {
   const link = await sessionMap.resolveBySession(sessionID);
   const entry = link ? await sessionMap.getSession(link.chatId, sessionID) : undefined;
+  // 根卡基础内容同步进入「压缩中」态，后续状态刷新不会把压缩占位/摘要冲掉。
+  const base = await sessionMap.getRootCard(sessionID);
+  if (base) await sessionMap.setRootCard(sessionID, { ...base, compactPending: true, compactError: undefined });
   const card = buildResumeCompactPendingCard(entry?.title ?? "", sessionID, token, Date.now());
   const res = await sender.patchCard(messageId, card);
   if (!res.ok) log.warn("压缩中卡片更新失败", { sessionID, error: res.error ?? "unknown" });
@@ -1162,6 +1193,15 @@ async function patchResumeCompactCard(
 ): Promise<void> {
   const link = await sessionMap.resolveBySession(sessionID);
   const entry = link ? await sessionMap.getSession(link.chatId, sessionID) : undefined;
+  const base = await sessionMap.getRootCard(sessionID);
+  if (base) {
+    await sessionMap.setRootCard(
+      sessionID,
+      kind === "completed"
+        ? { ...base, compactPending: false, compactError: undefined, summary, summaryLabel: "已压缩 · 会话摘要" }
+        : { ...base, compactPending: false, compactError: summary },
+    );
+  }
   const card =
     kind === "completed"
       ? buildSessionOpenedCard({

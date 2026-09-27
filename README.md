@@ -21,6 +21,7 @@
 | ✅ **卡片审批** | 权限请求变成飞书卡片（允许一次 / 始终允许 / 拒绝），点击即批准，带签名防伪防重放 |
 | 🪜 **权限预设** | 只读 / 可编辑 / 高风险审批 / 完全信任，四档一次选定，告别逐次审批 |
 | 📊 **实时可见** | 先回执「思考中」，工具调用实时上卡（≥3 个自动折叠），文本流式更新，页脚显示当前模型 |
+| 🚦 **状态一眼看** | 话题根卡按会话状态变色（运行中/待审核/待回复/完成…）+ 正文页脚；标题默认不抖动，摘要不丢 |
 | 🧵 **原生排队** | 会话忙时自动排队（OpenCode 原生 `delivery:"queue"`），不丢消息 |
 | ⏹ **一键强停** | **所有 AI 回复卡片都带「强制停止」按钮**，点击即中断（签名校验：白名单 + HMAC）。卡死会话由看门狗自动中断，不再永久排队 |
 | 🚫 **无端口** | 全程长连接，服务器不用开放任何入站端口 |
@@ -270,6 +271,29 @@ opencode mcp list        # 顺带确认服务健康
 - `/sessions` `/resume` 属主聊天流命令，**话题内被禁用**（会提示回主聊天流）；进入某个话题后无需再敲命令，直接发消息即可。
 - `threadRouting=false`（回退模式）下不支持进入话题 / `/resume`。
 
+### 话题根卡工作状态（颜色 + 页脚）
+
+话题根卡（`/new` 建会话成功卡 / `/resume` 恢复卡）会**实时反映该会话当前在干什么**，让你在话题列表里一眼看出哪些会话需要你：
+
+| 档位 | header 颜色 | 正文页脚 | 触发来源 |
+|---|---|---|---|
+| 🟡 待审核 | `orange` | `🟡 待审核：<工具>` | 有**未答复**的权限请求（`permission.asked`，回复后解除） |
+| 🧠 运行中 | `blue` | `🧠 运行中 · 12:03` | `execution.started` / `session.status(busy\|retry)` 起，终态收 |
+| ⏳ 待回复 | `grey` | `⏳ 待回复（排队 2）` | inbox 有**排队未投递**消息（`inbox.enqueued` / `delivered`） |
+| 🔴 失败 | `red` | `🔴 失败` | 最近终态为失败（`execution.failed` / 运行卡失败收尾） |
+| ⏹ 已中断 | `grey` | `⏹ 已中断` | 最近终态为中断（`execution.interrupted` / `/stop` / 看门狗） |
+| ✅ 完成 | `green` | `✅ 完成` | 空闲 / `execution.succeeded` / `session.status(idle)` |
+
+**优先级（高 → 低）：待审核 > 运行中 > 待回复 > 失败/中断 > 完成。** 「待审核」刻意排在「运行中」之前——卡在审批上时最需要你去点按钮。
+
+- **标题默认不带状态**：话题名会显示在侧栏，随状态频繁变动会很乱。状态只通过 **header 颜色 + 正文页脚**表达；标题保持固定的 `🔄 <会话主题>`（`/new` 创建时为 `✅ 已创建 · <主题>`）。若确实想让标题也带状态 emoji，设 `topicStatusInTitle: true`（如 `🟡 已完成 · 主题`）。
+- **摘要/元信息不会丢**：根卡上可能有会话摘要与目录/模型等元信息，而状态刷新是**整卡 patch**。插件先把根卡的「基础内容」持久化到会话记录（`rootCard`），刷新时用统一构建器**基于基础内容重渲染**再叠加状态，因此状态变化**不会抹掉摘要**。
+- **只更新会话最近一次的根卡**：目标消息 id 是会话记录里的 `replyMessageId`。没有该字段（非飞书会话）或没有基础内容的旧会话 → **跳过**，不会凭空造卡。
+- **节流与容错**：只在**档位变化**时 patch，且两次 patch 至少间隔 `topicStatusThrottleMs`（默认 1s）；patch 失败只 `warn`（用户可能删了卡），**不抛、不重试风暴**，同一会话连续失败达阈值后停止刷新并记日志。
+- 与每条消息那张**运行卡**完全独立：状态刷新只碰话题根卡，不影响运行卡既有的流式行为。
+
+配置：`topicStatus`（默认 `true`，关闭则完全不刷新）、`topicStatusInTitle`（默认 `false`）、`topicStatusThrottleMs`（默认 `1000`，夹取 500–10000）。
+
 ### 四档权限预设
 
 | 档位 | 含义 | 会话级规则 |
@@ -364,6 +388,9 @@ agent 主动调用 `question` 工具（或其它 form 类交互）时，opencode
 | `resumeSummary` | boolean | `true` | 恢复卡是否展示会话摘要（复用原生 compaction 摘要 → 缺失才走快摘要；关闭则完全不生成、也不显示压缩按钮） |
 | `resumeSummaryTimeoutMs` | number | `15000` | 恢复卡**快摘要**生成超时（夹取 3000–60000）；超时按失败处理并降级提示 |
 | `resumeCompactTimeoutMs` | number | `120000` | 恢复卡**用户主动压缩**（`session.compact`）后的轮询超时（夹取 30000–300000）；超时只 patch 说明。压缩是显式操作、会修改会话历史 |
+| `topicStatus` | boolean | `true` | 话题根卡工作状态总开关（颜色 + 页脚）。关闭则完全不刷新根卡状态 |
+| `topicStatusInTitle` | boolean | `false` | 是否在根卡标题加状态 emoji 前缀（如 `🟡 会话名`）。默认关闭：话题名显示在侧栏，频繁变动会很乱 |
+| `topicStatusThrottleMs` | number | `1000` | 根卡状态刷新最小间隔（夹取 500–10000）；仅在档位变化时才 patch |
 
 ---
 
@@ -428,7 +455,7 @@ npm test            # vitest（纯逻辑单测，不连真飞书）
 npm run dev         # tsup --watch
 ```
 
-**架构**：`src/index.ts` 只做装配（配置、gateway、watchdog、hook 注册与 cleanup）；`src/runtime/` 放可单测的事件分发（`event-router.ts`）与卡片回调分流（`card-action-router.ts`）；会话命令编排拆在 `src/session/`（`session-commands.ts` 为薄门面，实现分在 `session-list.ts` / `setup-wizard.ts` / `session-ops.ts` / `model-perm.ts` / `context.ts`）；飞书交互层在 `src/feishu/`（事件解析、卡片构建、话题路由、向导状态机、流式卡片 reducer 等，**以纯函数为主便于单测**）；安全层在 `src/security/`（token 签名、白名单）。
+**架构**：`src/index.ts` 只做装配（配置、gateway、watchdog、hook 注册与 cleanup）；`src/runtime/` 放可单测的事件分发（`event-router.ts`）、卡片回调分流（`card-action-router.ts`）与话题根卡状态接线（`topic-status.ts`）；会话命令编排拆在 `src/session/`（`session-commands.ts` 为薄门面，实现分在 `session-list.ts` / `setup-wizard.ts` / `session-ops.ts` / `model-perm.ts` / `context.ts`，话题状态机在 `topic-status.ts`）；飞书交互层在 `src/feishu/`（事件解析、卡片构建、话题路由、向导状态机、流式卡片 reducer 等，**以纯函数为主便于单测**）；安全层在 `src/security/`（token 签名、白名单）。
 
 **设计要点**：
 - 卡片一律 **JSON 2.0**（按钮直接放 `body.elements`，回调用 `behaviors`；1.0 的 `tag:"action"` 在 2.0 会 400）。表单卡额外约束：`form` 必须在 `body.elements` 根节点、交互组件 `name` 全局唯一、至少一个 `form_action_type:"submit"` 按钮。

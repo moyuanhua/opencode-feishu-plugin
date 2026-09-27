@@ -180,6 +180,17 @@ export async function enterSessionThread(
   await ctx.deps.sessionMap.bindRoot(res.messageId, sessionID);
   ctx.deps.log.info("resume card bound root to session", { sessionID, rootId: res.messageId });
 
+  // 持久化根卡基础内容：工作状态刷新时据此重渲染（不丢摘要/元信息）。
+  await ctx.deps.sessionMap.setRootCard(sessionID, {
+    style: "resumed",
+    sessionID,
+    title: info?.title ?? "",
+    ...(dir ? { dir } : {}),
+    ...(link?.model ? { model: modelLabel(link.model) } : {}),
+    ...(info?.updatedAt ? { updatedAt: info.updatedAt } : {}),
+    ...(showSummary ? { summaryPending: true, compactButton: Boolean(cardInput.compactButton) } : {}),
+  });
+
   // 任务 B：快摘要**火后执行**——先发卡（回调 3 秒内已回 toast），拿到结果再 patch 同一张卡。
   // 刻意**不**在此处触发压缩（压缩会修改会话历史，必须用户主动点按钮）。
   if (showSummary) {
@@ -214,13 +225,19 @@ async function patchResumeSummary(
       timeoutMs: ctx.deps.resumeSummaryTimeoutMs ?? 15_000,
     });
     const summary = outcome.summary ?? "（摘要生成失败，可直接发消息继续）";
+    const summaryLabel = SUMMARY_LABEL[outcome.source] ?? "摘要";
+    // 把摘要写回根卡基础内容：后续工作状态刷新重渲染时摘要不丢。
+    const base = await ctx.deps.sessionMap.getRootCard(sessionID);
+    if (base) {
+      await ctx.deps.sessionMap.setRootCard(sessionID, { ...base, summaryPending: false, summary, summaryLabel });
+    }
     const res = await ctx.deps.sender.patchCard(
       messageId,
       buildSessionOpenedCard({
         ...cardInput,
         summaryPending: false,
         summary,
-        summaryLabel: SUMMARY_LABEL[outcome.source] ?? "摘要",
+        summaryLabel,
       }),
     );
     if (!res.ok) ctx.deps.log.warn("恢复卡摘要更新失败", { sessionID, error: res.error ?? "unknown" });

@@ -111,6 +111,25 @@ export interface ResolvedConfig {
    * 超时只 patch 说明，不影响用户继续在该话题/卡片下干活。
    */
   readonly resumeCompactTimeoutMs: number;
+  /**
+   * 话题根卡工作状态总开关（默认 true）。关闭则完全不刷新根卡状态。
+   *
+   * 状态来源：execution.* / session.status / permission.asked|replied / inbox.* 与运行卡终态。
+   * 只更新该会话最近一次根卡（`SessionLink.replyMessageId`）的 header 颜色 + 正文页脚，
+   * **标题默认不变**（见 `topicStatusInTitle`），且刷新时用持久化的基础内容重渲染，**不丢摘要/元信息**。
+   */
+  readonly topicStatus: boolean;
+  /**
+   * 是否在根卡标题里加状态 emoji 前缀（默认 false）。
+   *
+   * 默认关闭：话题名会显示在侧栏，随状态频繁变动会很乱——状态只通过 header 颜色 + 正文页脚表达。
+   */
+  readonly topicStatusInTitle: boolean;
+  /**
+   * 话题根卡状态刷新的最小间隔（默认 1000ms，夹取 500–10000）。
+   * 仅在状态档位发生变化时才 patch，且两次 patch 至少间隔该时长。
+   */
+  readonly topicStatusThrottleMs: number;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -178,6 +197,9 @@ export function resolveConfig(
   const resumeSummary = asBoolean(merged.resumeSummary, true);
   const resumeSummaryTimeoutMs = clamp(asNumber(merged.resumeSummaryTimeoutMs, 15_000), 3_000, 60_000);
   const resumeCompactTimeoutMs = clamp(asNumber(merged.resumeCompactTimeoutMs, 120_000), 30_000, 300_000);
+  const topicStatus = asBoolean(merged.topicStatus, true);
+  const topicStatusInTitle = asBoolean(merged.topicStatusInTitle, false);
+  const topicStatusThrottleMs = clamp(asNumber(merged.topicStatusThrottleMs, 1_000), 500, 10_000);
   const domain = merged.domain === "lark" ? "lark" : "feishu";
   const logFile = resolveLogFile(merged.logFile, env, deps);
   const gatewayLocation = asString(merged.gatewayLocation).trim() || undefined;
@@ -226,6 +248,9 @@ export function resolveConfig(
     resumeSummary,
     resumeSummaryTimeoutMs,
     resumeCompactTimeoutMs,
+    topicStatus,
+    topicStatusInTitle,
+    topicStatusThrottleMs,
   };
 }
 

@@ -10,7 +10,13 @@
  * 内存缓存用于 `permission.evaluate` 这种热路径同步判定是否存在可用投递目标。
  */
 import { errorMessage } from "../logger.js";
-import type { Logger, SessionLink, StorageLike, ThreadLink } from "../types.js";
+import type {
+  Logger,
+  SessionLink,
+  SessionRootCardBase,
+  StorageLike,
+  ThreadLink,
+} from "../types.js";
 
 export const CHAT_KEY_PREFIX = "feishu:v2:chat:";
 export const SESSION_KEY_PREFIX = "feishu:v2:session:";
@@ -290,6 +296,20 @@ export class SessionMap {
     await this.addSession(chatId, sessionID, "", openId);
   }
 
+  /**
+   * 写入 / 清除该会话的**话题根卡基础内容**（工作状态刷新用，见 `types.SessionRootCardBase`）。
+   * 会话不存在返回 false（不凭空造卡）。
+   */
+  async setRootCard(sessionID: string, base: SessionRootCardBase | undefined): Promise<boolean> {
+    return this.setSessionMeta(sessionID, { rootCard: base });
+  }
+
+  /** 读取该会话的话题根卡基础内容（无则 undefined，状态刷新将跳过）。 */
+  async getRootCard(sessionID: string): Promise<SessionRootCardBase | undefined> {
+    const link = await this.resolveBySession(sessionID);
+    return link?.rootCard;
+  }
+
   private remember(sessionID: string, link: SessionLink): void {
     this.sessionToChat.set(sessionID, link);
   }
@@ -388,6 +408,7 @@ function serializeSession(link: SessionLink): {
   dir?: string;
   model?: SessionLink["model"];
   allowActions?: readonly string[];
+  rootCard?: SessionRootCardBase;
 } {
   return {
     chatId: link.chatId,
@@ -398,6 +419,7 @@ function serializeSession(link: SessionLink): {
     ...(link.dir ? { dir: link.dir } : {}),
     ...(link.model ? { model: link.model } : {}),
     ...(link.allowActions && link.allowActions.length > 0 ? { allowActions: [...link.allowActions] } : {}),
+    ...(link.rootCard ? { rootCard: link.rootCard } : {}),
   };
 }
 
@@ -413,6 +435,7 @@ function parseSessionLink(value: unknown): SessionLink | undefined {
   const dir = str(value.dir);
   const model = parseModelRef(value.model);
   const allowActions = parseStringArray(value.allowActions);
+  const rootCard = parseRootCard(value.rootCard);
   return {
     chatId,
     openId,
@@ -422,6 +445,41 @@ function parseSessionLink(value: unknown): SessionLink | undefined {
     ...(dir ? { dir } : {}),
     ...(model ? { model } : {}),
     ...(allowActions.length > 0 ? { allowActions } : {}),
+    ...(rootCard ? { rootCard } : {}),
+  };
+}
+
+/** 解析 `SessionLink.rootCard`（话题根卡基础内容）；非法返回 undefined（状态刷新将跳过）。 */
+function parseRootCard(value: unknown): SessionRootCardBase | undefined {
+  if (!isRecord(value)) return undefined;
+  const style = value.style === "created" || value.style === "resumed" ? value.style : undefined;
+  const sessionID = str(value.sessionID);
+  if (!style || !sessionID) return undefined;
+  const title = str(value.title);
+  const dir = str(value.dir);
+  const model = str(value.model);
+  const perm = str(value.perm);
+  const summary = str(value.summary);
+  const summaryLabel = str(value.summaryLabel);
+  const compactError = str(value.compactError);
+  const note = str(value.note);
+  const updatedAt =
+    typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt) ? value.updatedAt : undefined;
+  return {
+    style,
+    sessionID,
+    title,
+    ...(dir ? { dir } : {}),
+    ...(model ? { model } : {}),
+    ...(perm ? { perm } : {}),
+    ...(updatedAt ? { updatedAt } : {}),
+    ...(summary ? { summary } : {}),
+    ...(summaryLabel ? { summaryLabel } : {}),
+    ...(value.summaryPending === true ? { summaryPending: true } : {}),
+    ...(value.compactPending === true ? { compactPending: true } : {}),
+    ...(compactError ? { compactError } : {}),
+    ...(value.compactButton === true ? { compactButton: true } : {}),
+    ...(note ? { note } : {}),
   };
 }
 

@@ -118,6 +118,42 @@ export interface WizardState {
   readonly anchorMessageId?: string;
 }
 
+/**
+ * 话题根卡的**基础内容**（持久化在 `SessionLink.rootCard`）。
+ *
+ * 根卡上可能承载摘要与元信息；状态刷新是**整卡 patch**，因此必须先把基础内容存下来，
+ * 再用统一构建器 `buildSessionRootCard(base, status)` 重渲染，保证刷新不丢摘要/元信息。
+ *
+ * `style`：
+ * - `created`：`/new` 建会话成功卡（标题 `✅ 已创建 · <主题>`），话题根；
+ * - `resumed`：`/sessions` `/resume` 恢复卡（标题 `🔄 <主题>`），回复即续聊。
+ */
+export interface SessionRootCardBase {
+  readonly style: "created" | "resumed";
+  readonly sessionID: string;
+  /** 会话原始主题（标题由构建器加前缀，见各 style）。 */
+  readonly title: string;
+  readonly dir?: string;
+  readonly model?: string;
+  /** 权限档位展示名（仅 created）。 */
+  readonly perm?: string;
+  /** 最近活动时间（仅 resumed）。 */
+  readonly updatedAt?: number;
+  /** 会话摘要（复用原生 compaction 摘要 / 快摘要 / 已压缩）。 */
+  readonly summary?: string;
+  readonly summaryLabel?: string;
+  /** 摘要生成中占位（subscription 完成前）。 */
+  readonly summaryPending?: boolean;
+  /** 压缩进行中占位。 */
+  readonly compactPending?: boolean;
+  /** 压缩失败/超时说明。 */
+  readonly compactError?: string;
+  /** 是否渲染「🗜 压缩并总结」按钮（token 每次渲染重签，不落盘）。 */
+  readonly compactButton?: boolean;
+  /** 额外说明（created 自动开话题失败时的手动指引）。 */
+  readonly note?: string;
+}
+
 /** 会话 ↔ 飞书会话映射，持久化在 ctx.storage。 */
 export interface SessionLink {
   readonly chatId: string;
@@ -141,6 +177,11 @@ export interface SessionLink {
    * 由审批卡「✅ 本会话内允许该工具」写入；`permission.evaluate` gate 命中即**不降级为 ask**。
    */
   readonly allowActions?: readonly string[];
+  /**
+   * 话题根卡的基础内容（工作状态刷新用）。
+   * 根卡创建时与摘要/压缩 patch 时写入，状态刷新据此重渲染，**不丢摘要/元信息**。
+   */
+  readonly rootCard?: SessionRootCardBase;
 }
 
 /** 话题 / 话题根 → 会话映射（P5：话题 = 会话）。 */

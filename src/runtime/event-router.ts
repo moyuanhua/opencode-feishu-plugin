@@ -29,12 +29,20 @@ export interface EventRouterDeps {
   readonly onFormCancelled: (data: unknown) => void;
   /** `session.execution.failed` 的失败通知（原 `notifyFailure`）。 */
   readonly notifyFailure: (sessionID: string, error: unknown) => Promise<void>;
+  /**
+   * 任意事件都下发给话题状态控制器（可选，缺省不影响既有行为）。
+   * 话题根卡状态需要 permission / inbox / status 等**非 run 事件**，故在 switch 之前统一派发。
+   */
+  readonly onTopicStatus?: (event: { type: string; data: unknown }) => void;
 }
 
 export async function routeEvent(
   event: { type: string; data: unknown },
   deps: EventRouterDeps,
 ): Promise<void> {
+  // 话题根卡工作状态：在 run/text 事件归一之前先下发（控制器自行过滤无关事件）。
+  deps.onTopicStatus?.(event);
+
   // 任意 session 事件都刷新活动时间，避免看门狗误杀仍在产出的事件流。
   const touched = (event.data as { sessionID?: unknown } | undefined)?.sessionID;
   if (typeof touched === "string") deps.touch(touched);

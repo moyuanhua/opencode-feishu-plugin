@@ -21,6 +21,7 @@ Bring [OpenCode](https://opencode.ai) into Feishu/Lark: **one Feishu topic = one
 | ✅ **In-card approvals** | Permission requests become Feishu cards (allow once / always / reject) with signed, replay-proof buttons |
 | 🪜 **Permission presets** | Read-only / Editable / Ask-on-risky / Trust — pick once per session instead of approving every call |
 | 📊 **Live visibility** | Instant ack card, live tool calls (auto-collapsed when ≥3), streaming text, current model in the footer |
+| 🚦 **Status at a glance** | The topic root card changes colour by session state (running/review/pending/done…) with a body footer; the title stays stable and the summary is preserved |
 | 🧵 **Native queueing** | Busy session → messages queue via OpenCode's native `delivery:"queue"` |
 | ⏹ **One-tap force stop** | **Every AI reply card carries a "force stop" button** — one tap interrupts (whitelist + HMAC signed). The watchdog auto-interrupts stuck sessions instead of queueing forever |
 | 🚫 **No ports** | Everything over a long connection; nothing to expose |
@@ -270,6 +271,29 @@ Besides sessions created from Feishu, you can **load any past OpenCode session v
 - `/sessions` and `/resume` are main-chat commands and are **disabled inside topics** (they tell you to go back); once inside a topic just send plain text.
 - With `threadRouting=false` (fallback mode), entering topics and `/resume` are unsupported.
 
+### Topic root card status (colour + footer)
+
+The topic root card (the `/new` created card / the `/resume` resume card) reflects what the session is doing, so you can tell at a glance which sessions need you:
+
+| Kind | Header colour | Footer | Trigger |
+|---|---|---|---|
+| 🟡 Review | `orange` | `🟡 待审核：<tool>` | an **unanswered** permission request (`permission.asked`; cleared on reply) |
+| 🧠 Running | `blue` | `🧠 运行中 · 12:03` | `execution.started` / `session.status(busy\|retry)`, until a terminal event |
+| ⏳ Pending | `grey` | `⏳ 待回复（排队 2）` | the inbox has **queued, not-yet-delivered** messages (`inbox.enqueued` / `delivered`) |
+| 🔴 Failed | `red` | `🔴 失败` | the most recent terminal state was failure (`execution.failed` / run-card failure) |
+| ⏹ Interrupted | `grey` | `⏹ 已中断` | the most recent terminal state was interruption (`execution.interrupted` / `/stop` / watchdog) |
+| ✅ Done | `green` | `✅ 完成` | idle / `execution.succeeded` / `session.status(idle)` |
+
+**Priority (high → low): Review > Running > Pending > Failed/Interrupted > Done.** "Review" is deliberately ranked above "Running": when the session is blocked on an approval, that is exactly when you need to tap the button.
+
+- **The title carries no status by default**: the topic name shows up in the sidebar, and changing it on every status flip is noisy. Status is expressed only via the **header colour + body footer**; the title stays `🔄 <session topic>` (or `✅ 已创建 · <topic>` for a freshly created session). If you really want the status emoji in the title, set `topicStatusInTitle: true` (e.g. `🟡 已完成 · topic`).
+- **The summary/metadata is never lost**: a root card may carry a session summary plus directory/model metadata, and a status refresh is a **whole-card patch**. The plugin first persists the card's "base content" in the session record (`rootCard`) and, on refresh, re-renders from that base with the shared builder before layering the status on top — so a status change **never wipes the summary**.
+- **Only the session's latest root card is updated**: the target message id is the session's `replyMessageId`. A session without it (non-Feishu) or without base content (old session) is **skipped**; the plugin never fabricates a card.
+- **Throttling and fault tolerance**: the card is patched only when the **kind changes**, at most once per `topicStatusThrottleMs` (default 1s). A failed patch only logs a `warn` (the user may have deleted the card) — it never throws or retries in a storm; after repeated consecutive failures for a session the plugin stops refreshing it and logs why.
+- This is fully independent from the per-message **run card**: a status refresh only touches the topic root card and does not change the run card's streaming behaviour.
+
+Config: `topicStatus` (default `true`; disable to stop refreshing entirely), `topicStatusInTitle` (default `false`), `topicStatusThrottleMs` (default `1000`, clamped 500–10000).
+
 ### Permission presets
 
 | Preset | Meaning | Session ruleset |
@@ -358,6 +382,9 @@ Without this relay, any clarifying question would stall the Feishu session forev
 | `resumeSummary` | boolean | `true` | Show a summary on the resume card (reuse a native compaction summary first, else the fast summary; disabling also removes the compact button) |
 | `resumeSummaryTimeoutMs` | number | `15000` | Resume-card **fast summary** timeout (clamped 3000–60000); a timeout is treated as failure and degrades gracefully |
 | `resumeCompactTimeoutMs` | number | `120000` | Poll timeout after a **user-initiated** compaction (`session.compact`), clamped 30000–300000; a timeout only patches an explanation. Compaction is explicit and rewrites session history |
+| `topicStatus` | boolean | `true` | Topic root card status master switch (colour + footer). Disable to stop refreshing entirely |
+| `topicStatusInTitle` | boolean | `false` | Add a status emoji prefix to the root card title (e.g. `🟡 session name`). Off by default: the topic name shows in the sidebar, and flipping it would be noisy |
+| `topicStatusThrottleMs` | number | `1000` | Min root-card status refresh interval (clamped 500–10000); patched only when the kind changes |
 
 ---
 

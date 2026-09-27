@@ -14,6 +14,13 @@
 import { truncateCardContent, type CardTemplate } from "./cards.js";
 import { shortSessionId } from "./commands.js";
 import { directoryTail, relativeTime } from "./session-list.js";
+import {
+  topicStatusFooter,
+  topicStatusMeta,
+  topicStatusTitle,
+  type TopicStatusView,
+} from "../session/topic-status.js";
+import type { SessionRootCardBase } from "../types.js";
 
 /** 列表中的一行（序号为全局 1-based，跨页连续）。 */
 export interface SessionListRow {
@@ -178,6 +185,102 @@ export interface SessionOpenedCompactButton {
 }
 
 /**
+ * **统一的话题根卡构建器**：`created` / `resumed` 两种风格 + 可选工作状态。
+ *
+ * - 构建 / 状态刷新**共用**本函数：先用持久化的 `SessionRootCardBase` 还原摘要与元信息，
+ *   再叠加状态（颜色 + 页脚），从而保证状态刷新**不会丢摘要**。
+ * - `status` 缺省 = 不渲染状态页脚、header 保持 `green`（创建/旧卡片兼容路径）。
+ * - 标题默认原样（`topicStatusInTitle=false`）；开启时加状态 emoji 前缀。
+ */
+export function buildSessionRootCard(
+  base: SessionRootCardBase,
+  status?: TopicStatusView,
+  options: {
+    readonly now?: number;
+    readonly statusInTitle?: boolean;
+    /** 状态刷新时重签的压缩按钮 token（不落盘）。 */
+    readonly compactToken?: string;
+  } = {},
+): object {
+  const now = options.now ?? Date.now();
+  const elements: object[] = [];
+  let headerTitle: string;
+
+  if (base.style === "created") {
+    const title = base.title.trim() || "(未命名)";
+    headerTitle = `✅ 已创建 · ${title}`;
+    elements.push({ tag: "markdown", content: truncateCardContent(renderCreatedBody(title, base)) });
+  } else {
+    const title = truncateTitle(base.title.trim() || "(未命名)");
+    headerTitle = `🔄 ${title}`;
+    elements.push({ tag: "markdown", content: truncateCardContent(renderResumedBody(title, base, now)) });
+    if (base.compactButton && options.compactToken) {
+      // 「🗜 压缩并总结」按钮直放 body.elements（JSON 2.0 不支持 1.0 的 tag:"action" 容器）。
+      elements.push(
+        button("🗜 压缩并总结", "default", {
+          cmd: "compact",
+          s: base.sessionID,
+          t: options.compactToken,
+        }),
+      );
+    }
+  }
+
+  if (status) {
+    elements.push({ tag: "markdown", content: topicStatusFooter(status, now), text_size: "notation" });
+  }
+
+  const template: CardTemplate = status ? topicStatusMeta(status.kind).color : "green";
+  const content =
+    status && options.statusInTitle ? topicStatusTitle(headerTitle, status, true) : headerTitle;
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    header: { title: { tag: "plain_text", content }, template },
+    body: { elements },
+  };
+}
+
+/** `resumed` 风格正文（恢复卡）。 */
+function renderResumedBody(title: string, base: SessionRootCardBase, now: number): string {
+  const lines = [`会话「${title}」：\`${base.sessionID}\``];
+  const setup: string[] = [];
+  if (base.dir) setup.push(`- 目录：\`${base.dir}\``);
+  if (base.model) setup.push(`- 模型：${base.model}`);
+  if (base.updatedAt && base.updatedAt > 0) {
+    setup.push(`- 最近活动：${relativeTime(base.updatedAt, now)}`);
+  }
+  if (setup.length > 0) lines.push("", ...setup);
+  lines.push("", "**回复本卡片**即可继续这个历史会话（飞书回复会在本卡下形成话题）。");
+  if (base.summary || base.summaryPending || base.compactPending || base.compactError) {
+    lines.push("", `**${base.summaryLabel ?? "摘要"}**：`);
+    if (base.summaryPending) lines.push("⏳ 正在总结该会话…");
+    if (base.compactPending) lines.push("🗜 正在压缩会话…（压缩会修改会话历史，请稍候）");
+    if (base.summary) lines.push(base.summary);
+    if (base.compactError) lines.push(base.compactError);
+  }
+  lines.push(
+    "",
+    "话题内可用：`/current` `/stop` `/model` `/perm` `/cd` `/help`。",
+    "会话管理（`/new` `/sessions` `/resume`）请回到主聊天流。",
+  );
+  return lines.join("\n");
+}
+
+/** `created` 风格正文（建会话成功卡）。 */
+function renderCreatedBody(title: string, base: SessionRootCardBase): string {
+  const lines = [`会话「${title}」已创建：\`${base.sessionID}\``];
+  const setup: string[] = [];
+  if (base.dir) setup.push(`- 目录：\`${base.dir}\``);
+  if (base.model) setup.push(`- 模型：${base.model}`);
+  if (base.perm) setup.push(`- 权限：${base.perm}`);
+  if (setup.length > 0) lines.push("", ...setup);
+  lines.push("", "点进本话题直接发消息即可，OpenCode 就在这个会话里干活。");
+  if (base.note) lines.push("", base.note);
+  return lines.join("\n");
+}
+
+/**
  * 「进入话题 / 恢复会话」成功卡（P7 + 任务 B）：`reply_in_thread` 落到新话题内，是话题的根卡。
  *
  * 标题 = `🔄 <会话标题>`（截断保护），因此**话题显示名就是会话主题**；
@@ -209,45 +312,24 @@ export function buildSessionOpenedCard(input: {
   /** 「🗜 压缩并总结」按钮（用户主动触发原生压缩）。 */
   readonly compactButton?: SessionOpenedCompactButton;
 }): object {
-  const title = truncateTitle(input.title.trim() || "(未命名)");
-  const lines = [`会话「${title}」：\`${input.sessionID}\``];
-  const setup: string[] = [];
-  if (input.dir) setup.push(`- 目录：\`${input.dir}\``);
-  if (input.model) setup.push(`- 模型：${input.model}`);
-  if (input.updatedAt && input.updatedAt > 0) {
-    setup.push(`- 最近活动：${relativeTime(input.updatedAt, input.now ?? Date.now())}`);
-  }
-  if (setup.length > 0) lines.push("", ...setup);
-  lines.push("", "**回复本卡片**即可继续这个历史会话（飞书回复会在本卡下形成话题）。");
-  if (input.summary || input.summaryPending || input.compactPending || input.compactError) {
-    lines.push("", `**${input.summaryLabel ?? "摘要"}**：`);
-    if (input.summaryPending) lines.push("⏳ 正在总结该会话…");
-    if (input.compactPending) lines.push("🗜 正在压缩会话…（压缩会修改会话历史，请稍候）");
-    if (input.summary) lines.push(input.summary);
-    if (input.compactError) lines.push(input.compactError);
-  }
-  lines.push(
-    "",
-    "话题内可用：`/current` `/stop` `/model` `/perm` `/cd` `/help`。",
-    "会话管理（`/new` `/sessions` `/resume`）请回到主聊天流。",
-  );
-  const elements: object[] = [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }];
-  // 「🗜 压缩并总结」按钮直放 body.elements（JSON 2.0 不支持 1.0 的 tag:"action" 容器）。
-  if (input.compactButton) {
-    elements.push(
-      button("🗜 压缩并总结", "default", {
-        cmd: "compact",
-        s: input.compactButton.sessionID,
-        t: input.compactButton.token,
-      }),
-    );
-  }
-  return {
-    schema: "2.0",
-    config: { update_multi: true },
-    header: { title: { tag: "plain_text", content: `🔄 ${title}` }, template: "green" },
-    body: { elements },
+  const base: SessionRootCardBase = {
+    style: "resumed",
+    title: input.title,
+    sessionID: input.sessionID,
+    ...(input.dir ? { dir: input.dir } : {}),
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.updatedAt ? { updatedAt: input.updatedAt } : {}),
+    ...(input.summary ? { summary: input.summary } : {}),
+    ...(input.summaryLabel ? { summaryLabel: input.summaryLabel } : {}),
+    ...(input.summaryPending ? { summaryPending: true } : {}),
+    ...(input.compactPending ? { compactPending: true } : {}),
+    ...(input.compactError ? { compactError: input.compactError } : {}),
+    ...(input.compactButton ? { compactButton: true } : {}),
   };
+  return buildSessionRootCard(base, undefined, {
+    now: input.now ?? Date.now(),
+    ...(input.compactButton ? { compactToken: input.compactButton.token } : {}),
+  });
 }
 
 /** 恢复卡「🗜 压缩并总结」的**待压缩态**卡片（点击后立刻反馈）。
@@ -339,23 +421,15 @@ export interface SessionCreatedCardInput {
  * 正文包含会话 ID / 目录 / 模型 / 权限与「点进话题直接发消息即可」的指引。
  */
 export function buildSessionCreatedCard(input: SessionCreatedCardInput): object {
-  const title = input.title.trim() || "(未命名)";
-  const lines = [`会话「${title}」已创建：\`${input.sessionID}\``];
-  const setup: string[] = [];
-  if (input.dir) setup.push(`- 目录：\`${input.dir}\``);
-  if (input.model) setup.push(`- 模型：${input.model}`);
-  if (input.perm) setup.push(`- 权限：${input.perm}`);
-  if (setup.length > 0) lines.push("", ...setup);
-  lines.push("", "点进本话题直接发消息即可，OpenCode 就在这个会话里干活。");
-  if (input.note) lines.push("", input.note);
-  return {
-    schema: "2.0",
-    config: { update_multi: true },
-    header: { title: { tag: "plain_text", content: `✅ 已创建 · ${title}` }, template: "green" },
-    body: {
-      elements: [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }],
-    },
-  };
+  return buildSessionRootCard({
+    style: "created",
+    title: input.title,
+    sessionID: input.sessionID,
+    ...(input.dir ? { dir: input.dir } : {}),
+    ...(input.model ? { model: input.model } : {}),
+    ...(input.perm ? { perm: input.perm } : {}),
+    ...(input.note ? { note: input.note } : {}),
+  });
 }
 
 function truncateTitle(title: string, max = 30): string {

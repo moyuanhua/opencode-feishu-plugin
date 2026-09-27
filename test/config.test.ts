@@ -168,6 +168,22 @@ describe("resolveConfig", () => {
     expect(resolve({ appId: "a", appSecret: "s", resumeCompactTimeoutMs: 999_999 }, {}).resumeCompactTimeoutMs).toBe(300_000);
     expect(resolve({ appId: "a", appSecret: "s", resumeCompactTimeoutMs: 60_000 }, {}).resumeCompactTimeoutMs).toBe(60_000);
   });
+
+  test("话题根卡状态：topicStatus 默认 true、topicStatusInTitle 默认 false", () => {
+    const base = resolve({ appId: "a", appSecret: "s" }, {});
+    expect(base.topicStatus).toBe(true);
+    expect(base.topicStatusInTitle).toBe(false);
+    expect(resolve({ appId: "a", appSecret: "s", topicStatus: false }, {}).topicStatus).toBe(false);
+    expect(resolve({ appId: "a", appSecret: "s", topicStatus: "false" }, {}).topicStatus).toBe(false);
+    expect(resolve({ appId: "a", appSecret: "s", topicStatusInTitle: true }, {}).topicStatusInTitle).toBe(true);
+  });
+
+  test("话题根卡状态：topicStatusThrottleMs 默认 1000，夹取 500–10000", () => {
+    expect(resolve({ appId: "a", appSecret: "s" }, {}).topicStatusThrottleMs).toBe(1_000);
+    expect(resolve({ appId: "a", appSecret: "s", topicStatusThrottleMs: 1 }, {}).topicStatusThrottleMs).toBe(500);
+    expect(resolve({ appId: "a", appSecret: "s", topicStatusThrottleMs: 99_999 }, {}).topicStatusThrottleMs).toBe(10_000);
+    expect(resolve({ appId: "a", appSecret: "s", topicStatusThrottleMs: 2_500 }, {}).topicStatusThrottleMs).toBe(2_500);
+  });
 });
 
 describe("resolveConfig 配置文件回退", () => {

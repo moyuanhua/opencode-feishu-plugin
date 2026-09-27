@@ -86,6 +86,18 @@ describe("routeEvent", () => {
     expect(deps.markStarted).not.toHaveBeenCalled();
     expect(deps.markEnded).not.toHaveBeenCalled();
   });
+
+  test("onTopicStatus：任意事件都先下发话题状态控制器（含被 switch 忽略的事件）", async () => {
+    const onTopicStatus = vi.fn();
+    const deps = makeDeps({ onTopicStatus });
+    await routeEvent({ type: "session.inbox.enqueued", data: { sessionID: "s1", inboxID: "i1" } }, deps);
+    await routeEvent({ type: "no.such.event", data: { sessionID: "s1" } }, deps);
+    expect(onTopicStatus).toHaveBeenCalledTimes(2);
+    expect(onTopicStatus).toHaveBeenNthCalledWith(1, {
+      type: "session.inbox.enqueued",
+      data: { sessionID: "s1", inboxID: "i1" },
+    });
+  });
 });
 
 describe("extractErrorText / contentToText", () => {

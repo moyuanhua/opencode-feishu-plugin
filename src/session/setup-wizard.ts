@@ -538,6 +538,16 @@ async function createSessionFromSetup(
     ctx.deps.log.warn("一键开话题后未读到 thread_id，该会话暂无法自动路由", { messageId: res.messageId });
   }
 
+  // 持久化根卡基础内容：工作状态刷新时据此重渲染（不丢摘要/元信息）。
+  await ctx.deps.sessionMap.setRootCard(created.id, {
+    style: "created",
+    sessionID: created.id,
+    title,
+    dir,
+    ...(model ? { model: modelLabel(model) } : {}),
+    perm: presetLabel(perm),
+  });
+
   // 把表单卡改写成成功卡：标题 `✅ 已创建 · <会话标题>`，作为话题显示名。
   await ctx.patchCard(
     action.messageId,

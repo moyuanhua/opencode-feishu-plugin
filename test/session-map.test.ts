@@ -301,4 +301,44 @@ describe("SessionMap 会话元数据（P6）", () => {
     expect(map.getLink("ses_1")?.allowActions).toBeUndefined();
     expect((storage.raw(`${SESSION_KEY_PREFIX}ses_1`) as { allowActions?: string[] }).allowActions).toBeUndefined();
   });
+
+  test("话题根卡 rootCard：持久化 + 冷启动回填 + setRootCard/getRootCard", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.addSession("oc_1", "ses_1", "t", "ou_1");
+    await map.bindThread("omt_1", "ses_1", "oc_1", "ou_1", "om_root");
+
+    const base = {
+      style: "resumed" as const,
+      sessionID: "ses_1",
+      title: "我的项目",
+      dir: "/home/ubuntu/work/app",
+      model: "Claude",
+      summary: "1. 目标",
+      summaryLabel: "会话摘要",
+      compactButton: true,
+    };
+    expect(await map.setRootCard("ses_1", base)).toBe(true);
+    expect(await map.getRootCard("ses_1")).toEqual(base);
+    expect(map.getLink("ses_1")?.rootCard).toEqual(base);
+
+    // 冷启动回填
+    const fresh = new SessionMap(storage, log);
+    expect(await fresh.getRootCard("ses_1")).toEqual(base);
+
+    // 非法 rootCard（缺 style/sessionID）被丢弃
+    storage.seed(`${SESSION_KEY_PREFIX}ses_2`, {
+      chatId: "oc_1",
+      openId: "ou_1",
+      rootCard: { title: "no style/id" },
+    });
+    const map2 = new SessionMap(storage, log);
+    expect(await map2.getRootCard("ses_2")).toBeUndefined();
+
+    // setRootCard(undefined) 删除
+    expect(await map.setRootCard("ses_1", undefined)).toBe(true);
+    expect(await map.getRootCard("ses_1")).toBeUndefined();
+    // 未知会话不凭空造卡
+    expect(await map.setRootCard("ses_x", base)).toBe(false);
+  });
 });
