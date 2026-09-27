@@ -631,8 +631,10 @@ async function start(
     // ── 普通文本 ────────────────────────────────────────────────────────
     const hasThread = Boolean(message.threadId);
     let threadLink = hasThread ? await sessionMap.resolveByThread(message.threadId!) : undefined;
+    // root 兜底**不限于**有 threadId：飞书"话题的第一条消息"事件可能不带 thread_id，
+    // 只带 root_id（= 被回复的消息）。恢复卡就是靠"用户回复卡片"这条路进入会话的。
     const rootLink =
-      hasThread && !threadLink && message.rootId ? await sessionMap.resolveByRoot(message.rootId) : undefined;
+      !threadLink && message.rootId ? await sessionMap.resolveByRoot(message.rootId) : undefined;
 
     const decision = decideRoute({
       hasThread,
@@ -653,8 +655,14 @@ async function start(
       if (!sessionID) return; // 理论不可达
       const anchor = message.rootId ?? message.messageId;
       // root 命中：补写 thread 映射；thread 命中但缺锚点时补齐锚点（审批卡出站需要）。
+      // 话题首条消息可能只带 root_id（无 thread_id）→ 读回消息元数据取 thread_id 再补写；
+      // 读不到也不影响本次路由（下一次带 thread_id 的消息会经 root 兜底再补写）。
       if (decision.source === "root" || (threadLink && !threadLink.anchorMessageId)) {
-        await sessionMap.bindThread(message.threadId!, sessionID, message.chatId, message.senderOpenId, anchor);
+        const threadId =
+          message.threadId ?? (rootLink ? (await sender.getMessageMeta(message.messageId))?.threadId : undefined);
+        if (threadId) {
+          await sessionMap.bindThread(threadId, sessionID, message.chatId, message.senderOpenId, anchor);
+        }
       }
       log.debug("话题路由命中会话", { source: decision.source, sessionID, threadId: message.threadId });
       // 若该会话有「等待自由文本」的表单字段，这条文本作为答案消费，不再当 prompt。

@@ -135,7 +135,7 @@ The main chat is management-only; plain text never enters a session.
 | `/form [title]` | Same as `/new` — an equivalent entry point |
 | `/sessions` (`/ls`) | **All** sessions card: each row shows title / short id / relative time / `💬 topic-bound` / `📍 directory`, with a "▶️ Enter topic" button; 8 per page (`sessionPageSize`, 5–20) |
 | `/use <n\|id-prefix>` | Switch current session (legacy, kept for compatibility) |
-| `/resume [n]` | **Resume a past session**: enter the most-recently-updated (or the N-th) session by opening a topic |
+| `/resume [n]` | **Resume a past session**: post a "🔄 resume card" in the main chat for the most-recently-updated (or the N-th) session; **reply to that card** to continue |
 | `/current` | Show current session |
 | `/stop` | Interrupt the running task in the current session (every run card also has a "⏹ force stop" button) |
 | `/steer <text>` | Send a message that **cuts in immediately** (steers into the running step instead of queuing) |
@@ -246,16 +246,18 @@ Besides sessions created from Feishu, you can **load any past OpenCode session v
 - **Paging**: 8 per page by default (`sessionPageSize`, clamped 5–20); the bottom buttons flip pages (`{cmd:"list", page:N}`).
 - **"➕ New session"** opens the setup form card (same as `/new` `/form`) instead of creating a session directly.
 
-**"▶️ Enter topic" — wire a past session into a topic**
+**"▶️ Enter topic" — post a resume card in the main chat**
 
 - Tap the button (value `{cmd:"open", s, c}`): first the session is checked for existence (`ctx.session.get`); if missing → toast "session not found" and the list card is patched into a notice.
-- If it exists → `reply_in_thread` on **the list card message you tapped** posts a resume card whose **title is `🔄 <session title>`** (so the **topic name is the session topic**), with the session id / directory / model / last activity / summary in the body; once `thread_id` is obtained the topic ↔ session mapping (plus the topic root) is bound. **Messages you send in that topic then continue this past session** (OpenCode session context is persistent, so this is effectively a resume).
-- **Summary block (task B)**: first **reuse** an existing compaction summary (`ctx.session.context`, **zero model calls**); if none, the card first shows "⏳ summarizing…", then `ctx.session.generate` runs asynchronously and the result is **patched back into the same card**; failure/timeout (`resumeSummaryTimeoutMs`, default 20s) degrades to "(summary generation failed; just send a message to continue)". Disable with `resumeSummary: false`.
+- If it exists → a plain resume card is posted in the **main chat**: **title `🔄 <session title>`**, body contains session id / directory / model / last activity / summary, and **that card message** is recorded as the session's root (`root → session`). **No topic is opened and no `thread_id` is bound at this stage.**
+- **How to continue**: simply **reply to the resume card** (Feishu forms a topic under it) to continue that past session. The user's first reply event **may carry only a `root_id` and no `thread_id`**; the plugin falls back to the `root → session` mapping to route to the session, and once a `thread_id` is available it writes the `thread → session` mapping. Later messages in that topic follow normal topic routing. (OpenCode session context is persistent, so this is effectively a resume.)
+- **Summary block (task B)**: first **reuse** an existing compaction summary (`ctx.session.context`, **zero model calls**); if none, the card first shows "⏳ summarizing…", then `ctx.session.generate` runs asynchronously and the result is **patched back into the same resume card**; failure/timeout (`resumeSummaryTimeoutMs`, default 20s) degrades to "(summary generation failed; just send a message to continue)". Disable with `resumeSummary: false`.
+- Only the clicked session is affected: the card binds just that session's root; other sessions' mappings are untouched.
 - For an already topic-bound session the button becomes "▶️ New topic" — **one session can be routed from several topics** (each topic has its own conversation context; replies land in the triggering topic).
 
 **`/resume [n]` — skip the list**
 
-- `/resume` runs the same "enter topic" flow for the **most recently updated** session; `/resume 3` picks the 3rd row. An out-of-range index reports the valid range.
+- `/resume` runs the same "post a resume card" flow for the **most recently updated** session; `/resume 3` picks the 3rd row. An out-of-range index reports the valid range. It is the same resume card — **reply to it** to continue.
 - It uses the same ordering as `/sessions` (`time.updated` desc).
 
 **Limitations**
@@ -437,7 +439,7 @@ This plugin targets **OpenCode V2 only** (`@opencode/plugin`, `Plugin.define`). 
 - There is a single main path for creating sessions: the **`/new` / `/form` setup form card**; `/dir` `/model` `/perm` only pre-fill the form. The old directory/model/permissions/confirm step cards are retired from `/new` (their builders and compatibility callbacks remain, marked deprecated).
 - The form is JSON 2.0 (`form` at the root of `body.elements`, globally unique interactive `name`s, a submit button with `form_action_type:"submit"`); some older clients require `select_static` ≥ V3.7.0.
 
-- **A topic's first message may omit `thread_id`**: Feishu sometimes delivers the event without `thread_id` (it is assigned afterwards). If you send a main-chat-only command such as `/new` at that moment, it runs as a main-chat command (e.g. the form card lands in the main chat). Just continue inside the topic with a normal message.
+- **A topic's first message may omit `thread_id`**: Feishu sometimes delivers the event without `thread_id` (it is assigned afterwards). When you **reply to a card that has a root mapping** (e.g. a resume card), the plugin falls back to the `root_id` to route to the corresponding session and writes the topic mapping once a `thread_id` is available. However, for a **brand-new topic** whose event omits `thread_id`, a main-chat-only command such as `/new` sent at that moment runs as a main-chat command (e.g. the form card lands in the main chat). Just continue inside the topic with a normal message.
 
 
 > Publishing tip: `npm publish` triggers `prepublishOnly` (typecheck + build + test). If `node_modules` is missing it **runs `npm ci` first**, so a fresh clone can be published directly without a manual install.

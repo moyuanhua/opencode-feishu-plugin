@@ -320,7 +320,7 @@ describe("index 话题路由（集成）", () => {
     expect(mismatch.toast.content).toContain("session-mismatch");
   });
 
-  test("进入历史会话：open 动作 reply_in_thread → 绑定 thread/root → 话题内消息续上", async () => {
+  test("进入历史会话：主聊天流发恢复卡 + 绑 root → 回复卡片（仅 root_id）路由并补写 thread", async () => {
     sessionListRaw = [
       { id: "ses_hist", title: "历史会话", time: { updated: 1_700_000_000_000 }, location: { directory: "/home/ubuntu/work/app" } },
     ];
@@ -330,15 +330,35 @@ describe("index 话题路由（集成）", () => {
 
     const res = (await click({ cmd: "open", s: "ses_hist", c: "oc_1" })) as { toast: { type: string } };
     expect(res.toast.type).toBe("success");
-    await vi.waitFor(() => expect(storage.raw("feishu:v2:thread:omt_new")).toBeDefined());
-    expect((storage.raw("feishu:v2:thread:omt_new") as { sessionID: string }).sessionID).toBe("ses_hist");
+    // 恢复卡走主聊天流 sendCard（create），不再 reply_in_thread。
+    await vi.waitFor(() => expect(JSON.stringify(h.created.at(-1))).toContain("🔄 历史会话"));
+    expect(h.replied).toHaveLength(0);
 
-    // 话题内发消息 → 路由到该历史会话（resume）。
-    await deliver(msg("继续吧", { messageId: "om_hist_1", threadId: "omt_new", rootId: "om_root_h", parentId: "om_root_h" }));
+    const rootSet = storage.setCalls.find((c) => c.key.startsWith("feishu:v2:root:"));
+    expect(rootSet).toBeDefined();
+    const cardId = rootSet!.key.replace("feishu:v2:root:", "");
+    expect((storage.raw(`feishu:v2:root:${cardId}`) as { sessionID: string }).sessionID).toBe("ses_hist");
+    // 恢复卡阶段只绑 root，不预建 thread 映射。
+    expect(storage.raw(`feishu:v2:thread:${cardId}`)).toBeUndefined();
+
+    // 用户首次回复恢复卡：事件只带 root_id（无 thread_id）→ 仍路由到该会话，
+    // 并读回消息元数据拿到 thread_id 后补写 thread 映射。
+    await deliver(msg("继续吧", { messageId: "om_hist_1", rootId: cardId, parentId: cardId }));
     expect(promptCalls.at(-1)).toEqual({ sessionID: "ses_hist", text: "继续吧" });
+    expect((storage.raw("feishu:v2:thread:omt_from_get") as { sessionID: string }).sessionID).toBe("ses_hist");
   });
 
-  test("/resume：对最近更新的会话直接开话题并绑定", async () => {
+  test("主聊天流普通文本回复未映射消息（root 未命中）→ 仍回管理台提示卡", async () => {
+    cleanup = await setup();
+    await deliver(msg("你好", { messageId: "om_boot0" }));
+    const before = h.created.length;
+    await deliver(msg("引用了一条无关消息", { messageId: "om_q1", rootId: "om_unmapped", parentId: "om_unmapped" }));
+    expect(promptCalls).toHaveLength(0);
+    expect(JSON.stringify(h.created.at(-1))).toContain("管理台");
+    expect(h.created.length).toBe(before + 1);
+  });
+
+  test("/resume：对最近更新的会话直接发恢复卡并绑 root", async () => {
     sessionListRaw = [
       { id: "ses_r1", title: "最近的", time: { updated: 1_700_000_000_000 }, location: { directory: "/home/ubuntu/work/a" } },
       { id: "ses_r2", title: "较旧", time: { updated: 1_600_000_000_000 }, location: { directory: "/home/ubuntu/work/b" } },
@@ -347,8 +367,10 @@ describe("index 话题路由（集成）", () => {
     await deliver(msg("你好", { messageId: "om_boot2" }));
 
     await deliver(msg("/resume", { messageId: "om_resume" }));
-    await vi.waitFor(() => expect(storage.raw("feishu:v2:thread:omt_new")).toBeDefined());
-    expect((storage.raw("feishu:v2:thread:omt_new") as { sessionID: string }).sessionID).toBe("ses_r1");
+    await vi.waitFor(() => expect(JSON.stringify(h.created.at(-1))).toContain("🔄 最近的"));
+    const rootSet = storage.setCalls.find((c) => c.key.startsWith("feishu:v2:root:"));
+    expect(rootSet).toBeDefined();
+    expect((storage.raw(rootSet!.key) as { sessionID: string }).sessionID).toBe("ses_r1");
   });
 
   // ── 任务 B：/model 切换后读回校验（集成） ─────────────────────────────
@@ -514,17 +536,22 @@ describe("index 话题路由（集成）", () => {
     await deliver(msg("你好", { messageId: "om_bootB" }));
 
     await click({ cmd: "open", s: "ses_sum", c: "oc_1" });
+    // 恢复卡走主聊天流 create，标题 = 🔄 + 会话主题。
     await vi.waitFor(() => {
-      expect(JSON.stringify(h.replied.at(-1))).toContain("🔄 摘要会话");
+      expect(JSON.stringify(h.created.at(-1))).toContain("🔄 摘要会话");
     });
-    // 摘要在火后 patch 回同一张卡（复用 compaction 摘要，不产生生成调用）
+    expect(h.replied).toHaveLength(0);
+    // 摘要在火后 patch 回同一张恢复卡（复用 compaction 摘要，不产生生成调用）。
     await vi.waitFor(() => {
       expect(JSON.stringify(h.patched.at(-1))).toContain("1. 已完成 X");
     });
     expect(h.generateCalls).toHaveLength(0);
 
-    // 话题内直接发消息 → 续上该会话
-    await deliver(msg("继续", { messageId: "om_sum_1", threadId: "omt_new", rootId: "om_root_s", parentId: "om_root_s" }));
+    const rootSet = storage.setCalls.find((c) => c.key.startsWith("feishu:v2:root:"));
+    const cardId = rootSet!.key.replace("feishu:v2:root:", "");
+    // 回复恢复卡：只带 root_id（无 thread_id）→ 路由到该会话并补写 thread。
+    await deliver(msg("继续", { messageId: "om_sum_1", rootId: cardId, parentId: cardId }));
     expect(promptCalls.at(-1)).toEqual({ sessionID: "ses_sum", text: "继续" });
+    expect((storage.raw("feishu:v2:thread:omt_from_get") as { sessionID: string }).sessionID).toBe("ses_sum");
   });
 });

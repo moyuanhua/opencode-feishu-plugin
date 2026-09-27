@@ -34,9 +34,14 @@ class FakeSender implements FeishuSender {
   readonly repliedCards: Array<{ messageId: string; card: object; replyInThread?: boolean }> = [];
   threadIdFor: (messageId: string) => string | undefined = () => undefined;
   failReply = false;
+  /** 发送恢复卡（sendCard）失败开关（不改生产代码，仅测试用）。 */
+  failSendCard = false;
+  /** getMessageMeta 调用次数（校验恢复卡阶段不再读回元数据）。 */
+  metaCalls = 0;
 
   async sendCard(chatId: string, card: object): Promise<SendCardResult> {
     this.cards.push({ chatId, card });
+    if (this.failSendCard) return { ok: false, error: "boom" };
     return { ok: true, messageId: `om_card_${this.cards.length}` };
   }
   async replyCard(messageId: string, card: object, opts?: { replyInThread?: boolean }): Promise<SendCardResult> {
@@ -57,6 +62,7 @@ class FakeSender implements FeishuSender {
     return { ok: true, messageId: "om_reply" };
   }
   async getMessageMeta(messageId: string): Promise<{ threadId?: string } | undefined> {
+    this.metaCalls += 1;
     const threadId = this.threadIdFor(messageId);
     return threadId ? { threadId } : undefined;
   }
@@ -902,52 +908,64 @@ describe("SessionCommands 进入话题（open 动作）", () => {
     operatorOpenId: "ou_1",
   };
 
-  test("会话存在：reply_in_thread + bindThread + bindRoot", async () => {
+  test("会话存在：主聊天流发恢复卡 + bindRoot（此时无 thread）", async () => {
     const { commands, sender, sessionMap } = setup({ getSession: async () => raw });
-    sender.threadIdFor = (id) => (id === "om_ready" ? "omt_new" : undefined);
 
     const res = (await commands.handleCardAction(action)) as { toast: { type: string; content: string } };
     expect(res.toast.content).toContain("进入话题");
     await flush();
 
-    const replied = sender.repliedCards.at(-1)!;
-    expect(replied.messageId).toBe("om_list");
-    expect(replied.replyInThread).toBe(true);
-    const cardText = JSON.stringify(replied.card);
+    // 恢复卡发在主聊天流（sendCard），不是 reply_in_thread。
+    expect(sender.repliedCards).toHaveLength(0);
+    const opened = sender.cards.at(-1)!;
+    expect(opened.chatId).toBe("oc_1");
+    const cardText = JSON.stringify(opened.card);
     expect(cardText).toContain("🔄 历史会话");
     expect(cardText).toContain("ses_old");
     expect(cardText).toContain("/home/ubuntu/work/app");
 
-    expect((await sessionMap.resolveByThread("omt_new"))?.sessionID).toBe("ses_old");
-    expect((await sessionMap.resolveByRoot("om_ready"))?.sessionID).toBe("ses_old");
-    expect(await sessionMap.threadIdForSession("ses_old")).toBe("omt_new");
+    // 只绑 root（卡片消息 id）；thread_id 要等用户首次回复后才产生。
+    expect((await sessionMap.resolveByRoot("om_card_1"))?.sessionID).toBe("ses_old");
+    expect(await sessionMap.threadIdForSession("ses_old")).toBeUndefined();
+    // 恢复卡阶段不再读回消息元数据。
+    expect(sender.metaCalls).toBe(0);
   });
 
-  test("reply 未直接带 thread_id → getMessageMeta 兜底", async () => {
+  test("只影响被点的那一个会话：其它会话不被绑定", async () => {
     const { commands, sender, sessionMap } = setup({ getSession: async () => raw });
-    sender.threadIdFor = (id) => (id === "om_ready" ? "omt_meta" : undefined);
+    await sessionMap.addSession("oc_1", "ses_other", "其它会话", "ou_1", { setActive: false });
+
     await commands.handleCardAction(action);
     await flush();
-    expect((await sessionMap.resolveByThread("omt_meta"))?.sessionID).toBe("ses_old");
+
+    expect((await sessionMap.resolveByRoot("om_card_1"))?.sessionID).toBe("ses_old");
+    expect(await sessionMap.threadIdForSession("ses_old")).toBeUndefined();
+    expect(await sessionMap.threadIdForSession("ses_other")).toBeUndefined();
+    expect(await sessionMap.resolveBySession("ses_other")).toBeDefined();
+    // 只发了一张恢复卡，且没有对别的会话做任何 reply。
+    expect(sender.cards).toHaveLength(1);
+    expect(sender.repliedCards).toHaveLength(0);
   });
 
-  test("会话不存在：toast「会话不存在」+ patch 提示卡 + 不开话题", async () => {
+  test("会话不存在：toast「会话不存在」+ patch 提示卡 + 不发恢复卡", async () => {
     const { commands, sender } = setup({ getSession: async () => undefined });
     const res = (await commands.handleCardAction(action)) as { toast: { type: string; content: string } };
     expect(res.toast.type).toBe("error");
     expect(res.toast.content).toContain("会话不存在");
     await flush();
-    expect(sender.repliedCards).toHaveLength(0);
+    expect(sender.cards).toHaveLength(0);
     expect(JSON.stringify(sender.patched.at(-1)!.card)).toContain("会话不存在");
   });
 
-  test("进入话题失败（reply 失败）→ patch 提示卡、不绑定", async () => {
+  test("发送恢复卡失败 → patch 提示卡、不绑定", async () => {
     const { commands, sender, sessionMap } = setup({ getSession: async () => raw });
-    sender.failReply = true;
+    sender.failSendCard = true;
     await commands.handleCardAction(action);
     await flush();
     expect(JSON.stringify(sender.patched.at(-1)!.card)).toContain("会话不存在");
     expect(await sessionMap.threadIdForSession("ses_old")).toBeUndefined();
+    expect(await sessionMap.resolveByRoot("om_card_1")).toBeUndefined();
+    expect(sender.repliedCards).toHaveLength(0);
   });
 });
 
@@ -961,28 +979,32 @@ describe("SessionCommands /resume（续聊历史会话）", () => {
     getSession: async () => rawSessions[0],
   };
 
-  test("/resume（无参）对最近更新的会话直接开话题", async () => {
+  test("/resume（无参）对最近更新的会话直接发恢复卡并绑 root", async () => {
     const { commands, sender, sessionMap } = setup(base);
-    sender.threadIdFor = (id) => (id === "om_ready" ? "omt_r" : undefined);
     await commands.handleText(message("/resume"));
-    expect(sender.repliedCards.at(-1)!.replyInThread).toBe(true);
-    expect(await sessionMap.threadIdForSession("ses_newest")).toBe("omt_r");
+    const opened = sender.cards.at(-1)!;
+    expect(JSON.stringify(opened.card)).toContain("🔄 最新");
+    expect(JSON.stringify(opened.card)).toContain("ses_newest");
+    expect((await sessionMap.resolveByRoot("om_card_1"))?.sessionID).toBe("ses_newest");
+    expect(await sessionMap.threadIdForSession("ses_newest")).toBeUndefined();
     expect(await sessionMap.threadIdForSession("ses_mid")).toBeUndefined();
   });
 
   test("/resume 2 选列表第 2 个会话", async () => {
     const { commands, sender, sessionMap } = setup(base);
-    sender.threadIdFor = () => "omt_2";
     await commands.handleText(message("/resume 2"));
-    expect(await sessionMap.threadIdForSession("ses_mid")).toBe("omt_2");
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("🔄 中间");
+    expect((await sessionMap.resolveByRoot("om_card_1"))?.sessionID).toBe("ses_mid");
+    expect(await sessionMap.threadIdForSession("ses_mid")).toBeUndefined();
     expect(await sessionMap.threadIdForSession("ses_newest")).toBeUndefined();
+    expect(sender.cards).toHaveLength(1);
   });
 
-  test("/resume 序号越界 → 提示，不开话题", async () => {
+  test("/resume 序号越界 → 提示，不发恢复卡", async () => {
     const { commands, sender } = setup(base);
     await commands.handleText(message("/resume 9"));
     expect(sender.texts.join("\n")).toContain("越界");
-    expect(sender.repliedCards).toHaveLength(0);
+    expect(sender.cards).toHaveLength(0);
   });
 
   test("/resume 非数字参数 → 用法提示", async () => {
@@ -1014,23 +1036,26 @@ describe("SessionCommands 恢复卡标题 + 摘要（任务 B）", () => {
     operatorOpenId: "ou_1",
   };
 
-  test("标题用会话主题（🔄 前缀），摘要在火后 patch 回同一张卡", async () => {
+  test("标题用会话主题（🔄 前缀），摘要在火后 patch 回同一张恢复卡", async () => {
     const summarize = vi.fn(async (_input: SummarizeSessionInput): Promise<SessionSummaryOutcome> => ({ summary: "1. 目标 A", source: "generated" }));
-    const { commands, sender } = setup({ getSession: async () => raw, summarizeSession: summarize });
-    sender.threadIdFor = () => "omt_b1";
+    const { commands, sender, sessionMap } = setup({ getSession: async () => raw, summarizeSession: summarize });
 
     await commands.handleCardAction(action);
     await flush();
 
-    const opened = sender.repliedCards.at(-1)!;
+    const opened = sender.cards.at(-1)!;
     expect(JSON.stringify(opened.card)).toContain("🔄 历史会话");
     expect(JSON.stringify(opened.card)).toContain("正在总结该会话");
 
     const patched = sender.patched.at(-1)!;
-    expect(patched.messageId).toBe("om_ready");
+    expect(patched.messageId).toBe("om_card_1");
     expect(JSON.stringify(patched.card)).toContain("1. 目标 A");
     expect(summarize).toHaveBeenCalledTimes(1);
     expect(summarize.mock.calls[0]![0]).toMatchObject({ sessionID: "ses_old", directory: "/home/ubuntu/work/app" });
+    // 摘要 patch 回同一张恢复卡；此时仍只绑 root、无 thread。
+    expect((await sessionMap.resolveByRoot("om_card_1"))?.sessionID).toBe("ses_old");
+    expect(await sessionMap.threadIdForSession("ses_old")).toBeUndefined();
+    expect(sender.repliedCards).toHaveLength(0);
   });
 
   test("摘要失败 → patch 成「生成失败」文案（不抛）", async () => {
@@ -1038,21 +1063,23 @@ describe("SessionCommands 恢复卡标题 + 摘要（任务 B）", () => {
       getSession: async () => raw,
       summarizeSession: async () => ({ source: "none", error: "boom" }),
     });
-    sender.threadIdFor = () => "omt_b2";
     await commands.handleCardAction(action);
     await flush();
+    expect(sender.patched.at(-1)!.messageId).toBe("om_card_1");
     expect(JSON.stringify(sender.patched.at(-1)!.card)).toContain("摘要生成失败");
   });
 
-  test("摘要求解抛异常 → 只 log，不影响开话题", async () => {
+  test("摘要求解抛异常 → 只 log，恢复卡与 root 绑定不受影响", async () => {
     const { commands, sender, sessionMap } = setup({
       getSession: async () => raw,
       summarizeSession: async () => { throw new Error("kaput"); },
     });
-    sender.threadIdFor = () => "omt_b3";
     await commands.handleCardAction(action);
     await flush();
-    expect(await sessionMap.threadIdForSession("ses_old")).toBe("omt_b3");
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("🔄 历史会话");
+    expect((await sessionMap.resolveByRoot("om_card_1"))?.sessionID).toBe("ses_old");
+    expect(await sessionMap.threadIdForSession("ses_old")).toBeUndefined();
+    expect(sender.patched).toHaveLength(0);
   });
 
   test("resumeSummary=false → 无摘要区块、不调用摘要", async () => {
@@ -1062,20 +1089,18 @@ describe("SessionCommands 恢复卡标题 + 摘要（任务 B）", () => {
       summarizeSession: summarize,
       resumeSummary: false,
     });
-    sender.threadIdFor = () => "omt_b4";
     await commands.handleCardAction(action);
     await flush();
-    expect(JSON.stringify(sender.repliedCards.at(-1)!.card)).not.toContain("摘要");
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).not.toContain("摘要");
     expect(summarize).not.toHaveBeenCalled();
     expect(sender.patched).toHaveLength(0);
   });
 
   test("未装配 summarizeSession → 不显示摘要占位", async () => {
     const { commands, sender } = setup({ getSession: async () => raw });
-    sender.threadIdFor = () => "omt_b5";
     await commands.handleCardAction(action);
     await flush();
-    expect(JSON.stringify(sender.repliedCards.at(-1)!.card)).not.toContain("摘要");
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).not.toContain("摘要");
   });
 });
 

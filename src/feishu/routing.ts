@@ -3,14 +3,14 @@
  *
  * 依据 P5 计划「三、入站路由」：
  *
- *   有 threadId ?
- *   ├─ 是
- *   │   ├─ thread 命中 → 用该会话
- *   │   ├─ 否则 root 命中 → 用该会话（上层补写 thread 映射）
- *   │   └─ 都未命中 → 新建会话（标题=首条消息摘要）
- *   └─ 否（主聊天流 = 管理台）
- *       ├─ 以 / 开头 → 管理命令
- *       └─ 普通文本 → 回提示卡，不进入任何会话
+ *   thread/root 命中 ?
+ *   ├─ thread 命中 → 用该会话
+ *   ├─ 否则 root 命中 → 用该会话（上层补写 thread 映射）
+ *   │     ※ root 命中即使**没有 threadId** 也算（飞书"话题第一条消息"事件可能只带
+ *   │       root_id；恢复卡就是靠"用户回复卡片"这条路进入会话的）
+ *   └─ 都未命中
+ *       ├─ 有 threadId（话题内第一条消息）→ 新建会话（标题=首条消息摘要）
+ *       └─ 无 threadId（主聊天流 = 管理台）→ 回提示卡，不进入任何会话
  *
  * 这里只做判定，命中信息由上层异步解析后传入，保证决策可测试。
  */
@@ -37,9 +37,11 @@ export type RouteDecision =
 
 export function decideRoute(facts: RouteFacts): RouteDecision {
   if (facts.isCommand) return { kind: "command" };
-  if (!facts.hasThread) return { kind: "main-hint" };
+  // thread 命中优先；root 命中次之（即使没有 threadId，见文件头注释）。
   if (facts.threadKnown) return { kind: "use-session", source: "thread" };
   if (facts.rootKnown) return { kind: "use-session", source: "root" };
+  // 都未命中：有 threadId = 话题内第一条消息 → 新建；否则主聊天流 → 提示卡。
+  if (!facts.hasThread) return { kind: "main-hint" };
   return { kind: "create-in-thread" };
 }
 

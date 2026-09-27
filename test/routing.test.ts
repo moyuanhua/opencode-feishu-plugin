@@ -31,6 +31,13 @@ describe("decideRoute", () => {
     });
   });
 
+  test("即使无 threadId，root 命中 → use-session(root)（话题首条消息只带 root_id）", () => {
+    expect(decideRoute({ hasThread: false, isCommand: false, threadKnown: false, rootKnown: true })).toEqual({
+      kind: "use-session",
+      source: "root",
+    });
+  });
+
   test("话题内都未命中 → create-in-thread", () => {
     expect(decideRoute({ hasThread: true, isCommand: false, threadKnown: false, rootKnown: false })).toEqual({
       kind: "create-in-thread",

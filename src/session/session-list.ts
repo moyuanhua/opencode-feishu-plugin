@@ -128,7 +128,7 @@ export async function enterSessionThread(
     readonly patchMessageId?: string;
     readonly source: "card" | "resume";
   },
-): Promise<{ ok: boolean; threadId?: string; error?: string }> {
+): Promise<{ ok: boolean; threadId?: string; messageId?: string; error?: string }> {
   const { chatId, sessionID, anchorMessageId, operatorOpenId } = input;
   if (!anchorMessageId || !chatId) {
     return { ok: false, error: "missing anchor/chat" };
@@ -147,19 +147,21 @@ export async function enterSessionThread(
     ...(showSummary ? { summaryPending: true } : {}),
   };
   const card = buildSessionOpenedCard(cardInput);
-  const res = await ctx.deps.sender.replyCard(anchorMessageId, card, { replyInThread: true });
-  ctx.deps.log.info("进入会话并开话题", {
+  // 恢复会话：在主聊天流发一张**普通消息卡**作为该会话的"恢复卡"。
+  // 不预先开话题——用户**回复这张卡**时飞书会自动在该卡下形成话题（root_id = 卡片消息 id），
+  // 我们靠 root→session 映射把消息路由到该会话（见 index.ts 的入站路由）。
+  const res = await ctx.deps.sender.sendCard(chatId, card);
+  ctx.deps.log.info("发送会话恢复卡", {
     sessionID,
     source: input.source,
     anchorMessageId,
-    replyOk: res.ok,
-    replyMessageId: res.messageId,
-    replyThreadId: res.threadId,
-    replyError: res.error,
+    sendOk: res.ok,
+    cardMessageId: res.messageId,
+    sendError: res.error,
   });
   if (!res.ok || !res.messageId) {
     const error = res.error ?? "unknown";
-    ctx.deps.log.warn("进入话题失败", { sessionID, anchorMessageId, error });
+    ctx.deps.log.warn("发送恢复卡失败", { sessionID, anchorMessageId, error });
     if (input.patchMessageId) {
       await ctx.deps.sender.patchCard(
         input.patchMessageId,
@@ -169,23 +171,16 @@ export async function enterSessionThread(
     return { ok: false, error };
   }
 
-  // reply 响应可能不含 thread_id → 读回消息元数据兜底。
-  const meta = res.threadId ? undefined : await ctx.deps.sender.getMessageMeta(res.messageId);
-  const threadId = res.threadId ?? meta?.threadId;
-  if (!threadId) {
-    ctx.deps.log.warn("进入话题后未读到 thread_id，该会话暂无法自动路由", { messageId: res.messageId });
-    return { ok: false, error: "未拿到话题 ID" };
-  }
-
-  await ctx.deps.sessionMap.bindThread(threadId, sessionID, chatId, operatorOpenId, anchorMessageId);
+  // 只绑 root：thread_id 要等用户第一次回复后才存在（届时入站路由会用 root 兜底并补写 thread 映射）。
   await ctx.deps.sessionMap.bindRoot(res.messageId, sessionID);
-  ctx.deps.log.info("已绑定话题与会话", { sessionID, threadId, rootId: res.messageId });
+  ctx.deps.log.info("resume card bound root to session", { sessionID, rootId: res.messageId });
 
   // 任务 B：摘要**火后执行**——先发卡（回调 3 秒内已回 toast），拿到结果再 patch 同一张卡。
   if (showSummary) {
     void patchResumeSummary(ctx, sessionID, dir, res.messageId, cardInput);
   }
-  return { ok: true, threadId };
+  // thread_id 由用户首次回复后经 root 路由補写，这里只带卡片消息 id。
+  return { ok: true, messageId: res.messageId };
 }
 
 /**
