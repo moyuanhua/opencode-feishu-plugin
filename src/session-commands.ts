@@ -24,7 +24,22 @@ import type {
 } from "./types.js";
 import type { FeishuSender } from "./feishu/sender.js";
 import type { SessionMap } from "./feishu/session-map.js";
-import { buildSessionListCard, buildSessionCreatedCard, buildSessionReadyCard, parseSessionCardValue, type SessionCardValue } from "./feishu/session-cards.js";
+import {
+  buildSessionListCard,
+  buildSessionCreatedCard,
+  buildSessionReadyCard,
+  buildSessionOpenedCard,
+  buildSessionMissingCard,
+  parseSessionCardValue,
+  type SessionCardValue,
+  type SessionListRow,
+} from "./feishu/session-cards.js";
+import {
+  fallbackEntries,
+  normalizeSessionInfo,
+  normalizeSessionList,
+  type SessionListEntry,
+} from "./feishu/session-list.js";
 import {
   buildConfirmCard,
   buildModelCard,
@@ -122,17 +137,32 @@ export interface SessionCommandsDeps {
   readonly recentModelsLimit?: number;
   /** 扫描允许根目录的一级子目录（目录下拉选项来源，默认 `scanRootSubdirs`；测试可注入）。 */
   readonly scanRootSubdirs?: (root: string) => Promise<readonly SetupFormDirEntry[]>;
+  /**
+   * 列出 opencode **全部**会话（P7，`ctx.session.list()` 原始返回）。
+   * 形状不稳，内部用 `normalizeSessionList` 兼容；缺失/异常/形状不可识别时
+   * 回退到 `SessionMap.listSessions` 并 `log.warn`。
+   */
+  readonly listAllSessions?: () => Promise<unknown>;
+  /**
+   * 按 id 查询会话是否存在（P7，`ctx.session.get({sessionID})` 原始返回）。
+   * 「进入话题」动作据此校验；缺失时视为无法校验（乐观放行）。
+   */
+  readonly getSessionInfo?: (sessionID: string) => Promise<unknown>;
+  /** `/sessions` 每页数量（P7，默认 8，夹取 5–20）。 */
+  readonly sessionPageSize?: number;
 }
 
 export class SessionCommands {
   private readonly now: () => number;
   private readonly threadRouting: boolean;
   private readonly modelPageSize: number;
+  private readonly sessionPageSize: number;
 
   constructor(private readonly deps: SessionCommandsDeps) {
     this.now = deps.now ?? (() => Date.now());
     this.threadRouting = deps.threadRouting ?? true;
     this.modelPageSize = deps.modelPageSize ?? 8;
+    this.sessionPageSize = clampPageSize(deps.sessionPageSize);
   }
 
   /**
@@ -157,10 +187,13 @@ export class SessionCommands {
   }
 
   /**
-   * 卡片按钮点击：同步返回飞书回调响应（toast），重活在后台完成。
+   * 卡片按钮点击：同步（或极快）返回飞书回调响应（toast），重活在后台完成。
    * 校验：仅白名单用户可操作。表单提交 / 会话卡 / 向导卡分别路由。
+   *
+   * `open`（进入/再开话题）需要先 `ctx.session.get` 校验会话存在，因此返回 Promise；
+   * gateway 的 SDK 会 await 该 Promise 作为回调响应，仍应在 3s 内完成。
    */
-  handleCardAction(action: CardAction): object {
+  handleCardAction(action: CardAction): object | Promise<object> {
     // P6.1：表单提交（`action.form_value` 存在，或 value 带 `{cmd:"setup.form"}`）。
     if (isSetupFormAction(action.rawValue) || parseSetupFormValues(action.formValue)) {
       if (!this.deps.isAllowed(action.operatorOpenId)) {
@@ -182,10 +215,16 @@ export class SessionCommands {
     }
 
     if (sessionValue) {
+      // 「进入话题」：先查会话存在（快），再 fire-and-forget 开话题。
+      if (sessionValue.cmd === "open") {
+        return this.handleOpenCardAction(action, sessionValue);
+      }
       void this.applySessionCardAction(action, sessionValue).catch((err) => {
         this.deps.log.warn("会话卡片操作失败", { cmd: sessionValue.cmd, error: errorMessage(err) });
       });
-      return sessionValue.cmd === "new" ? toast("success", "正在新建会话…") : toast("success", "已切换");
+      if (sessionValue.cmd === "new") return toast("success", "正在打开表单…");
+      if (sessionValue.cmd === "list") return toast("info", "已翻页");
+      return toast("success", "已切换");
     }
 
     const value = setupValue!;
@@ -193,6 +232,111 @@ export class SessionCommands {
       this.deps.log.warn("向导卡片操作失败", { wizard: value.kind, error: errorMessage(err) });
     });
     return setupToast(value);
+  }
+
+  /**
+   * `{cmd:"open"}`：白名单（上层已校验）→ `ctx.session.get` 校验存在 →
+   * 不存在 toast「会话不存在」并 patch 提示；存在则后台开话题并绑定。
+   */
+  private async handleOpenCardAction(
+    action: CardAction,
+    value: Extract<SessionCardValue, { cmd: "open" }>,
+  ): Promise<object> {
+    if (!this.threadRouting) {
+      return toast("error", "当前为回退模式，不支持话题路由");
+    }
+    const chatId = action.chatId || value.chatId;
+    const hasApi = Boolean(this.deps.getSessionInfo);
+    const info = hasApi ? normalizeSessionInfo(await this.deps.getSessionInfo!(value.sessionID)) : undefined;
+    if (hasApi && !info) {
+      this.deps.log.warn("进入话题失败：会话不存在", { sessionID: value.sessionID, chatId });
+      void this.patchMissingCard(action.messageId, value.sessionID).catch((err) => {
+        this.deps.log.warn("会话不存在提示卡 patch 失败", { error: errorMessage(err) });
+      });
+      return toast("error", "会话不存在");
+    }
+    const snapshot: SessionListEntry = info ?? { sessionID: value.sessionID, title: "", updatedAt: 0 };
+    void this.enterSessionThread({
+      chatId,
+      sessionID: value.sessionID,
+      anchorMessageId: action.messageId,
+      operatorOpenId: action.operatorOpenId,
+      info: snapshot,
+      patchMessageId: action.messageId,
+      source: "card",
+    }).catch((err) => {
+      this.deps.log.warn("进入话题处理失败", { sessionID: value.sessionID, error: errorMessage(err) });
+    });
+    return toast("success", "正在进入话题…");
+  }
+
+  /** 会话不存在：把原列表卡 patch 成提示卡。 */
+  private async patchMissingCard(messageId: string, sessionID: string): Promise<void> {
+    if (!messageId) return;
+    await this.deps.sender.patchCard(messageId, buildSessionMissingCard(sessionID));
+  }
+
+  /**
+   * 「进入话题」核心流程（卡片动作 / `/resume` 共用）：
+   * `reply_in_thread` 对触发消息开新话题 → 发「✅ 已进入会话」卡 → 拿 thread_id 绑定
+   * thread + root 映射。成功后该话题内消息即续上历史会话（opencode 上下文天然持久）。
+   */
+  private async enterSessionThread(input: {
+    readonly chatId: string;
+    readonly sessionID: string;
+    readonly anchorMessageId: string;
+    readonly operatorOpenId: string;
+    readonly info?: SessionListEntry;
+    /** 失败时 patch 的卡片消息 id（列表卡）；`/resume` 不传则改用文本回复。 */
+    readonly patchMessageId?: string;
+    readonly source: "card" | "resume";
+  }): Promise<{ ok: boolean; threadId?: string; error?: string }> {
+    const { chatId, sessionID, anchorMessageId, operatorOpenId } = input;
+    if (!anchorMessageId || !chatId) {
+      return { ok: false, error: "missing anchor/chat" };
+    }
+    const info = input.info;
+    const card = buildSessionOpenedCard({
+      title: info?.title ?? "",
+      sessionID,
+      ...(info?.directory ? { dir: info.directory } : {}),
+      ...(info?.updatedAt ? { updatedAt: info.updatedAt } : {}),
+      now: this.now(),
+    });
+    const res = await this.deps.sender.replyCard(anchorMessageId, card, { replyInThread: true });
+    this.deps.log.info("进入会话并开话题", {
+      sessionID,
+      source: input.source,
+      anchorMessageId,
+      replyOk: res.ok,
+      replyMessageId: res.messageId,
+      replyThreadId: res.threadId,
+      replyError: res.error,
+    });
+    if (!res.ok || !res.messageId) {
+      const error = res.error ?? "unknown";
+      this.deps.log.warn("进入话题失败", { sessionID, anchorMessageId, error });
+      if (input.patchMessageId) {
+        await this.deps.sender.patchCard(
+          input.patchMessageId,
+          buildSessionMissingCard(sessionID, error),
+        );
+      }
+      return { ok: false, error };
+    }
+
+    // reply 响应可能不含 thread_id → 读回消息元数据兜底。
+    const meta = res.threadId ? undefined : await this.deps.sender.getMessageMeta(res.messageId);
+    const threadId = res.threadId ?? meta?.threadId;
+    if (!threadId) {
+      this.deps.log.warn("进入话题后未读到 thread_id，该会话暂无法自动路由", { messageId: res.messageId });
+      return { ok: false, error: "未拿到话题 ID" };
+    }
+
+    await this.deps.sessionMap.bindThread(threadId, sessionID, chatId, operatorOpenId, anchorMessageId);
+    await this.deps.sessionMap.bindRoot(res.messageId, sessionID);
+    this.deps.log.info("已绑定话题与会话", { sessionID, threadId, rootId: res.messageId });
+    return { ok: true, threadId };
   }
 
   private async dispatch(parsed: ParsedCommand, message: IncomingMessage, scope: CommandScope): Promise<void> {
@@ -203,6 +347,8 @@ export class SessionCommands {
         return this.cmdSessions(message);
       case "use":
         return this.cmdUse(message, parsed.args);
+      case "resume":
+        return this.cmdResume(message, parsed.args);
       case "current":
         return this.cmdCurrent(message, scope);
       case "stop":
@@ -434,23 +580,132 @@ export class SessionCommands {
 
   // ── 既有会话管理 ──────────────────────────────────────────────────────
 
-  private async cmdSessions(message: IncomingMessage): Promise<void> {
-    const sessions = await this.deps.sessionMap.listSessions(message.chatId);
+  /**
+   * `/sessions`（别名 `/ls`）：列出 opencode **全部**会话（按最近更新倒序、分页 8 条）。
+   * 数据源优先 `ctx.session.list()`；拿不到时回退 SessionMap 映射表。
+   */
+  private async cmdSessions(message: IncomingMessage, page = 0): Promise<void> {
+    const entries = await this.loadSessionEntries(message.chatId);
     const active = await this.deps.sessionMap.getActive(message.chatId);
-    const card = buildSessionListCard({
-      chatId: message.chatId,
-      sessions,
-      ...(active ? { activeID: active.sessionID } : {}),
-    });
+    const card = await this.buildListCard(message.chatId, entries, page, active?.sessionID);
     const res = await this.deps.sender.sendCard(message.chatId, card);
     if (!res.ok) {
       this.deps.log.warn("会话卡片发送失败", { chatId: message.chatId, error: res.error ?? "unknown" });
+    }
+  }
+
+  /**
+   * `/resume [序号]`：对「最近更新」的会话（或列表第 N 个）直接执行「进入话题」流程，
+   * 跳过列表卡。序号越界/无会话时提示。序号与 `/sessions` 列表一致（最近更新倒序）。
+   */
+  private async cmdResume(message: IncomingMessage, args: string): Promise<void> {
+    if (message.threadId) {
+      await this.reply(message, threadForbiddenText("resume"));
       return;
     }
-    // 用户从这张卡手动「创建话题」时，root = 卡片消息 id → 锚定到当前会话。
-    if (res.messageId && active) {
-      await this.deps.sessionMap.bindRoot(res.messageId, active.sessionID);
+    if (!this.threadRouting) {
+      await this.reply(message, "当前为回退模式（`threadRouting=false`），不支持续聊历史会话。");
+      return;
     }
+    const entries = await this.loadSessionEntries(message.chatId);
+    if (entries.length === 0) {
+      await this.reply(message, "没有可续聊的会话。用 `/new` 新建，或先在话题里发消息创建一个。");
+      return;
+    }
+    const query = args.trim();
+    let index = 0;
+    if (query) {
+      if (!/^\d+$/.test(query)) {
+        await this.reply(message, "用法：`/resume [序号]`（序号见 `/sessions`；省略 = 最近更新的会话）。");
+        return;
+      }
+      index = Number.parseInt(query, 10) - 1;
+    }
+    if (index < 0 || index >= entries.length) {
+      await this.reply(
+        message,
+        `序号越界：当前共 ${entries.length} 个会话，有效范围 1–${entries.length}。`,
+      );
+      return;
+    }
+    const entry = entries[index]!;
+    const result = await this.enterSessionThread({
+      chatId: message.chatId,
+      sessionID: entry.sessionID,
+      anchorMessageId: message.messageId,
+      operatorOpenId: message.senderOpenId,
+      info: entry,
+      source: "resume",
+    });
+    if (!result.ok) {
+      await this.reply(
+        message,
+        `⚠️ 进入话题失败：${result.error ?? "unknown"}。可发送 \`/sessions\` 手动进入。`,
+      );
+    }
+  }
+
+  /**
+   * 加载全量会话列表：优先 `ctx.session.list()`（归一化），失败/形状不识别回退 SessionMap。
+   * 关键诊断日志：`列出全部会话` / `会话列表回退到 SessionMap`。
+   */
+  private async loadSessionEntries(chatId: string): Promise<SessionListEntry[]> {
+    if (this.deps.listAllSessions) {
+      try {
+        const raw = await this.deps.listAllSessions();
+        const normalized = normalizeSessionList(raw);
+        if (normalized) {
+          this.deps.log.info("列出全部会话", { count: normalized.length, source: "session.list" });
+          return normalized;
+        }
+        this.deps.log.warn("session.list 返回形状无法识别，回退 SessionMap 列表", { chatId });
+      } catch (err) {
+        this.deps.log.warn("session.list 调用失败，回退 SessionMap 列表", {
+          chatId,
+          error: errorMessage(err),
+        });
+      }
+    } else {
+      this.deps.log.warn("运行时未暴露 session.list，回退 SessionMap 列表", { chatId });
+    }
+    const fallback = fallbackEntries(await this.deps.sessionMap.listSessions(chatId));
+    this.deps.log.warn("会话列表回退到 SessionMap", { chatId, count: fallback.length });
+    return fallback;
+  }
+
+  /** 把全量列表切成当前页并构建列表卡（含「已绑话题」标记）。 */
+  private async buildListCard(
+    chatId: string,
+    entries: readonly SessionListEntry[],
+    page: number,
+    activeID?: string,
+  ): Promise<object> {
+    const pageSize = this.sessionPageSize;
+    const pageCount = Math.max(1, Math.ceil(entries.length / pageSize));
+    const safePage = Math.min(Math.max(0, Math.floor(page)), pageCount - 1);
+    const slice = entries.slice(safePage * pageSize, safePage * pageSize + pageSize);
+    const rows: SessionListRow[] = [];
+    for (let i = 0; i < slice.length; i += 1) {
+      const entry = slice[i]!;
+      const bound = Boolean(await this.deps.sessionMap.threadIdForSession(entry.sessionID));
+      rows.push({
+        index: safePage * pageSize + i + 1,
+        sessionID: entry.sessionID,
+        title: entry.title,
+        updatedAt: entry.updatedAt,
+        ...(entry.directory ? { directory: entry.directory } : {}),
+        bound,
+        ...(entry.sessionID === activeID ? { active: true } : {}),
+      });
+    }
+    return buildSessionListCard({
+      chatId,
+      rows,
+      page: safePage,
+      pageCount,
+      total: entries.length,
+      now: this.now(),
+    });
   }
 
   private async cmdUse(message: IncomingMessage, args: string): Promise<void> {
@@ -576,33 +831,67 @@ export class SessionCommands {
     await this.deps.steerPrompt(message, sessionID, text);
   }
 
-  // ── 会话列表卡片（旧） ────────────────────────────────────────────────
+  // ── 会话列表卡片 ──────────────────────────────────────────────────────
 
+  /**
+   * 会话卡按钮（`use` / `new` / `list`；`open` 由 `handleOpenCardAction` 处理）。
+   * - `new`：发送 `/form` 建会话表单卡（不再直接建会话）；
+   * - `list`：按页码 patch 当前列表卡；
+   * - `use`：旧卡片兼容，切换当前会话并刷新列表（含翻页位置）。
+   */
   private async applySessionCardAction(action: CardAction, value: SessionCardValue): Promise<void> {
     const chatId = action.chatId || value.chatId;
     if (!chatId) return;
 
     if (value.cmd === "new") {
-      const title = defaultSessionTitle(this.now());
-      await this.deps.createSession({
-        title,
-        chatId,
-        openId: action.operatorOpenId,
-      });
-    } else {
-      const ok = await this.deps.sessionMap.setActive(chatId, value.sessionID);
-      if (!ok) this.deps.log.debug("卡片切换会话失败：会话不存在", { sessionID: value.sessionID });
+      await this.sendSetupFormForChat(chatId, action.messageId, action.operatorOpenId);
+      return;
+    }
+    if (value.cmd === "list") {
+      if (action.messageId) await this.patchListCard(chatId, action.messageId, value.page);
+      return;
+    }
+    if (value.cmd === "open") {
+      // 理论上不会走到这（open 在 handleCardAction 提前处理）；防御式兜底。
+      return;
     }
 
+    const ok = await this.deps.sessionMap.setActive(chatId, value.sessionID);
+    if (!ok) this.deps.log.debug("卡片切换会话失败：会话不存在", { sessionID: value.sessionID });
     if (action.messageId) await this.patchListCard(chatId, action.messageId);
   }
 
-  private async patchListCard(chatId: string, messageId: string): Promise<void> {
-    const sessions = await this.deps.sessionMap.listSessions(chatId);
+  /** 列表卡「➕ 新建会话」→ 打开 `/form` 建会话表单卡（复用向导状态/标题）。 */
+  private async sendSetupFormForChat(
+    chatId: string,
+    anchorMessageId: string,
+    openId: string,
+  ): Promise<void> {
+    if (!this.threadRouting) {
+      // 回退模式：没有话题，沿用旧行为直接建会话。
+      const title = defaultSessionTitle(this.now());
+      await this.deps.createSession({ title, chatId, openId });
+      await this.replyChat(chatId, `✅ 已新建会话「${title}」`);
+      return;
+    }
+    let state = await this.deps.wizard.get(chatId);
+    if (!state) state = await this.deps.wizard.start(chatId, undefined, anchorMessageId);
+    const card = await this.renderFormCard(state);
+    const res = await this.deps.sender.sendCard(chatId, card);
+    if (!res.ok) this.deps.log.warn("表单卡发送失败", { chatId, error: res.error ?? "unknown" });
+  }
+
+  private async patchListCard(chatId: string, messageId: string, page = 0): Promise<void> {
+    const entries = await this.loadSessionEntries(chatId);
     const active = await this.deps.sessionMap.getActive(chatId);
-    const card = buildSessionListCard({ chatId, sessions, ...(active ? { activeID: active.sessionID } : {}) });
+    const card = await this.buildListCard(chatId, entries, page, active?.sessionID);
     const res = await this.deps.sender.patchCard(messageId, card);
     if (!res.ok) this.deps.log.warn("会话卡片更新失败", { error: res.error ?? "unknown" });
+  }
+
+  /** 主聊天流文本回执（不引用任何消息）。 */
+  private async replyChat(chatId: string, text: string): Promise<void> {
+    await this.deps.sender.sendText(chatId, text);
   }
 
   // ── 向导 / 会话操作卡片 ───────────────────────────────────────────────
@@ -1075,4 +1364,10 @@ type ToastType = "success" | "error" | "warning" | "info";
 
 function toast(type: ToastType, content: string): object {
   return { toast: { type, content } };
+}
+
+/** `/sessions` 每页数量夹取到 5–20（缺省 8）。 */
+function clampPageSize(value: number | undefined): number {
+  const base = typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : 8;
+  return Math.min(20, Math.max(5, base));
 }

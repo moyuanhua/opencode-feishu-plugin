@@ -133,8 +133,9 @@ The main chat is management-only; plain text never enters a session.
 |---|---|
 | `/new [title]` | **Open the setup form directly**; submit to create the session and auto-open a topic (equivalent to `/form`; the title becomes the session title) |
 | `/form [title]` | Same as `/new` — an equivalent entry point |
-| `/sessions` (`/ls`) | Session list card (switch / create) |
-| `/use <n\|id-prefix>` | Switch current session |
+| `/sessions` (`/ls`) | **All** sessions card: each row shows title / short id / relative time / `💬 topic-bound` / `📍 directory`, with a "▶️ Enter topic" button; 8 per page (`sessionPageSize`, 5–20) |
+| `/use <n\|id-prefix>` | Switch current session (legacy, kept for compatibility) |
+| `/resume [n]` | **Resume a past session**: enter the most-recently-updated (or the N-th) session by opening a topic |
 | `/current` | Show current session |
 | `/stop` | Interrupt the running task in the current session (every run card also has a "⏹ force stop" button) |
 | `/steer <text>` | Send a message that **cuts in immediately** (steers into the running step instead of queuing) |
@@ -206,6 +207,44 @@ The dropdown defaults to "✍️ Manually enter a path" so typing stays authorit
 - With `/new <title>`, the title is stored in the wizard state and becomes the session title on submit.
 - **Zero new permissions**: form submission reuses the `card.action.trigger` callback (permission requirement: None) — **no new scope, no app re-release**.
 - An invalid directory **never creates a session**: the bot returns the form with an error and keeps your filled-in directory/model/permissions so you can fix and resubmit.
+
+### Resume a past session (`/sessions` + `/resume`)
+
+Besides sessions created from Feishu, you can **load any past OpenCode session visible to this machine** and keep working on it.
+
+**`/sessions` (`/ls`) — all sessions**
+
+```
+/sessions
+  ↓
+🧩 OpenCode sessions (all)
+  1. Fix the login bug (`ses_ab12cd34…`) · 3 hours ago · 💬 topic-bound · 📍 my-app
+  2. Refactor the API (`ses_ef56gh78…`) · 2 days ago · 📍 api-server
+  …
+  [▶️ Enter topic] [▶️ New topic] [⬅️ Prev] [➡️ Next] [➕ New session]
+```
+
+- Data source is `ctx.session.list()` (**all** OpenCode sessions, sorted by `time.updated` desc), not just the plugin's mapping table; if unavailable it falls back to the mapping list and logs a `warn`.
+- Each row shows: title (truncated), short id, relative time, `💬 topic-bound` (this session already has a topic mapping), `📍 <directory tail>`.
+- **Paging**: 8 per page by default (`sessionPageSize`, clamped 5–20); the bottom buttons flip pages (`{cmd:"list", page:N}`).
+- **"➕ New session"** opens the setup form card (same as `/new` `/form`) instead of creating a session directly.
+
+**"▶️ Enter topic" — wire a past session into a topic**
+
+- Tap the button (value `{cmd:"open", s, c}`): first the session is checked for existence (`ctx.session.get`); if missing → toast "session not found" and the list card is patched into a notice.
+- If it exists → `reply_in_thread` on **the list card message you tapped** posts a "✅ Entered session" card; once `thread_id` is obtained the topic ↔ session mapping (plus the topic root) is bound. **Messages you send in that topic then continue this past session** (OpenCode session context is persistent, so this is effectively a resume).
+- For an already topic-bound session the button becomes "▶️ New topic" — **one session can be routed from several topics** (each topic has its own conversation context; replies land in the triggering topic).
+
+**`/resume [n]` — skip the list**
+
+- `/resume` runs the same "enter topic" flow for the **most recently updated** session; `/resume 3` picks the 3rd row. An out-of-range index reports the valid range.
+- It uses the same ordering as `/sessions` (`time.updated` desc).
+
+**Limitations**
+
+- Only sessions **visible on this machine** can be resumed; deleted / foreign / invisible-to-`session.list` sessions cannot be entered.
+- `/sessions` and `/resume` are main-chat commands and are **disabled inside topics** (they tell you to go back); once inside a topic just send plain text.
+- With `threadRouting=false` (fallback mode), entering topics and `/resume` are unsupported.
 
 ### Permission presets
 

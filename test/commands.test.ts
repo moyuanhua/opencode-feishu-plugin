@@ -117,7 +117,7 @@ describe("文案与展示", () => {
   });
 
   test("helpText 覆盖全部命令", () => {
-    for (const cmd of ["/new", "/form", "/dir", "/model", "/perm", "/cancel", "/sessions", "/use", "/current", "/stop", "/help"]) {
+    for (const cmd of ["/new", "/form", "/dir", "/model", "/perm", "/cancel", "/sessions", "/use", "/resume", "/current", "/stop", "/help"]) {
       expect(helpText()).toContain(cmd);
     }
   });
@@ -146,6 +146,7 @@ describe("文案与展示", () => {
     expect(isCommandAllowedInThread("new")).toBe(false);
     expect(isCommandAllowedInThread("sessions")).toBe(false);
     expect(isCommandAllowedInThread("use")).toBe(false);
+    expect(isCommandAllowedInThread("resume")).toBe(false);
     expect(isCommandAllowedInThread("dir")).toBe(false);
     expect(isCommandAllowedInThread("cancel")).toBe(false);
     expect(isCommandAllowedInThread("form")).toBe(false);

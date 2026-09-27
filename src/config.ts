@@ -73,6 +73,8 @@ export interface ResolvedConfig {
   readonly recentDirsLimit: number;
   /** 「最近使用模型」列表长度（P6，默认 5）。 */
   readonly recentModelsLimit: number;
+  /** `/sessions` 每页会话数（P7，默认 8，夹取 5–20）。 */
+  readonly sessionPageSize: number;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -134,6 +136,7 @@ export function resolveConfig(
   const allowedRoots = allowedRootsCandidates.length > 0 ? allowedRootsCandidates : [...DEFAULT_ALLOWED_ROOTS];
   const recentDirsLimit = clamp(asNumber(merged.recentDirsLimit, 5), 1, 20);
   const recentModelsLimit = clamp(asNumber(merged.recentModelsLimit, 5), 1, 20);
+  const sessionPageSize = clamp(asNumber(merged.sessionPageSize, 8), 5, 20);
   const domain = merged.domain === "lark" ? "lark" : "feishu";
   const logFile = resolveLogFile(merged.logFile, env, deps);
   const gatewayLocation = asString(merged.gatewayLocation).trim() || undefined;
@@ -176,6 +179,7 @@ export function resolveConfig(
     allowedRoots,
     recentDirsLimit,
     recentModelsLimit,
+    sessionPageSize,
   };
 }
 

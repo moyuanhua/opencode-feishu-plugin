@@ -10,6 +10,7 @@ export type CommandName =
   | "new"
   | "sessions"
   | "use"
+  | "resume"
   | "current"
   | "stop"
   | "help"
@@ -36,6 +37,7 @@ const ALIASES: Readonly<Record<string, CommandName>> = {
   sessions: "sessions",
   ls: "sessions",
   use: "use",
+  resume: "resume",
   current: "current",
   stop: "stop",
   help: "help",
@@ -149,8 +151,9 @@ export function helpText(scope: "main" | "thread" = "main"): string {
     "`/model [关键词]` — 预填表单的模型；话题内切换当前会话模型",
     "`/perm [档位]` — 预填表单的权限；话题内修改当前会话权限",
     "`/cancel` — 放弃建会话表单",
-    "`/sessions`（别名 `/ls`）— 会话列表卡片",
-    "`/use <序号|会话id前缀>` — 切换当前会话",
+    "`/sessions`（别名 `/ls`）— **全部**会话列表卡片（含「▶️ 进入话题」）",
+    "`/use <序号|会话id前缀>` — 切换当前会话（旧行为）",
+    "`/resume [序号]` — 续聊历史会话：对最近更新（或第 N 个）会话直接开话题",
     "`/current` — 查看当前会话",
     "`/stop` — 中断当前会话正在跑的任务",
     "`/steer <文本>` — 发送一条**立即插队**的消息（打断当前步骤插入执行）",
@@ -180,7 +183,7 @@ export function isCommandAllowedInThread(name: CommandName): boolean {
 /** 话题内敲了被禁命令时的提示文案（引导去主聊天流）。 */
 export function threadForbiddenText(raw: string): string {
   const name = raw ? `\`/${raw}\`` : "该命令";
-  return `话题内不支持 ${name}。\n\n建会话/会话管理请回到**主聊天流**操作（\`/new\`、\`/form\`、\`/sessions\`、\`/use\`、\`/dir\`、\`/cancel\`）。`;
+  return `话题内不支持 ${name}。\n\n建会话/会话管理请回到**主聊天流**操作（\`/new\`、\`/form\`、\`/sessions\`、\`/use\`、\`/resume\`、\`/dir\`、\`/cancel\`）。`;
 }
 
 /** 话题会话标题：取首条消息摘要，如 `话题: 帮我看看这个 bug`。 */

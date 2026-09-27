@@ -89,7 +89,16 @@ function fakeValidate(path: string): DirValidation {
   return { ok: false, reason: "outside_allowed", message: `目录不在允许范围内：${path}` };
 }
 
-function setup(over: { allowed?: boolean; threadRouting?: boolean; promoted?: number } = {}) {
+function setup(
+  over: {
+    allowed?: boolean;
+    threadRouting?: boolean;
+    promoted?: number;
+    allSessions?: () => Promise<unknown>;
+    getSession?: (sessionID: string) => Promise<unknown>;
+    sessionPageSize?: number;
+  } = {},
+) {
   const storage = new FakeStorage();
   const sessionMap = new SessionMap(storage, log, { now: () => 1000 });
   const sender = new FakeSender();
@@ -133,6 +142,9 @@ function setup(over: { allowed?: boolean; threadRouting?: boolean; promoted?: nu
     scanRootSubdirs,
     threadRouting: over.threadRouting ?? true,
     now: () => 1000,
+    ...(over.allSessions ? { listAllSessions: over.allSessions } : {}),
+    ...(over.getSession ? { getSessionInfo: over.getSession } : {}),
+    ...(over.sessionPageSize ? { sessionPageSize: over.sessionPageSize } : {}),
   });
   return {
     commands,
@@ -288,7 +300,7 @@ describe("SessionCommands.handleText（主聊天流）", () => {
     expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("setup_form");
   });
 
-  test("/sessions 发送会话卡片", async () => {
+  test("/sessions 发送会话卡片（无 list 源时回退 SessionMap）", async () => {
     const { commands, sessionMap, sender } = setup();
     await sessionMap.addSession("oc_1", "ses_1", "一", "ou_1");
     await commands.handleText(message("/ls"));
@@ -589,8 +601,8 @@ describe("SessionCommands 会话卡片回调", () => {
     expect(sender.patched[0]!.messageId).toBe("om_card");
   });
 
-  test("new：后台新建并刷新卡片", async () => {
-    const { commands, sessionMap, sender, createSession } = setup();
+  test("new：打开建会话表单卡（不再直接建会话，不 patch）", async () => {
+    const { commands, sender, createSession } = setup();
     const res = commands.handleCardAction({
       rawValue: { cmd: "new", c: "oc_1" },
       messageId: "om_card",
@@ -598,10 +610,11 @@ describe("SessionCommands 会话卡片回调", () => {
       operatorOpenId: "ou_1",
     }) as { toast: { type: string } };
     expect(res.toast.type).toBe("success");
-    await tick();
-    expect(createSession).toHaveBeenCalledTimes(1);
-    expect(await sessionMap.getActive("oc_1")).toBeDefined();
-    expect(sender.patched).toHaveLength(1);
+    await flush();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(sender.patched).toHaveLength(0);
+    expect(sender.cards).toHaveLength(1);
+    expect(JSON.stringify(sender.cards[0]!.card)).toContain("setup_submit");
   });
 
   test("审批卡 value 不会被会话/向导路由误处理", () => {
@@ -613,6 +626,220 @@ describe("SessionCommands 会话卡片回调", () => {
       operatorOpenId: "ou_1",
     }) as { toast: { type: string; content: string } };
     expect(res.toast.type).toBe("error");
+  });
+});
+
+function buttonValues(card: object): unknown[] {
+  const elements = (card as { body: { elements: Array<Record<string, unknown>> } }).body.elements;
+  return elements
+    .filter((e) => e.tag === "button")
+    .map((e) => (e.behaviors as Array<{ value: unknown }>)[0]?.value);
+}
+
+describe("SessionCommands /sessions（全量列表 + 分页 + 已绑标记）", () => {
+  const sessionsRaw = (n: number): unknown[] =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `ses_${String(i).padStart(2, "0")}`,
+      title: `会话 ${i}`,
+      time: { updated: 1_000_000 - i * 1000 },
+      location: { directory: `/home/ubuntu/work/app${i}` },
+    }));
+
+  const openAction = (sessionID: string, operatorOpenId = "ou_1") => ({
+    rawValue: { cmd: "open", s: sessionID, c: "oc_1" },
+    messageId: "om_list",
+    chatId: "oc_1",
+    operatorOpenId,
+  });
+
+  test("全量列表：按最近更新倒序 + 目录尾段 + 总数", async () => {
+    const { commands, sender } = setup({ allSessions: async () => ({ data: sessionsRaw(3) }) });
+    await commands.handleText(message("/ls"));
+    const text = JSON.stringify(sender.cards[0]!.card);
+    const i0 = text.indexOf("会话 0");
+    const i1 = text.indexOf("会话 1");
+    const i2 = text.indexOf("会话 2");
+    expect(i0).toBeGreaterThan(-1);
+    expect(i0).toBeLessThan(i1);
+    expect(i1).toBeLessThan(i2);
+    expect(text).toContain("📍 app1");
+    expect(text).toContain("共 3 个会话");
+    expect(buttonValues(sender.cards[0]!.card)).toContainEqual({ cmd: "open", s: "ses_00", c: "oc_1" });
+  });
+
+  test("已绑话题标记：bindThread 后显示已绑 / 再开话题", async () => {
+    const { commands, sender, sessionMap } = setup({ allSessions: async () => ({ data: sessionsRaw(2) }) });
+    await sessionMap.bindThread("omt_0", "ses_00", "oc_1", "ou_1", "om_root");
+    await commands.handleText(message("/ls"));
+    const text = JSON.stringify(sender.cards[0]!.card);
+    expect(text).toContain("💬 已绑话题");
+    expect(text).toContain("▶️ 再开话题");
+    expect(text).toContain("▶️ 进入话题");
+    expect(await sessionMap.threadIdForSession("ses_00")).toBe("omt_0");
+  });
+
+  test("分页：每页 5 条；翻页 patch 同一卡片到第 2 页", async () => {
+    const { commands, sender } = setup({ allSessions: async () => ({ data: sessionsRaw(7) }), sessionPageSize: 5 });
+    await commands.handleText(message("/ls"));
+    expect(buttonValues(sender.cards[0]!.card)).toContainEqual({ cmd: "list", p: 1, c: "oc_1" });
+    expect(JSON.stringify(sender.cards[0]!.card)).toContain("第 1/2 页 · 共 7 个会话");
+
+    const res = commands.handleCardAction({
+      rawValue: { cmd: "list", p: 1, c: "oc_1" },
+      messageId: "om_list",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { type: string } };
+    expect(res.toast.type).toBe("info");
+    await flush();
+    expect(sender.patched.at(-1)!.messageId).toBe("om_list");
+    const patched = JSON.stringify(sender.patched.at(-1)!.card);
+    expect(patched).toContain("第 2/2 页 · 共 7 个会话");
+    expect(patched).toContain("会话 6");
+  });
+
+  test("回退：session.list 抛错 → 用 SessionMap 映射表列表", async () => {
+    const { commands, sender, sessionMap } = setup({
+      allSessions: async () => {
+        throw new Error("boom");
+      },
+    });
+    await sessionMap.addSession("oc_1", "ses_map", "映射会话", "ou_1");
+    await commands.handleText(message("/ls"));
+    expect(JSON.stringify(sender.cards[0]!.card)).toContain("ses_map");
+  });
+
+  test("回退：形状不可识别 → SessionMap 映射表列表", async () => {
+    const { commands, sender, sessionMap } = setup({ allSessions: async () => ({ foo: 1 }) });
+    await sessionMap.addSession("oc_1", "ses_map2", "映射会话2", "ou_1");
+    await commands.handleText(message("/ls"));
+    expect(JSON.stringify(sender.cards[0]!.card)).toContain("ses_map2");
+  });
+
+  test("非白名单用户点击 open 被拒且无副作用", async () => {
+    const { commands, sender } = setup({
+      allowed: false,
+      allSessions: async () => ({ data: sessionsRaw(1) }),
+      getSession: async () => ({ id: "ses_00" }),
+    });
+    const res = commands.handleCardAction(openAction("ses_00", "ou_intruder")) as {
+      toast: { type: string };
+    };
+    expect(res.toast.type).toBe("error");
+    await tick();
+    expect(sender.repliedCards).toHaveLength(0);
+  });
+});
+
+describe("SessionCommands 进入话题（open 动作）", () => {
+  const raw = { id: "ses_old", title: "历史会话", time: { updated: 900 }, location: { directory: "/home/ubuntu/work/app" } };
+  const action = {
+    rawValue: { cmd: "open", s: "ses_old", c: "oc_1" },
+    messageId: "om_list",
+    chatId: "oc_1",
+    operatorOpenId: "ou_1",
+  };
+
+  test("会话存在：reply_in_thread + bindThread + bindRoot", async () => {
+    const { commands, sender, sessionMap } = setup({ getSession: async () => raw });
+    sender.threadIdFor = (id) => (id === "om_ready" ? "omt_new" : undefined);
+
+    const res = (await commands.handleCardAction(action)) as { toast: { type: string; content: string } };
+    expect(res.toast.content).toContain("进入话题");
+    await flush();
+
+    const replied = sender.repliedCards.at(-1)!;
+    expect(replied.messageId).toBe("om_list");
+    expect(replied.replyInThread).toBe(true);
+    const cardText = JSON.stringify(replied.card);
+    expect(cardText).toContain("✅ 已进入会话");
+    expect(cardText).toContain("ses_old");
+    expect(cardText).toContain("/home/ubuntu/work/app");
+
+    expect((await sessionMap.resolveByThread("omt_new"))?.sessionID).toBe("ses_old");
+    expect((await sessionMap.resolveByRoot("om_ready"))?.sessionID).toBe("ses_old");
+    expect(await sessionMap.threadIdForSession("ses_old")).toBe("omt_new");
+  });
+
+  test("reply 未直接带 thread_id → getMessageMeta 兜底", async () => {
+    const { commands, sender, sessionMap } = setup({ getSession: async () => raw });
+    sender.threadIdFor = (id) => (id === "om_ready" ? "omt_meta" : undefined);
+    await commands.handleCardAction(action);
+    await flush();
+    expect((await sessionMap.resolveByThread("omt_meta"))?.sessionID).toBe("ses_old");
+  });
+
+  test("会话不存在：toast「会话不存在」+ patch 提示卡 + 不开话题", async () => {
+    const { commands, sender } = setup({ getSession: async () => undefined });
+    const res = (await commands.handleCardAction(action)) as { toast: { type: string; content: string } };
+    expect(res.toast.type).toBe("error");
+    expect(res.toast.content).toContain("会话不存在");
+    await flush();
+    expect(sender.repliedCards).toHaveLength(0);
+    expect(JSON.stringify(sender.patched.at(-1)!.card)).toContain("会话不存在");
+  });
+
+  test("进入话题失败（reply 失败）→ patch 提示卡、不绑定", async () => {
+    const { commands, sender, sessionMap } = setup({ getSession: async () => raw });
+    sender.failReply = true;
+    await commands.handleCardAction(action);
+    await flush();
+    expect(JSON.stringify(sender.patched.at(-1)!.card)).toContain("会话不存在");
+    expect(await sessionMap.threadIdForSession("ses_old")).toBeUndefined();
+  });
+});
+
+describe("SessionCommands /resume（续聊历史会话）", () => {
+  const rawSessions = [
+    { id: "ses_newest", title: "最新", time: { updated: 2000 }, location: { directory: "/home/ubuntu/work/a" } },
+    { id: "ses_mid", title: "中间", time: { updated: 1000 } },
+  ];
+  const base = {
+    allSessions: async () => ({ data: rawSessions }),
+    getSession: async () => rawSessions[0],
+  };
+
+  test("/resume（无参）对最近更新的会话直接开话题", async () => {
+    const { commands, sender, sessionMap } = setup(base);
+    sender.threadIdFor = (id) => (id === "om_ready" ? "omt_r" : undefined);
+    await commands.handleText(message("/resume"));
+    expect(sender.repliedCards.at(-1)!.replyInThread).toBe(true);
+    expect(await sessionMap.threadIdForSession("ses_newest")).toBe("omt_r");
+    expect(await sessionMap.threadIdForSession("ses_mid")).toBeUndefined();
+  });
+
+  test("/resume 2 选列表第 2 个会话", async () => {
+    const { commands, sender, sessionMap } = setup(base);
+    sender.threadIdFor = () => "omt_2";
+    await commands.handleText(message("/resume 2"));
+    expect(await sessionMap.threadIdForSession("ses_mid")).toBe("omt_2");
+    expect(await sessionMap.threadIdForSession("ses_newest")).toBeUndefined();
+  });
+
+  test("/resume 序号越界 → 提示，不开话题", async () => {
+    const { commands, sender } = setup(base);
+    await commands.handleText(message("/resume 9"));
+    expect(sender.texts.join("\n")).toContain("越界");
+    expect(sender.repliedCards).toHaveLength(0);
+  });
+
+  test("/resume 非数字参数 → 用法提示", async () => {
+    const { commands, sender } = setup(base);
+    await commands.handleText(message("/resume abc"));
+    expect(sender.texts.join("\n")).toContain("/resume [序号]");
+  });
+
+  test("/resume 没有会话 → 提示", async () => {
+    const { commands, sender } = setup({ allSessions: async () => ({ data: [] }) });
+    await commands.handleText(message("/resume"));
+    expect(sender.texts.join("\n")).toContain("没有可续聊的会话");
+  });
+
+  test("话题内 /resume 被拒 → 提示去主聊天流", async () => {
+    const { commands, sender } = setup(base);
+    await commands.handleText(threadMsg("/resume"));
+    expect(sender.cards).toHaveLength(0);
+    expect(sender.replies.at(-1)!.text).toContain("主聊天流");
   });
 });
 

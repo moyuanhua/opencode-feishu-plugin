@@ -83,6 +83,7 @@ describe("resolveConfig", () => {
     expect(cfg.allowedRoots).toEqual([homedir()]);
     expect(cfg.recentDirsLimit).toBe(5);
     expect(cfg.recentModelsLimit).toBe(5);
+    expect(cfg.sessionPageSize).toBe(8);
     expect(cfg.warnings).toEqual([]);
   });
 
@@ -99,6 +100,13 @@ describe("resolveConfig", () => {
     expect(bad.allowedRoots).toEqual([homedir()]);
     const lower = resolve({ appId: "a", appSecret: "s", recentDirsLimit: 0 }, {});
     expect(lower.recentDirsLimit).toBe(1); // 夹到下限
+  });
+
+  test("P7：sessionPageSize 默认 8，夹取 5–20", () => {
+    expect(resolve({ appId: "a", appSecret: "s" }, {}).sessionPageSize).toBe(8);
+    expect(resolve({ appId: "a", appSecret: "s", sessionPageSize: 3 }, {}).sessionPageSize).toBe(5); // 下限
+    expect(resolve({ appId: "a", appSecret: "s", sessionPageSize: 99 }, {}).sessionPageSize).toBe(20); // 上限
+    expect(resolve({ appId: "a", appSecret: "s", sessionPageSize: 12 }, {}).sessionPageSize).toBe(12);
   });
 
   test("threadRouting 默认 true，显式 false 可回退；字符串 'false' 也识别", () => {

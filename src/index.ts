@@ -263,6 +263,32 @@ async function start(
     await sessionMap.setSessionMeta(sessionID, { dir: directory });
   }
 
+  /**
+   * 全量会话列表（P7）：`ctx.session.list()` 不在插件 SessionDomain 的公开 Pick 内，
+   * 运行时可能缺失 → 返回 undefined 由 SessionCommands 回退 SessionMap。
+   * 形状不稳（数组 / `{data}`）由 `normalizeSessionList` 兜。
+   */
+  async function listAllSessionsRaw(): Promise<unknown> {
+    const api = (ctx.session as unknown as { list?: (input?: unknown) => Promise<unknown> }).list;
+    if (typeof api !== "function") {
+      log.debug("运行时未暴露 session.list");
+      return undefined;
+    }
+    return api({ order: "desc" });
+  }
+
+  /** 按 id 查会话是否存在（P7）：`ctx.session.get` 抛错（不存在）时返回 undefined。 */
+  async function getSessionInfoRaw(sessionID: string): Promise<unknown> {
+    const api = (ctx.session as unknown as { get?: (input: { sessionID: string }) => Promise<unknown> }).get;
+    if (typeof api !== "function") return undefined;
+    try {
+      return await api({ sessionID });
+    } catch (err) {
+      log.warn("会话查询失败（可能不存在）", { sessionID, error: errorMessage(err) });
+      return undefined;
+    }
+  }
+
   const commands = new SessionCommands({
     log,
     sessionMap,
@@ -289,7 +315,10 @@ async function start(
     allowedRoots: config.allowedRoots,
     modelPageSize: 8,
     recentModelsLimit: config.recentModelsLimit,
+    sessionPageSize: config.sessionPageSize,
     threadRouting: config.threadRouting,
+    listAllSessions: listAllSessionsRaw,
+    getSessionInfo: getSessionInfoRaw,
   });
 
   // ── 审批门 ────────────────────────────────────────────────────────────
@@ -478,7 +507,7 @@ async function start(
     log,
     logLevel: config.logLevel,
     onMessage: (message) => handleMessage(message),
-    onCardAction: (action) => {
+    onCardAction: async (action) => {
       // opencode 表单卡（含 question 工具）优先：value 形如 `{f,k,...}`。
       const formResponse = formRelay.handleCardAction(action);
       if (formResponse) return formResponse;

@@ -22,8 +22,11 @@ export interface GatewayOptions {
   /**
    * 卡片回调：必须同步（或极快）返回飞书要求的响应体（如 toast）。
    * 真正的异步工作请 fire-and-forget，不要阻塞这里。
+   *
+   * 允许返回 Promise（如「进入话题」需先校验会话存在）：SDK 会 `await` 该 Promise
+   * 作为回调响应，因此仍应在 3s 内 resolve。
    */
-  readonly onCardAction: (action: CardAction) => object | void;
+  readonly onCardAction: (action: CardAction) => object | void | Promise<object | void>;
 }
 
 export interface Gateway {
@@ -56,14 +59,14 @@ export function startGateway(options: GatewayOptions): Gateway {
       }
     },
 
-    "card.action.trigger": (data: unknown) => {
+    "card.action.trigger": async (data: unknown) => {
       try {
         // P5.2 诊断：只记录键名与布尔，确认回调是否带 thread_id（不记录 token/value/open_id 值）。
         log.info("卡片回调诊断", { ...describeCardActionEvent(data) } as Record<string, unknown>);
         const action = parseCardAction(data);
         if (!action) return {};
-        // 必须 3 秒内同步返回；onCardAction 内部只做同步校验 + 后台 reply。
-        return options.onCardAction(action) ?? {};
+        // 必须 3 秒内返回；onCardAction 内部只做同步校验 + 后台 reply（少数动作先做一次快速查询）。
+        return (await options.onCardAction(action)) ?? {};
       } catch (err) {
         log.error("卡片回调处理异常", { error: errorMessage(err) });
         return { toast: { type: "error", content: "处理失败，请重试" } };

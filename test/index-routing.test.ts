@@ -10,7 +10,10 @@ import { FakeStorage } from "./helpers.js";
  */
 const h = vi.hoisted(() => ({
   gatewayOptions: undefined as
-    | { onMessage: (m: IncomingMessage) => void | Promise<void>; onCardAction: (a: CardAction) => object | void }
+    | {
+        onMessage: (m: IncomingMessage) => void | Promise<void>;
+        onCardAction: (a: CardAction) => object | void | Promise<object | void>;
+      }
     | undefined,
   created: [] as unknown[],
   replied: [] as unknown[],
@@ -50,6 +53,13 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
 const storage = new FakeStorage();
 const promptCalls: Array<{ sessionID: string; text: string }> = [];
 const interruptCalls: string[] = [];
+/** 假的全量会话列表（`ctx.session.list` 数据源）。 */
+let sessionListRaw: Array<{
+  id: string;
+  title: string;
+  time: { updated: number };
+  location: { directory: string };
+}> = [];
 const createSession = vi.fn(async (_input: { title?: string }) => ({ id: `ses_${createSession.mock.calls.length - 1}` }));
 
 function makeCtx(overrides: Record<string, unknown> = {}) {
@@ -93,6 +103,12 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
         interruptCalls.push(input.sessionID);
         return undefined;
       },
+      list: async () => ({ data: sessionListRaw }),
+      get: async (input: { sessionID: string }) => {
+        const found = sessionListRaw.find((s) => s.id === input.sessionID);
+        if (!found) throw new Error("session not found");
+        return found;
+      },
     },
     permission: {
       hook: async () => ({ dispose: async () => undefined }),
@@ -126,14 +142,14 @@ async function deliver(message: IncomingMessage): Promise<void> {
   await h.gatewayOptions!.onMessage(message);
 }
 
-function click(rawValue: unknown, operatorOpenId = "ou_1"): object {
+async function click(rawValue: unknown, operatorOpenId = "ou_1"): Promise<object> {
   return (
-    h.gatewayOptions!.onCardAction({
+    (await h.gatewayOptions!.onCardAction({
       rawValue,
       messageId: "om_card",
       chatId: "oc_1",
       operatorOpenId,
-    }) ?? {}
+    })) ?? {}
   );
 }
 
@@ -148,6 +164,7 @@ describe("index 话题路由（集成）", () => {
     h.gatewayOptions = undefined;
     promptCalls.length = 0;
     interruptCalls.length = 0;
+    sessionListRaw = [];
     createSession.mockClear();
   });
 
@@ -235,24 +252,55 @@ describe("index 话题路由（集成）", () => {
     const token = signStop({ sessionID: "ses_0", ttlMs: 600_000 }, secret);
 
     // 合法点击：运行卡处于 active（思考中）→ success toast，并在后台中断服务端。
-    const stopped = click({ cmd: "stop", sid: "ses_0", t: token }) as { toast: { type: string; content: string } };
+    const stopped = (await click({ cmd: "stop", sid: "ses_0", t: token })) as { toast: { type: string; content: string } };
     expect(stopped.toast).toEqual({ type: "success", content: "正在停止…" });
     await vi.waitFor(() => expect(interruptCalls).toContain("ses_0"));
 
     // 伪造 token → 拒绝。
-    const forged = click({ cmd: "stop", sid: "ses_0", t: `${token}x` }) as { toast: { content: string } };
+    const forged = (await click({ cmd: "stop", sid: "ses_0", t: `${token}x` })) as { toast: { content: string } };
     expect(forged.toast.content).toContain("操作凭证无效");
 
     // 非白名单 operator → 连验签都不做，直接拒绝。
-    const stranger = click({ cmd: "stop", sid: "ses_0", t: token }, "ou_intruder") as { toast: { content: string } };
+    const stranger = (await click({ cmd: "stop", sid: "ses_0", t: token }, "ou_intruder")) as { toast: { content: string } };
     expect(stranger.toast.content).toContain("无操作权限");
 
     // sessionID 不匹配（token 绑定别的会话）→ 拒绝。
-    const mismatch = click({
+    const mismatch = (await click({
       cmd: "stop",
       sid: "ses_0",
       t: signStop({ sessionID: "ses_other", ttlMs: 600_000 }, secret),
-    }) as { toast: { content: string } };
+    })) as { toast: { content: string } };
     expect(mismatch.toast.content).toContain("session-mismatch");
+  });
+
+  test("进入历史会话：open 动作 reply_in_thread → 绑定 thread/root → 话题内消息续上", async () => {
+    sessionListRaw = [
+      { id: "ses_hist", title: "历史会话", time: { updated: 1_700_000_000_000 }, location: { directory: "/home/ubuntu/work/app" } },
+    ];
+    cleanup = await setup();
+    // 先发一条消息绑定 owner 白名单。
+    await deliver(msg("你好", { messageId: "om_boot" }));
+
+    const res = (await click({ cmd: "open", s: "ses_hist", c: "oc_1" })) as { toast: { type: string } };
+    expect(res.toast.type).toBe("success");
+    await vi.waitFor(() => expect(storage.raw("feishu:v2:thread:omt_new")).toBeDefined());
+    expect((storage.raw("feishu:v2:thread:omt_new") as { sessionID: string }).sessionID).toBe("ses_hist");
+
+    // 话题内发消息 → 路由到该历史会话（resume）。
+    await deliver(msg("继续吧", { messageId: "om_hist_1", threadId: "omt_new", rootId: "om_root_h", parentId: "om_root_h" }));
+    expect(promptCalls.at(-1)).toEqual({ sessionID: "ses_hist", text: "继续吧" });
+  });
+
+  test("/resume：对最近更新的会话直接开话题并绑定", async () => {
+    sessionListRaw = [
+      { id: "ses_r1", title: "最近的", time: { updated: 1_700_000_000_000 }, location: { directory: "/home/ubuntu/work/a" } },
+      { id: "ses_r2", title: "较旧", time: { updated: 1_600_000_000_000 }, location: { directory: "/home/ubuntu/work/b" } },
+    ];
+    cleanup = await setup();
+    await deliver(msg("你好", { messageId: "om_boot2" }));
+
+    await deliver(msg("/resume", { messageId: "om_resume" }));
+    await vi.waitFor(() => expect(storage.raw("feishu:v2:thread:omt_new")).toBeDefined());
+    expect((storage.raw("feishu:v2:thread:omt_new") as { sessionID: string }).sessionID).toBe("ses_r1");
   });
 });

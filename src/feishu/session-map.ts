@@ -20,6 +20,8 @@ export const CHAT_SESSIONS_SUFFIX = ":sessions";
 export const THREAD_KEY_PREFIX = "feishu:v2:thread:";
 /** 话题根消息 → 会话映射：`feishu:v2:root:<rootId>`（P5，手动从卡片建话题）。 */
 export const ROOT_KEY_PREFIX = "feishu:v2:root:";
+/** 会话 → 最近话题 反向索引：`feishu:v2:session-thread:<sessionID>`（P7，列表标记「已绑话题」）。 */
+export const SESSION_THREAD_KEY_PREFIX = "feishu:v2:session-thread:";
 
 /** 单个会话条目（持久化结构；openId 仍存在 session 索引里，避免重复）。 */
 export interface SessionEntry {
@@ -60,6 +62,8 @@ export class SessionMap {
   private readonly threadCache = new Map<string, ThreadLink>();
   /** rootId → sessionID（内存缓存）。 */
   private readonly rootCache = new Map<string, string>();
+  /** sessionID → 最近绑定的话题 id（反向索引内存缓存，P7）。 */
+  private readonly sessionToThread = new Map<string, string>();
   private readonly now: () => number;
 
   constructor(
@@ -129,6 +133,10 @@ export class SessionMap {
     this.threadCache.set(threadId, link);
     await this.safeSet(`${THREAD_KEY_PREFIX}${threadId}`, serializeThread(link));
 
+    // 反向索引：session → 最近话题（列表卡标记「已绑话题」/「再开话题」用）。
+    this.sessionToThread.set(sessionID, threadId);
+    await this.safeSet(`${SESSION_THREAD_KEY_PREFIX}${sessionID}`, { threadId });
+
     // 保留已有的会话元数据（perm/gateMode/dir/model），只更新 chat/openId/锚点。
     const existing = this.sessionToChat.get(sessionID) ?? (await this.readSessionLink(sessionID));
     const sessionLink: SessionLink = {
@@ -150,6 +158,21 @@ export class SessionMap {
     const link = parseThreadLink(stored);
     if (link) this.threadCache.set(threadId, link);
     return link;
+  }
+
+  /**
+   * 反向查询：该会话最近绑定的话题 id（P7）。
+   * 用于列表卡标记「💬 已绑话题」与按钮文案「再开话题」。冷缓存回填。
+   */
+  async threadIdForSession(sessionID: string): Promise<string | undefined> {
+    if (!sessionID) return undefined;
+    const cached = this.sessionToThread.get(sessionID);
+    if (cached) return cached;
+    const stored = await this.safeGet(`${SESSION_THREAD_KEY_PREFIX}${sessionID}`);
+    const threadId = isRecord(stored) ? str(stored.threadId) : "";
+    if (!threadId) return undefined;
+    this.sessionToThread.set(sessionID, threadId);
+    return threadId;
   }
 
   /** 绑定话题根消息 → 会话（手动从卡片建话题时用根消息 id 反查）。 */

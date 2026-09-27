@@ -173,6 +173,20 @@ describe("SessionMap 话题 / root 映射（P5）", () => {
     expect(map.getLink("ses_1")?.replyMessageId).toBe("om_root");
   });
 
+  test("threadIdForSession 反向索引（列表标记「已绑话题」）", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.bindThread("omt_1", "ses_1", "oc_1", "ou_1", "om_root");
+    expect(await map.threadIdForSession("ses_1")).toBe("omt_1");
+    // 冷启动回填
+    expect(await new SessionMap(storage, log).threadIdForSession("ses_1")).toBe("omt_1");
+    // 同一会话再开话题 → 反向索引更新为最近一次
+    await map.bindThread("omt_2", "ses_1", "oc_1", "ou_1");
+    expect(await map.threadIdForSession("ses_1")).toBe("omt_2");
+    // 未绑定返回 undefined
+    expect(await map.threadIdForSession("ses_x")).toBeUndefined();
+  });
+
   test("bindRoot / resolveByRoot（含冷缓存回填）", async () => {
     const storage = new FakeStorage();
     const map = new SessionMap(storage, log, { now: () => NOW });
