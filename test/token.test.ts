@@ -1,5 +1,15 @@
 import { describe, expect, test } from "vitest";
-import { ReplayGuard, signApproval, signStop, STOP_PURPOSE, verifyApproval, verifyStop } from "../src/security/token.js";
+import {
+  ALLOW_SESSION_PURPOSE,
+  ReplayGuard,
+  signAllowSession,
+  signApproval,
+  signStop,
+  STOP_PURPOSE,
+  verifyAllowSession,
+  verifyApproval,
+  verifyStop,
+} from "../src/security/token.js";
 
 const SECRET = "test-secret";
 const NOW = 1_700_000_000_000;
@@ -96,6 +106,66 @@ describe("signStop / verifyStop", () => {
   test("审批 token 不能当强停 token 用（用途标签隔离）", () => {
     const approval = token();
     expect(verifyStop(approval, SECRET, { now: NOW }).ok).toBe(false);
+  });
+});
+
+describe("signAllowSession / verifyAllowSession", () => {
+  const signAllow = (
+    over: Partial<{ requestID: string; sessionID: string; action: string; ttlMs: number; nonce: string }> = {},
+  ) =>
+    signAllowSession(
+      {
+        requestID: over.requestID ?? "per_1",
+        sessionID: over.sessionID ?? "ses_1",
+        action: over.action ?? "bash",
+        ttlMs: over.ttlMs ?? 60_000,
+        now: NOW,
+      },
+      SECRET,
+      over.nonce ? { nonce: over.nonce } : {},
+    );
+
+  test("往返成功且用途标签正确", () => {
+    const res = verifyAllowSession(signAllow(), SECRET, {
+      now: NOW + 1000,
+      expectSessionID: "ses_1",
+      expectAction: "bash",
+    });
+    expect(res.ok).toBe(true);
+    if (res.ok) {
+      expect(res.claims.p).toBe(ALLOW_SESSION_PURPOSE);
+      expect(res.claims.s).toBe("ses_1");
+      expect(res.claims.a).toBe("bash");
+      expect(res.claims.r).toBe("per_1");
+    }
+  });
+
+  test("action / sessionID 不匹配拒绝", () => {
+    expect(verifyAllowSession(signAllow({ action: "bash" }), SECRET, { now: NOW, expectAction: "edit" })).toEqual({
+      ok: false,
+      reason: "action-mismatch",
+    });
+    expect(
+      verifyAllowSession(signAllow({ sessionID: "ses_1" }), SECRET, { now: NOW, expectSessionID: "ses_other" }),
+    ).toEqual({ ok: false, reason: "session-mismatch" });
+  });
+
+  test("篡改 / 换 secret / 过期拒绝", () => {
+    const t = signAllow();
+    const [body, sig] = t.split(".");
+    expect(verifyAllowSession(`${body}x.${sig}`, SECRET, { now: NOW }).ok).toBe(false);
+    expect(verifyAllowSession(t, "other", { now: NOW }).ok).toBe(false);
+    expect(verifyAllowSession(signAllow({ ttlMs: 1000 }), SECRET, { now: NOW + 5000 })).toEqual({
+      ok: false,
+      reason: "expired",
+    });
+  });
+
+  test("用途隔离：审批 / 强停 token 不能当会话放行 token 用", () => {
+    expect(verifyAllowSession(token(), SECRET, { now: NOW }).ok).toBe(false);
+    expect(
+      verifyAllowSession(signStop({ sessionID: "ses_1", ttlMs: 60_000, now: NOW }, SECRET), SECRET, { now: NOW }).ok,
+    ).toBe(false);
   });
 });
 

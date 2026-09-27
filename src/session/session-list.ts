@@ -13,6 +13,7 @@ import {
   type SessionCardValue,
   type SessionListRow,
 } from "../feishu/session-cards.js";
+import { modelLabel } from "../feishu/models.js";
 import {
   fallbackEntries,
   normalizeSessionInfo,
@@ -109,8 +110,11 @@ export async function buildListCard(
 
 /**
  * 「进入话题」核心流程（卡片动作 / `/resume` 共用）：
- * `reply_in_thread` 对触发消息开新话题 → 发「✅ 已进入会话」卡 → 拿 thread_id 绑定
+ * `reply_in_thread` 对触发消息开新话题 → 发「🔄 <会话标题>」恢复卡 → 拿 thread_id 绑定
  * thread + root 映射。成功后该话题内消息即续上历史会话（opencode 上下文天然持久）。
+ *
+ * 任务 B：标题 = 会话主题（话题显示名即会话主题）；正文带会话 ID/目录/模型/最近活动，
+ * 并异步补一个**会话摘要**（优先复用已有 compaction 摘要，缺失才生成并 patch 回同一张卡）。
  */
 export async function enterSessionThread(
   ctx: SessionPrimitives,
@@ -130,13 +134,19 @@ export async function enterSessionThread(
     return { ok: false, error: "missing anchor/chat" };
   }
   const info = input.info;
-  const card = buildSessionOpenedCard({
+  const link = await ctx.deps.sessionMap.resolveBySession(sessionID);
+  const dir = info?.directory ?? link?.dir;
+  const showSummary = (ctx.deps.resumeSummary ?? true) && Boolean(ctx.deps.summarizeSession);
+  const cardInput = {
     title: info?.title ?? "",
     sessionID,
-    ...(info?.directory ? { dir: info.directory } : {}),
+    ...(dir ? { dir } : {}),
+    ...(link?.model ? { model: modelLabel(link.model) } : {}),
     ...(info?.updatedAt ? { updatedAt: info.updatedAt } : {}),
     now: ctx.now(),
-  });
+    ...(showSummary ? { summaryPending: true } : {}),
+  };
+  const card = buildSessionOpenedCard(cardInput);
   const res = await ctx.deps.sender.replyCard(anchorMessageId, card, { replyInThread: true });
   ctx.deps.log.info("进入会话并开话题", {
     sessionID,
@@ -170,7 +180,41 @@ export async function enterSessionThread(
   await ctx.deps.sessionMap.bindThread(threadId, sessionID, chatId, operatorOpenId, anchorMessageId);
   await ctx.deps.sessionMap.bindRoot(res.messageId, sessionID);
   ctx.deps.log.info("已绑定话题与会话", { sessionID, threadId, rootId: res.messageId });
+
+  // 任务 B：摘要**火后执行**——先发卡（回调 3 秒内已回 toast），拿到结果再 patch 同一张卡。
+  if (showSummary) {
+    void patchResumeSummary(ctx, sessionID, dir, res.messageId, cardInput);
+  }
   return { ok: true, threadId };
+}
+
+/**
+ * 任务 B：异步获取摘要并 patch 回恢复卡。失败/超时降级为「摘要生成失败，可直接发消息继续」。
+ * 永不抛异常（只 log.warn），绝不影响已发出去的恢复卡与话题绑定。
+ */
+async function patchResumeSummary(
+  ctx: SessionPrimitives,
+  sessionID: string,
+  dir: string | undefined,
+  messageId: string,
+  cardInput: Parameters<typeof buildSessionOpenedCard>[0],
+): Promise<void> {
+  try {
+    const outcome = await ctx.deps.summarizeSession!({
+      sessionID,
+      ...(dir ? { directory: dir } : {}),
+      timeoutMs: ctx.deps.resumeSummaryTimeoutMs ?? 20_000,
+    });
+    const summary = outcome.summary ?? "（摘要生成失败，可直接发消息继续）";
+    const res = await ctx.deps.sender.patchCard(
+      messageId,
+      buildSessionOpenedCard({ ...cardInput, summaryPending: false, summary }),
+    );
+    if (!res.ok) ctx.deps.log.warn("恢复卡摘要更新失败", { sessionID, error: res.error ?? "unknown" });
+    ctx.deps.log.info("恢复卡摘要已更新", { sessionID, source: outcome.source, hasSummary: Boolean(outcome.summary) });
+  } catch (err) {
+    ctx.deps.log.warn("恢复卡摘要生成异常", { sessionID, error: errorMessage(err) });
+  }
 }
 
 /**

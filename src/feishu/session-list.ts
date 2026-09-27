@@ -11,6 +11,7 @@
  * 时间字段同样不一：JSON 里通常是 ms 数字，但也可能是 ISO 字符串 / `Date` /
  * Effect `DateTime`（`{ epochMillis }`）。`toMillis` 全部兜住。
  */
+import type { PermissionRule } from "../types.js";
 
 /** 归一化后的会话条目（列表展示用）。 */
 export interface SessionListEntry {
@@ -60,6 +61,26 @@ export function normalizeSessionInfo(raw: unknown): SessionListEntry | undefined
 export function extractSessionTitle(raw: unknown): string | undefined {
   const title = normalizeSessionInfo(raw)?.title.trim();
   return title ? title : undefined;
+}
+
+/**
+ * 从 `ctx.session.get()` 原始返回里提取**会话当前权限规则集**（任务 A 用）。
+ * `permissions` 存在但不是合法数组 → 返回 `undefined`（调用方回退预设推导）；
+ * 合法（含空数组）→ 返回归一化后的规则数组。
+ */
+export function extractSessionPermissions(raw: unknown): PermissionRule[] | undefined {
+  if (!isRecord(raw) || !Array.isArray(raw.permissions)) return undefined;
+  const out: PermissionRule[] = [];
+  for (const item of raw.permissions) {
+    if (!isRecord(item)) continue;
+    const action = str(item.action);
+    const resource = str(item.resource);
+    const effect = item.effect;
+    if (!action || !resource) continue;
+    if (effect !== "allow" && effect !== "ask" && effect !== "deny") continue;
+    out.push({ action, resource, effect });
+  }
+  return out;
 }
 
 /**

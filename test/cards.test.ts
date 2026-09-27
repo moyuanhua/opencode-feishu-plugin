@@ -3,6 +3,7 @@ import {
   buildApprovalCard,
   buildConsoleHintCard,
   buildResolvedCard,
+  buildSessionAllowResolvedCard,
   buildStreamingCard,
   MAX_CARD_BYTES,
   truncateCardContent,
@@ -43,6 +44,46 @@ describe("buildApprovalCard", () => {
     expect(card).toContain("r2");
     expect(card).not.toContain("r3");
     expect(card).toContain("另有 9 项");
+  });
+
+  test("任务 A：装配 allowSessionToken 时多一个「本会话内允许」按钮", () => {
+    const card = buildApprovalCard({ ...baseInput, allowSessionToken: "astok" }) as {
+      body: { elements: Array<Record<string, unknown>> };
+    };
+    const buttons = card.body.elements.filter((e) => e.tag === "button");
+    expect(buttons).toHaveLength(4);
+    const labels = buttons.map(
+      (b) => ((b.text as { content: string }).content),
+    );
+    expect(labels).toContain("✅ 本会话内允许该工具");
+    const sessionBtn = buttons.find(
+      (b) => (b.text as { content: string }).content === "✅ 本会话内允许该工具",
+    )!;
+    expect((sessionBtn.behaviors as Array<{ value: Record<string, unknown> }>)[0]!.value).toEqual({
+      cmd: "allow_session",
+      a: "bash",
+      t: "astok",
+    });
+  });
+
+  test("任务 A：未装配 allowSessionToken 时保持三按钮", () => {
+    const card = buildApprovalCard(baseInput) as { body: { elements: Array<Record<string, unknown>> } };
+    expect(card.body.elements.filter((e) => e.tag === "button")).toHaveLength(3);
+    expect(JSON.stringify(card)).not.toContain("allow_session");
+  });
+});
+
+describe("buildSessionAllowResolvedCard", () => {
+  test("标题「已允许本会话内 X」且无按钮", () => {
+    const card = buildSessionAllowResolvedCard({ ...baseInput, action: "bash" }, {
+      action: "bash",
+      operatorOpenId: "ou_123456789",
+      at: 0,
+    }) as Record<string, unknown>;
+    expect((card.header as { title: { content: string } }).title.content).toBe("✅ 已允许本会话内 bash");
+    const text = JSON.stringify(card);
+    expect(text).toContain("不再询问");
+    expect(text).not.toContain('"tag":"button"');
   });
 });
 

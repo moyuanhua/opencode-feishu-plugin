@@ -387,6 +387,7 @@ function serializeSession(link: SessionLink): {
   gateMode?: SessionLink["gateMode"];
   dir?: string;
   model?: SessionLink["model"];
+  allowActions?: readonly string[];
 } {
   return {
     chatId: link.chatId,
@@ -396,6 +397,7 @@ function serializeSession(link: SessionLink): {
     ...(link.gateMode ? { gateMode: link.gateMode } : {}),
     ...(link.dir ? { dir: link.dir } : {}),
     ...(link.model ? { model: link.model } : {}),
+    ...(link.allowActions && link.allowActions.length > 0 ? { allowActions: [...link.allowActions] } : {}),
   };
 }
 
@@ -410,6 +412,7 @@ function parseSessionLink(value: unknown): SessionLink | undefined {
   const gateMode = value.gateMode === "off" || value.gateMode === "gate" ? value.gateMode : undefined;
   const dir = str(value.dir);
   const model = parseModelRef(value.model);
+  const allowActions = parseStringArray(value.allowActions);
   return {
     chatId,
     openId,
@@ -418,7 +421,23 @@ function parseSessionLink(value: unknown): SessionLink | undefined {
     ...(gateMode ? { gateMode } : {}),
     ...(dir ? { dir } : {}),
     ...(model ? { model } : {}),
+    ...(allowActions.length > 0 ? { allowActions } : {}),
   };
+}
+
+/** 解析字符串数组（去空、去重）；非法返回 []。 */
+function parseStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const trimmed = item.trim();
+    if (!trimmed || seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
 }
 
 function isPreset(value: unknown): value is NonNullable<SessionLink["perm"]> {

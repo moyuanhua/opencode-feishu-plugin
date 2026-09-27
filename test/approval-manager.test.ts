@@ -1,6 +1,12 @@
 import { describe, expect, test } from "vitest";
 import { ApprovalManager, type ReplyInput } from "../src/permission.js";
-import { ReplayGuard, signApproval, verifyApproval } from "../src/security/token.js";
+import {
+  ReplayGuard,
+  signAllowSession,
+  signApproval,
+  verifyAllowSession,
+  verifyApproval,
+} from "../src/security/token.js";
 import type { FeishuSender, SendCardResult } from "../src/feishu/sender.js";
 import { createLogger } from "../src/logger.js";
 import type { CardAction, SessionLink } from "../src/types.js";
@@ -40,9 +46,18 @@ class FakeSender implements FeishuSender {
   async deleteMessage(): Promise<void> {}
 }
 
-function setup(over: { allowed?: string[]; link?: SessionLink | null } = {}) {
+function setup(
+  over: {
+    allowed?: string[];
+    link?: SessionLink | null;
+    sessionAllowButton?: boolean;
+    allowSession?: (input: { sessionID: string; action: string }) => Promise<void>;
+    hasSessionAllow?: (input: { sessionID: string; action: string }) => boolean;
+  } = {},
+) {
   const sender = new FakeSender();
   const replies: ReplyInput[] = [];
+  const allowCalls: Array<{ sessionID: string; action: string }> = [];
   const log = createLogger({ level: "error", sink: () => undefined });
   const manager = new ApprovalManager({
     config: { permissionGate: "gate", allowTools: [], denyTools: [], approvalTtlMs: 60_000, maxResourcesShown: 8 },
@@ -57,9 +72,23 @@ function setup(over: { allowed?: string[]; link?: SessionLink | null } = {}) {
     reply: async (input) => {
       replies.push(input);
     },
+    sessionAllowButton: over.sessionAllowButton ?? true,
+    signAllowSession: ({ requestID, sessionID, action }) =>
+      signAllowSession({ requestID, sessionID, action, ttlMs: 60_000, now: NOW }, SECRET),
+    verifyAllowSession: (token, expect) =>
+      verifyAllowSession(token, SECRET, {
+        now: NOW + 1,
+        ...(expect?.sessionID ? { expectSessionID: expect.sessionID } : {}),
+        ...(expect?.action ? { expectAction: expect.action } : {}),
+      }),
+    allowSession: async (input) => {
+      allowCalls.push(input);
+      if (over.allowSession) await over.allowSession(input);
+    },
+    ...(over.hasSessionAllow ? { hasSessionAllow: over.hasSessionAllow } : {}),
     now: () => NOW,
   });
-  return { manager, sender, replies };
+  return { manager, sender, replies, allowCalls };
 }
 
 const REQUEST = {
@@ -203,6 +232,137 @@ describe("ApprovalManager.handleCardAction", () => {
       operatorOpenId: "ou_1",
     }) as { toast: { type: string } };
     expect(response.toast.type).toBe("error");
+  });
+});
+
+describe("ApprovalManager 会话内允许（任务 A）", () => {
+  function allowValueFrom(sender: FakeSender): { cmd: string; a: string; t: string } {
+    const card = sender.sent[0]?.card as { body: { elements: Array<Record<string, unknown>> } };
+    const btn = card.body.elements.find(
+      (e) => e.tag === "button" && ((e.text as { content: string }).content === "✅ 本会话内允许该工具"),
+    ) as { behaviors: Array<{ value: { cmd: string; a: string; t: string } }> } | undefined;
+    if (!btn) throw new Error("allow_session button missing");
+    return btn.behaviors[0]!.value;
+  }
+
+  test("卡片含按钮，点击 → 持久化 + 答复 once + patch 专用结果卡", async () => {
+    const { manager, sender, replies, allowCalls } = setup();
+    await manager.onAsked(REQUEST);
+    const value = allowValueFrom(sender);
+
+    const res = manager.handleCardAction({
+      rawValue: value,
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { type: string; content: string } };
+    expect(res.toast.type).toBe("success");
+    expect(res.toast.content).toContain("bash");
+
+    await tick();
+    expect(allowCalls).toEqual([{ sessionID: "ses_1", action: "bash" }]);
+    expect(replies).toEqual([{ sessionID: "ses_1", requestID: "per_1", reply: "once" }]);
+    expect(sender.patched).toHaveLength(1);
+    const patched = JSON.stringify(sender.patched[0]!.card);
+    expect(patched).toContain("已允许本会话内 bash");
+    expect(patched).not.toContain('"tag":"button"');
+  });
+
+  test("非白名单用户被拒，且不写入、不 reply", async () => {
+    const { manager, sender, replies, allowCalls } = setup({ allowed: ["ou_1"] });
+    await manager.onAsked(REQUEST);
+    const value = allowValueFrom(sender);
+    const res = manager.handleCardAction({
+      rawValue: value,
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_evil",
+    }) as { toast: { type: string } };
+    expect(res.toast.type).toBe("error");
+    await tick();
+    expect(allowCalls).toHaveLength(0);
+    expect(replies).toHaveLength(0);
+  });
+
+  test("伪造 / action 不匹配 → 验签失败", async () => {
+    const { manager, sender, allowCalls } = setup();
+    await manager.onAsked(REQUEST);
+    const value = allowValueFrom(sender);
+
+    const forged = manager.handleCardAction({
+      rawValue: { ...value, t: `${value.t}x` },
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { content: string } };
+    expect(forged.toast.content).toContain("审批凭证无效");
+
+    const mismatch = manager.handleCardAction({
+      rawValue: { ...value, a: "edit" },
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { content: string } };
+    expect(mismatch.toast.content).toContain("action-mismatch");
+
+    await tick();
+    expect(allowCalls).toHaveLength(0);
+  });
+
+  test("sessionID 不匹配（token 属于别的会话）→ 拒绝", async () => {
+    const { manager, allowCalls } = setup();
+    await manager.onAsked(REQUEST);
+    // 手动签发一个绑定别的会话的 token；tracked 卡片会话是 ses_1。
+    const foreign = signAllowSession(
+      { requestID: "per_1", sessionID: "ses_other", action: "bash", ttlMs: 60_000, now: NOW },
+      SECRET,
+    );
+    const res = manager.handleCardAction({
+      rawValue: { cmd: "allow_session", a: "bash", t: foreign },
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { content: string } };
+    expect(res.toast.content).toContain("会话不匹配");
+    await tick();
+    expect(allowCalls).toHaveLength(0);
+  });
+
+  test("重复点击只回 toast，不报错、不重复写入", async () => {
+    const { manager, sender, allowCalls } = setup();
+    await manager.onAsked(REQUEST);
+    const value = allowValueFrom(sender);
+    const action: CardAction = { rawValue: value, messageId: "om_card_1", chatId: "oc_1", operatorOpenId: "ou_1" };
+
+    const first = manager.handleCardAction(action) as { toast: { type: string } };
+    await tick();
+    const second = manager.handleCardAction(action) as { toast: { type: string; content: string } };
+    expect(first.toast.type).toBe("success");
+    expect(second.toast.type).toBe("warning");
+    expect(second.toast.content).toContain("已处理");
+    expect(allowCalls).toHaveLength(1);
+  });
+
+  test("已生效：hasSessionAllow=true 时回 info toast，仍答复当前请求", async () => {
+    const { manager, sender, replies, allowCalls } = setup({ hasSessionAllow: () => true });
+    await manager.onAsked(REQUEST);
+    const value = allowValueFrom(sender);
+    const res = manager.handleCardAction({
+      rawValue: value,
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { type: string } };
+    expect(res.toast.type).toBe("info");
+    await tick();
+    expect(allowCalls).toHaveLength(1); // 幂等写入仍执行（无副作用）
+    expect(replies).toHaveLength(1);
+  });
+
+  test("配置关闭：审批卡不含该按钮", async () => {
+    const { manager, sender } = setup({ sessionAllowButton: false });
+    await manager.onAsked(REQUEST);
+    expect(JSON.stringify(sender.sent[0]!.card)).not.toContain("allow_session");
   });
 });
 

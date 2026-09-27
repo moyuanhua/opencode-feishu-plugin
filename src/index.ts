@@ -20,7 +20,7 @@ import { hasSecret, resolveConfig } from "./config.js";
 import { createLogger, errorMessage, maskId } from "./logger.js";
 import { acquireProcessGuard, releaseProcessGuard } from "./lifecycle.js";
 import { OwnerPolicy } from "./security/allowlist.js";
-import { ReplayGuard, signApproval, signStop, verifyApproval, verifyStop } from "./security/token.js";
+import { ReplayGuard, signApproval, signAllowSession, signStop, verifyApproval, verifyAllowSession, verifyStop } from "./security/token.js";
 import { startGateway } from "./feishu/gateway.js";
 import { createFeishuSender } from "./feishu/sender.js";
 import { SessionMap } from "./feishu/session-map.js";
@@ -46,17 +46,24 @@ import {
   sameModel,
   type ModelSwitchOutcome,
 } from "./feishu/models.js";
-import { extractSessionTitle } from "./feishu/session-list.js";
+import { extractSessionPermissions, extractSessionTitle } from "./feishu/session-list.js";
 import { injectTopicGuidance } from "./feishu/topic-guidance.js";
-import { presetAskActions, presetGateMode, presetToRuleset } from "./feishu/perm-presets.js";
+import { allowActionsForGrant, appendAllowRules, presetAskActions, presetGateMode, presetToRuleset } from "./feishu/perm-presets.js";
 import { ApprovalManager, decideEffectForSession, type ReplyInput } from "./permission.js";
 import { SessionCommands } from "./session-commands.js";
 import { routeEvent, extractErrorText, type EventRouterDeps } from "./runtime/event-router.js";
 import { routeCardAction } from "./runtime/card-action-router.js";
+import {
+  buildTranscript,
+  summarizeSession as summarizeSessionImpl,
+  type SessionSummaryOutcome,
+  type SummarizeSessionInput,
+} from "./session/resume-summary.js";
 import type {
   IncomingMessage,
   ModelRef,
   PermissionPreset,
+  PermissionRule,
   SessionLink,
   StorageLike,
 } from "./types.js";
@@ -328,12 +335,102 @@ async function start(
     const permissions = presetToRuleset(preset);
     // 即使是空 ruleset（askHigh「继承」）也要显式写入，以清掉上一次预设残留的规则。
     await ctx.session.update({ sessionID, permissions });
-    await sessionMap.setSessionMeta(sessionID, { perm: preset, gateMode: presetGateMode(preset) });
+    // 换档是显式权限变更：同时清除会话内「允许该工具」的放行集合，避免旧授权压过新档位。
+    await sessionMap.setSessionMeta(sessionID, {
+      perm: preset,
+      gateMode: presetGateMode(preset),
+      allowActions: undefined,
+    });
   }
 
   async function moveSessionDir(sessionID: string, directory: string): Promise<void> {
     await ctx.session.move({ sessionID, directory });
     await sessionMap.setSessionMeta(sessionID, { dir: directory });
+  }
+
+  /**
+   * 任务 A：把某 action **本会话内**放行。
+   *
+   * 1. `SessionMap` 记录 `allowActions`（gate 命中即不降级为 ask，是可靠兜底）；
+   * 2. 追加会话级 ruleset（`ctx.session.update`，在**现有规则**基础上追加 allow；
+   *    读不到服务端现有规则时用会话预设推导）——即使 ruleset 更新失败，第 1 步仍生效。
+   *
+   * shell 相关动作（`shell`/`bash`）一起放行（见 `allowActionsForGrant`）。
+   */
+  async function grantSessionAllow(input: { sessionID: string; action: string }): Promise<void> {
+    const link = await sessionMap.resolveBySession(input.sessionID);
+    const granted = allowActionsForGrant(input.action);
+    const next = [...(link?.allowActions ?? [])];
+    for (const action of granted) if (!next.includes(action)) next.push(action);
+    await sessionMap.setSessionMeta(input.sessionID, { allowActions: next });
+
+    const serverRules = extractSessionPermissions(await getSessionInfoRaw(input.sessionID, link?.dir));
+    const base = serverRules ?? (link?.perm ? presetToRuleset(link.perm) : []);
+    const permissions: PermissionRule[] = appendAllowRules(base, granted);
+    try {
+      const update = ctx.session.update as unknown as (
+        arg: { sessionID: string; permissions: PermissionRule[] },
+        options?: { headers?: Record<string, string> },
+      ) => Promise<void>;
+      await update(
+        { sessionID: input.sessionID, permissions },
+        link?.dir ? { headers: { "x-opencode-directory": link.dir } } : undefined,
+      );
+    } catch (err) {
+      // allowActions 已写入 SessionMap，gate 仍会放行；ruleset 只是双保险。
+      log.warn("会话级权限规则集更新失败（allowActions 仍生效）", {
+        sessionID: input.sessionID,
+        action: input.action,
+        error: errorMessage(err),
+      });
+    }
+    log.info("已在本会话内放行工具", { sessionID: input.sessionID, action: input.action, granted });
+  }
+
+  /**
+   * 任务 B：获取会话摘要（复用已有 compaction 摘要 → 缺失才生成）。
+   *
+   * 优先 `ctx.session.context`（零模型调用）；无摘要则 `ctx.session.generate`；
+   * 运行时未暴露 `session.generate` 时，退化为 `ctx.generate.text` + 上下文精简转写
+   * （等价兜底，会消耗一次模型调用）。
+   */
+  async function summarizeSessionForResume(input: SummarizeSessionInput): Promise<SessionSummaryOutcome> {
+    const readContext = async (sessionID: string, directory: string | undefined): Promise<unknown> => {
+      const api = (ctx.session as unknown as {
+        context?: (
+          arg: { sessionID: string },
+          options?: { headers?: Record<string, string> },
+        ) => Promise<unknown>;
+      }).context;
+      if (typeof api !== "function") return undefined;
+      return api({ sessionID }, directory ? { headers: { "x-opencode-directory": directory } } : undefined);
+    };
+
+    const generate = async (
+      sessionID: string,
+      prompt: string,
+      directory: string | undefined,
+    ): Promise<unknown> => {
+      const api = (ctx.session as unknown as {
+        generate?: (
+          arg: { sessionID: string; prompt: string },
+          options?: { headers?: Record<string, string> },
+        ) => Promise<unknown>;
+      }).generate;
+      if (typeof api === "function") {
+        return api({ sessionID, prompt }, directory ? { headers: { "x-opencode-directory": directory } } : undefined);
+      }
+      // 等价兜底：session.generate 不在运行时暴露时，用 generate.text + 上下文转写。
+      const generateText = (ctx.generate as unknown as {
+        text?: (arg: { prompt: string }) => Promise<unknown>;
+      } | undefined)?.text;
+      if (typeof generateText !== "function") return undefined;
+      const transcript = buildTranscript(await readContext(sessionID, directory));
+      const fullPrompt = transcript ? `${prompt}\n\n会话最近记录：\n${transcript}` : prompt;
+      return generateText({ prompt: fullPrompt });
+    };
+
+    return summarizeSessionImpl({ log, readContext, generate }, input);
   }
 
   /**
@@ -435,6 +532,9 @@ async function start(
     threadRouting: config.threadRouting,
     listAllSessions: listAllSessionsRaw,
     getSessionInfo: getSessionInfoRaw,
+    resumeSummary: config.resumeSummary,
+    resumeSummaryTimeoutMs: config.resumeSummaryTimeoutMs,
+    summarizeSession: summarizeSessionForResume,
   });
 
   // ── 审批门 ────────────────────────────────────────────────────────────
@@ -451,6 +551,24 @@ async function start(
     getLink: (sessionID) => sessionMap.resolveBySession(sessionID),
     isAllowed: (openId) => owner.isAllowed(openId),
     reply: (input) => replyPermission(ctx, input),
+    // 任务 A：审批卡「✅ 本会话内允许该工具」。
+    sessionAllowButton: config.sessionAllowButton,
+    signAllowSession: ({ requestID, sessionID, action }) =>
+      signAllowSession(
+        { requestID, sessionID, action, ttlMs: config.approvalTtlMs },
+        config.signSecret,
+      ),
+    verifyAllowSession: (token, expect) =>
+      verifyAllowSession(token, config.signSecret, {
+        ...(expect?.sessionID ? { expectSessionID: expect.sessionID } : {}),
+        ...(expect?.action ? { expectAction: expect.action } : {}),
+      }),
+    allowSession: (input) => grantSessionAllow(input),
+    hasSessionAllow: ({ sessionID, action }) => {
+      const link = sessionMap.getLink(sessionID);
+      const allowed = link?.allowActions ?? [];
+      return allowActionsForGrant(action).every((a) => allowed.includes(a));
+    },
   });
 
   const evaluateRegistration = await ctx.permission.hook("evaluate", async (event) => {
@@ -459,7 +577,9 @@ async function start(
       link && link.gateMode
         ? { gateMode: link.gateMode, ...(link.perm ? { askActions: presetAskActions(link.perm) } : {}) }
         : undefined;
-    const decision = decideEffectForSession(event.action, config, sessionGate);
+    // 任务 A：会话内显式放行的 action 命中时不再降级为 ask（denyTools 仍优先）。
+    const allowActions = link?.allowActions && link.allowActions.length > 0 ? link.allowActions : undefined;
+    const decision = decideEffectForSession(event.action, config, sessionGate, allowActions);
     if (decision.effect === undefined) return;
     // 关键安全边界：只有「能投递到飞书」的会话才允许置为 ask，
     // 否则 TUI/其他来源的会话会因为没有审批出口而永久挂起。

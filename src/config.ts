@@ -83,6 +83,18 @@ export interface ResolvedConfig {
   readonly recentModelsLimit: number;
   /** `/sessions` 每页会话数（P7，默认 8，夹取 5–20）。 */
   readonly sessionPageSize: number;
+  /**
+   * 审批卡是否显示「✅ 本会话内允许该工具」按钮（任务 A，默认 true）。
+   * 关闭后审批卡回到「允许一次 / 始终允许 / 拒绝」三按钮。
+   */
+  readonly sessionAllowButton: boolean;
+  /**
+   * 恢复卡是否展示会话摘要（任务 B，默认 true）。
+   * 优先复用会话已有 compaction 摘要，缺失才异步生成并 patch 回卡片。
+   */
+  readonly resumeSummary: boolean;
+  /** 恢复卡摘要生成超时（任务 B，默认 20000ms，夹取 3000–60000）。 */
+  readonly resumeSummaryTimeoutMs: number;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -146,6 +158,9 @@ export function resolveConfig(
   const recentDirsLimit = clamp(asNumber(merged.recentDirsLimit, 5), 1, 20);
   const recentModelsLimit = clamp(asNumber(merged.recentModelsLimit, 5), 1, 20);
   const sessionPageSize = clamp(asNumber(merged.sessionPageSize, 8), 5, 20);
+  const sessionAllowButton = asBoolean(merged.sessionAllowButton, true);
+  const resumeSummary = asBoolean(merged.resumeSummary, true);
+  const resumeSummaryTimeoutMs = clamp(asNumber(merged.resumeSummaryTimeoutMs, 20_000), 3_000, 60_000);
   const domain = merged.domain === "lark" ? "lark" : "feishu";
   const logFile = resolveLogFile(merged.logFile, env, deps);
   const gatewayLocation = asString(merged.gatewayLocation).trim() || undefined;
@@ -190,6 +205,9 @@ export function resolveConfig(
     recentDirsLimit,
     recentModelsLimit,
     sessionPageSize,
+    sessionAllowButton,
+    resumeSummary,
+    resumeSummaryTimeoutMs,
   };
 }
 

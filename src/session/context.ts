@@ -28,6 +28,10 @@ import type { CommandScope } from "../feishu/routing.js";
 import type { DirValidation } from "../feishu/dirs.js";
 import type { WizardStore } from "../feishu/wizard.js";
 import type { RecentStore } from "../feishu/recent.js";
+import type {
+  SessionSummaryOutcome,
+  SummarizeSessionInput,
+} from "./resume-summary.js";
 
 /** 建会话输入（P6）：标题 + 归属 + 目录/模型/权限。 */
 export interface CreateSessionInput {
@@ -107,6 +111,17 @@ export interface SessionCommandsDeps {
   readonly getSessionInfo?: (sessionID: string) => Promise<unknown>;
   /** `/sessions` 每页数量（P7，默认 8，夹取 5–20）。 */
   readonly sessionPageSize?: number;
+  /**
+   * 任务 B：恢复卡摘要开关（默认 true）。关闭时不显示摘要区块、也不生成。
+   */
+  readonly resumeSummary?: boolean;
+  /** 任务 B：摘要生成超时（默认 20000ms，夹取 3000–60000）。 */
+  readonly resumeSummaryTimeoutMs?: number;
+  /**
+   * 任务 B：获取会话摘要（复用已有 compaction 摘要，缺失才生成）。
+   * 缺省 = 恢复卡不显示摘要（即使 `resumeSummary=true`）。
+   */
+  readonly summarizeSession?: (input: SummarizeSessionInput) => Promise<SessionSummaryOutcome>;
 }
 
 /** 向导状态（结构化子集，避免与持久化类型强耦合）。 */

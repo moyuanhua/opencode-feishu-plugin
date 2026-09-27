@@ -19,10 +19,11 @@
 import { errorMessage } from "./logger.js";
 import type { Logger, PermissionRepliedLike, PermissionRequestLike, SessionLink } from "./types.js";
 import { matchesAny } from "./security/allowlist.js";
-import { type ReplayGuard, type VerifyResult } from "./security/token.js";
+import { type AllowSessionClaims, type ReplayGuard, type VerifyResult } from "./security/token.js";
 import {
   buildApprovalCard,
   buildResolvedCard,
+  buildSessionAllowResolvedCard,
   type ApprovalCardInput,
   type ApprovalOutcome,
 } from "./feishu/cards.js";
@@ -82,19 +83,35 @@ export interface SessionGate {
  * - `gate`：denyTools → deny；allowTools → allow；askActions → ask；其余**继承**（不改写），
  *   因此不会把只读类工具误伤成 ask（与全局 gate 的「其余一律 ask」不同）。
  *
+ * 任务 A：`allowActions` 是审批卡「本会话内允许该工具」写入的会话级放行集合。
+ * 命中时**优先于 askActions** 返回 allow（避免 session ruleset 被 gate 再次改成 ask），
+ * 但 `denyTools`（安全红线）仍优先。`allowActions` 与会话预设相互独立，因此即便会话
+ * 没有预设（gate 走全局判定），命中也会把「本会被 ask」的动作保持为 allow。
+ *
  * 安全边界（`ask` 是否可投递）仍由调用方判定，本函数不做飞书映射检查。
  */
 export function decideEffectForSession(
   action: string,
   config: GateConfig,
   session: SessionGate | undefined,
+  allowActions?: readonly string[],
 ): EffectDecision {
-  if (!session) return decideEffect(action, config);
+  if (!session) {
+    const base = decideEffect(action, config);
+    // 仅拦截「本会被 ask」的动作；permissionGate=off/notify 时保持不介入。
+    if (base.effect === "ask" && allowActions && allowActions.length > 0 && matchesAny(action, allowActions)) {
+      return { effect: "allow" };
+    }
+    return base;
+  }
   if (session.gateMode === "off") return {};
   if (matchesAny(action, config.denyTools)) {
     return { effect: "deny", message: `feishu policy: ${action} 已在 denyTools` };
   }
   if (matchesAny(action, config.allowTools)) {
+    return { effect: "allow" };
+  }
+  if (allowActions && allowActions.length > 0 && matchesAny(action, allowActions)) {
     return { effect: "allow" };
   }
   if (session.askActions && matchesAny(action, session.askActions)) {
@@ -117,6 +134,25 @@ export function parseApprovalValue(rawValue: unknown): ApprovalActionValue | und
   if (!token) return undefined;
   if (d !== "once" && d !== "always" && d !== "reject") return undefined;
   return { token, decision: d };
+}
+
+export interface AllowSessionActionValue {
+  readonly action: string;
+  readonly token: string;
+}
+
+/**
+ * 解析「本会话内允许该工具」按钮 value：`{ cmd:"allow_session", a:<action>, t:<token> }`。
+ * 非该按钮返回 undefined。
+ */
+export function parseAllowSessionValue(rawValue: unknown): AllowSessionActionValue | undefined {
+  if (typeof rawValue !== "object" || rawValue === null) return undefined;
+  const record = rawValue as Record<string, unknown>;
+  if (record.cmd !== "allow_session") return undefined;
+  const action = typeof record.a === "string" ? record.a : "";
+  const token = typeof record.t === "string" ? record.t : "";
+  if (!action || !token) return undefined;
+  return { action, token };
 }
 
 export interface ReplyInput {
@@ -143,6 +179,24 @@ export interface ApprovalDeps {
   readonly isAllowed: (openId: string) => boolean;
   readonly reply: (input: ReplyInput) => Promise<void>;
   readonly now?: () => number;
+  // ── 任务 A：「本会话内允许该工具」 ──────────────────────────────────
+  /** 该按钮总开关（默认 true）。false = 审批卡不渲染该按钮。 */
+  readonly sessionAllowButton?: boolean;
+  /** 签发 allow_session token（缺省 = 不渲染该按钮）。 */
+  readonly signAllowSession?: (input: {
+    requestID: string;
+    sessionID: string;
+    action: string;
+  }) => string;
+  /** 校验 allow_session token（绑定 action）。 */
+  readonly verifyAllowSession?: (
+    token: string,
+    expect?: { sessionID?: string; action?: string },
+  ) => VerifyResult<AllowSessionClaims>;
+  /** 会话内放行：持久化 `allowActions` + 追加会话级 ruleset。 */
+  readonly allowSession?: (input: { sessionID: string; action: string }) => Promise<void>;
+  /** 同步查询该会话是否已放行某 action（幂等 toast 用）。 */
+  readonly hasSessionAllow?: (input: { sessionID: string; action: string }) => boolean;
 }
 
 interface TrackedCard {
@@ -182,6 +236,15 @@ export class ApprovalManager {
       sessionID: request.sessionID,
       openId: link.openId,
     });
+    // 任务 A：会话粒度放行按钮。默认开启；未装配签名时不渲染（保持向后兼容）。
+    const allowSessionToken =
+      this.deps.sessionAllowButton !== false && this.deps.signAllowSession
+        ? this.deps.signAllowSession({
+            requestID,
+            sessionID: request.sessionID,
+            action: request.action,
+          })
+        : undefined;
     const input: ApprovalCardInput = {
       requestID,
       sessionID: request.sessionID,
@@ -190,6 +253,7 @@ export class ApprovalManager {
       ...(request.message ? { message: request.message } : {}),
       canPersistAlways,
       token,
+      ...(allowSessionToken ? { allowSessionToken } : {}),
       maxResourcesShown: this.deps.config.maxResourcesShown,
     };
 
@@ -234,6 +298,10 @@ export class ApprovalManager {
    * 校验顺序：白名单 → 签名 → 绑定字段 → 防重放。
    */
   handleCardAction(action: CardAction): object {
+    // 任务 A：「本会话内允许该工具」按钮（独立校验路径）。
+    const allowValue = parseAllowSessionValue(action.rawValue);
+    if (allowValue) return this.handleAllowSession(action, allowValue);
+
     const parsed = parseApprovalValue(action.rawValue);
     if (!parsed) {
       return toast("error", "无法识别的操作");
@@ -276,6 +344,107 @@ export class ApprovalManager {
   dispose(): void {
     this.seenRequests.clear();
     this.cards.clear();
+  }
+
+  /**
+   * 任务 A：「✅ 本会话内允许该工具」。
+   *
+   * 校验顺序严格按：**白名单 → 验签 → sessionID 匹配 → nonce 消费**。
+   * 命中后：后台持久化 `allowActions` + 追加会话级 ruleset，并对当前挂起的请求回 `once`
+   * （否则本次请求仍会卡住），最后把审批卡 patch 成「✅ 已允许本会话内 <action>」（无按钮）。
+   * 重复点击 / 已生效只回 toast，不报错。
+   */
+  private handleAllowSession(action: CardAction, value: AllowSessionActionValue): object {
+    if (!this.deps.isAllowed(action.operatorOpenId)) {
+      this.deps.log.warn("拒绝非白名单用户的会话放行点击", {
+        operator: action.operatorOpenId.slice(0, 8),
+      });
+      return toast("error", "无审批权限");
+    }
+    if (!this.deps.verifyAllowSession || !this.deps.allowSession) {
+      return toast("error", "本会话内允许暂不可用");
+    }
+
+    const verified = this.deps.verifyAllowSession(value.token, { action: value.action });
+    if (!verified.ok) {
+      this.deps.log.warn("会话放行 token 校验失败", { reason: verified.reason });
+      return toast("error", `审批凭证无效（${verified.reason}）`);
+    }
+    const claims = verified.claims;
+
+    // sessionID 匹配：token 里的会话必须与当前跟踪到的卡片会话一致（防跨会话/跨卡重用）。
+    const tracked = this.cards.get(claims.r);
+    if (tracked && tracked.input.sessionID !== claims.s) {
+      this.deps.log.warn("会话放行 sessionID 不匹配", {
+        tokenSession: claims.s,
+        cardSession: tracked.input.sessionID,
+      });
+      return toast("error", "会话不匹配");
+    }
+
+    const ttl = Math.max(1000, claims.e - this.now());
+    if (!this.deps.replay.consume(claims.n, ttl)) {
+      return toast("warning", "该操作已处理，请勿重复点击");
+    }
+
+    const already = this.deps.hasSessionAllow?.({ sessionID: claims.s, action: claims.a }) ?? false;
+    if (tracked) tracked.resolved = true; // 防 `permission.replied` 用普通结果卡覆盖我们的专用卡。
+    void this.applyAllowSession(claims, tracked, action).catch((err) =>
+      this.deps.log.error("会话放行处理失败", {
+        sessionID: claims.s,
+        action: claims.a,
+        error: errorMessage(err),
+      }),
+    );
+    return already
+      ? toast("info", "该工具已在本会话内允许")
+      : toast("success", `已允许本会话内 ${claims.a}`);
+  }
+
+  private async applyAllowSession(
+    claims: AllowSessionClaims,
+    tracked: TrackedCard | undefined,
+    action: CardAction,
+  ): Promise<void> {
+    // 1) 持久化会话级放行（allowActions + ruleset）。
+    try {
+      await this.deps.allowSession!({ sessionID: claims.s, action: claims.a });
+    } catch (err) {
+      this.deps.log.error("会话内放行写入失败", {
+        sessionID: claims.s,
+        action: claims.a,
+        error: errorMessage(err),
+      });
+    }
+
+    // 2) 答复当前挂起的请求（once），否则本次执行仍然卡住。
+    const directory = tracked?.directory ?? (await this.deps.getLink(claims.s))?.dir;
+    try {
+      await this.deps.reply({
+        sessionID: claims.s,
+        requestID: claims.r,
+        reply: "once",
+        ...(directory ? { directory } : {}),
+      });
+    } catch (err) {
+      this.deps.log.error("permission.reply 失败", {
+        requestID: claims.r,
+        error: errorMessage(err),
+      });
+    }
+
+    // 3) 把审批卡收尾成专用结果卡（无按钮）。
+    const messageId = tracked?.messageId;
+    if (!messageId || !tracked) return;
+    const card = buildSessionAllowResolvedCard(tracked.input, {
+      action: claims.a,
+      operatorOpenId: action.operatorOpenId,
+      at: this.now(),
+    });
+    const res = await this.deps.sender.patchCard(messageId, card);
+    if (!res.ok) {
+      this.deps.log.warn("会话放行结果卡片更新失败", { requestID: claims.r, error: res.error ?? "unknown" });
+    }
   }
 
   private async applyReply(

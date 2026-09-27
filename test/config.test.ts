@@ -144,6 +144,22 @@ describe("resolveConfig", () => {
     expect(resolve({ appId: "a", appSecret: "s", staleExecutionMs: 1000 }, {}).staleExecutionMs).toBe(60_000);
     expect(resolve({ appId: "a", appSecret: "s", staleExecutionMs: 99_999_999 }, {}).staleExecutionMs).toBe(60 * 60_000);
   });
+
+  test("任务 A：sessionAllowButton 默认 true，可显式关闭", () => {
+    expect(resolve({ appId: "a", appSecret: "s" }, {}).sessionAllowButton).toBe(true);
+    expect(resolve({ appId: "a", appSecret: "s", sessionAllowButton: false }, {}).sessionAllowButton).toBe(false);
+    expect(resolve({ appId: "a", appSecret: "s", sessionAllowButton: "false" }, {}).sessionAllowButton).toBe(false);
+  });
+
+  test("任务 B：resumeSummary 默认 true；resumeSummaryTimeoutMs 默认 20000，夹取 3000–60000", () => {
+    const base = resolve({ appId: "a", appSecret: "s" }, {});
+    expect(base.resumeSummary).toBe(true);
+    expect(base.resumeSummaryTimeoutMs).toBe(20_000);
+    expect(resolve({ appId: "a", appSecret: "s", resumeSummary: false }, {}).resumeSummary).toBe(false);
+    expect(resolve({ appId: "a", appSecret: "s", resumeSummaryTimeoutMs: 1000 }, {}).resumeSummaryTimeoutMs).toBe(3_000);
+    expect(resolve({ appId: "a", appSecret: "s", resumeSummaryTimeoutMs: 99_999 }, {}).resumeSummaryTimeoutMs).toBe(60_000);
+    expect(resolve({ appId: "a", appSecret: "s", resumeSummaryTimeoutMs: 12_345 }, {}).resumeSummaryTimeoutMs).toBe(12_345);
+  });
 });
 
 describe("resolveConfig 配置文件回退", () => {

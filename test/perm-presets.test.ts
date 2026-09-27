@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vitest";
 import {
   PERMISSION_PRESETS,
+  allowActionsForGrant,
+  appendAllowRules,
   isPermissionPreset,
   presetAskActions,
   presetGateMode,
@@ -40,6 +42,31 @@ describe("权限预设 → ruleset / gateMode", () => {
     expect(presetToRuleset("trust")).toEqual([{ action: "*", resource: "*", effect: "allow" }]);
     expect(presetGateMode("trust")).toBe("off");
     expect(presetAskActions("trust")).toEqual([]);
+  });
+});
+
+describe("任务 A：会话内放行规则", () => {
+  test("allowActionsForGrant：shell/bash 一起放行，其它动作只放行自身", () => {
+    expect(allowActionsForGrant("bash").sort()).toEqual(["bash", "shell"]);
+    expect(allowActionsForGrant("shell").sort()).toEqual(["bash", "shell"]);
+    expect(allowActionsForGrant("edit")).toEqual(["edit"]);
+  });
+
+  test("appendAllowRules：覆盖旧 ask，去重旧 allow", () => {
+    const base = presetToRuleset("edit"); // allow edit + shell/bash ask
+    const out = appendAllowRules(base, allowActionsForGrant("bash"));
+    // shell/bash 的最后一条规则变为 allow
+    expect(out).toContainEqual({ action: "bash", resource: "*", effect: "allow" });
+    expect(out).toContainEqual({ action: "shell", resource: "*", effect: "allow" });
+    expect(out).toContainEqual({ action: "edit", resource: "*", effect: "allow" });
+    // 幂等：重复追加不再累积
+    const again = appendAllowRules(out, allowActionsForGrant("bash"));
+    expect(again.filter((r) => r.action === "bash" && r.effect === "allow")).toHaveLength(1);
+    expect(again).toHaveLength(out.length);
+  });
+
+  test("appendAllowRules：空基底也能追加", () => {
+    expect(appendAllowRules([], ["edit"])).toEqual([{ action: "edit", resource: "*", effect: "allow" }]);
   });
 });
 

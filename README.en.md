@@ -249,7 +249,8 @@ Besides sessions created from Feishu, you can **load any past OpenCode session v
 **"▶️ Enter topic" — wire a past session into a topic**
 
 - Tap the button (value `{cmd:"open", s, c}`): first the session is checked for existence (`ctx.session.get`); if missing → toast "session not found" and the list card is patched into a notice.
-- If it exists → `reply_in_thread` on **the list card message you tapped** posts a "✅ Entered session" card; once `thread_id` is obtained the topic ↔ session mapping (plus the topic root) is bound. **Messages you send in that topic then continue this past session** (OpenCode session context is persistent, so this is effectively a resume).
+- If it exists → `reply_in_thread` on **the list card message you tapped** posts a resume card whose **title is `🔄 <session title>`** (so the **topic name is the session topic**), with the session id / directory / model / last activity / summary in the body; once `thread_id` is obtained the topic ↔ session mapping (plus the topic root) is bound. **Messages you send in that topic then continue this past session** (OpenCode session context is persistent, so this is effectively a resume).
+- **Summary block (task B)**: first **reuse** an existing compaction summary (`ctx.session.context`, **zero model calls**); if none, the card first shows "⏳ summarizing…", then `ctx.session.generate` runs asynchronously and the result is **patched back into the same card**; failure/timeout (`resumeSummaryTimeoutMs`, default 20s) degrades to "(summary generation failed; just send a message to continue)". Disable with `resumeSummary: false`.
 - For an already topic-bound session the button becomes "▶️ New topic" — **one session can be routed from several topics** (each topic has its own conversation context; replies land in the triggering topic).
 
 **`/resume [n]` — skip the list**
@@ -273,6 +274,20 @@ Besides sessions created from Feishu, you can **load any past OpenCode session v
 | 🔓 Trust | Never ask | allow all |
 
 The preset is written to a **session-scoped** ruleset and can be changed any time with `/perm`, without affecting other sessions.
+
+### Approval card: per-session "allow this tool in this session"
+
+The approval card has **4 buttons** by default: `✅ Allow once` / `🔓 Always allow` / `✅ Allow this tool in this session` / `❌ Reject`.
+
+"Always allow" only persists the **command prefix** OpenCode provides (e.g. `ls *`), so a different command asks again; "Trust" is too broad (it also opens up edit / outside-directory). "**Allow this tool in this session**" is the middle ground:
+
+- It only affects the **current session**: the tool action is recorded in the session's `allowActions` and **appended** to the session ruleset (`{action, resource:"*", effect:"allow"}`); once matched, the `permission.evaluate` gate **no longer downgrades it to ask**, so later calls of the same tool in this session stop bothering you.
+- **Other sessions and the global config are untouched** — switch to another session and it still asks.
+- `shell` and `bash` are allowed together (the real tool id is `bash`, the design name is `shell`; both are covered).
+- Tapping also replies "once" to the **currently pending request** (otherwise this run would still hang), then the card collapses to "✅ Allowed bash in this session" with no buttons.
+- Changing the preset with `/perm` is an explicit permission change: it **clears the session's "allow in this session" grants** so old grants cannot override the new preset.
+- Same security boundary as force-stop: the button value is `{cmd:"allow_session", a:"<action>", t:"<token>"}`; the token reuses the HMAC mechanism and binds `sessionID + action + TTL + nonce` (plus requestID to locate the card). Click validation order is **allow-list → signature → sessionID match → replay guard**; forged / cross-session / replayed taps are rejected, and repeat taps only show a toast.
+- Set `sessionAllowButton: false` to hide this button (the card goes back to three buttons).
 
 ### Queue and cut-in (`/steer` `/now`)
 
@@ -333,6 +348,9 @@ Without this relay, any clarifying question would stall the Feishu session forev
 | `approvalTtlMs` | number | `600000` | Approval token / card TTL |
 | `staleExecutionMs` | number | `300000` | Watchdog threshold: an execution with no event for this long is treated as stuck and auto-interrupted; a queue stuck this long without `execution.started` also triggers a notice. Clamped to 1–60 minutes |
 | `maxResourcesShown` | number | `8` | Max resource lines shown on an approval card |
+| `sessionAllowButton` | boolean | `true` | Show the "✅ Allow this tool in this session" button on approval cards; disable to go back to three buttons |
+| `resumeSummary` | boolean | `true` | Show a summary on the resume card (reuse an existing compaction summary first, generate only if missing; disabling also skips generation) |
+| `resumeSummaryTimeoutMs` | number | `20000` | Resume-card summary generation timeout (clamped 3000–60000); a timeout is treated as failure and degrades gracefully |
 
 ---
 
@@ -343,6 +361,7 @@ permission.evaluate (plugin hook)              permission.asked (event stream)
 ──────────────────────────                     ──────────────────────
 allow-listed tool   → allow                    event carries {id, sessionID, action, resources, save}
 deny list           → deny                                │
+session allowActions → allow (already granted)            │
 otherwise (per session preset) → ask ─────────────────────┘
                                                           ▼
                                       Feishu approval card (button value = signed token)
@@ -357,6 +376,7 @@ otherwise (per session preset) → ask ─────────────�
 
 - **Signed tokens**: HMAC-SHA256 binding `requestID + sessionID + operator openId + expiry + nonce`; forgery, forwarding and replay are rejected.
 - **Force-stop uses the same signature scheme**: its token binds `sessionID + purpose + expiry + nonce`, the click passes the open_id allowlist before verification, and it is purpose-isolated from approval tokens (neither works for the other).
+- **Per-session allow uses the same signature scheme**: the approval card's "allow this tool in this session" token binds `sessionID + action + expiry + nonce` (plus requestID to locate the card) and is purpose-isolated. When matched it records `allowActions`, appends a session ruleset, and the `evaluate` gate **no longer downgrades that action to ask** (the `denyTools` red line still wins) — and **only for that session**.
 - **Only Feishu-originated sessions**: sessions without a chat↔session mapping (e.g. your local TUI) are **never downgraded to `ask`**, otherwise they would hang forever with no approval channel.
 - **Three layers of single-user isolation**: platform availability (only you) + no group scopes + code-level open_id allowlist with silent ignore.
 - **`always` semantics**: persisted only when the request carries `save[]`; otherwise it behaves like "once" (the card says so).

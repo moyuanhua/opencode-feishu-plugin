@@ -1,9 +1,10 @@
 /**
  * 卡片按钮的自签 token。
  *
- * 两类用途，共用同一套 HMAC-SHA256 机制：
+ * 三类用途，共用同一套 HMAC-SHA256 机制：
  * - 审批卡：绑定 requestID + sessionID + operatorOpenId + 过期时间 + nonce（`signApproval`）；
- * - 运行卡「强制停止」：绑定 sessionID + 用途标签 + 过期时间 + nonce（`signStop`）。
+ * - 运行卡「强制停止」：绑定 sessionID + 用途标签 + 过期时间 + nonce（`signStop`）；
+ * - 审批卡「本会话内允许该工具」：绑定 sessionID + action + 过期时间 + nonce（+requestID，`signAllowSession`）。
  *
  * 为什么需要：飞书卡片按钮的 value 会被回传到 `card.action.trigger`，
  * 任何能点这张卡的人都能构造回调；必须证明「这个动作是本插件签发的」。
@@ -129,6 +130,91 @@ export function verifyApproval(token: string, secret: string, options: VerifyOpt
 
 /** 「运行卡强制停止」token 的用途标签。 */
 export const STOP_PURPOSE = "stop";
+
+/** 「审批卡：本会话内允许该工具」token 的用途标签。 */
+export const ALLOW_SESSION_PURPOSE = "allow_session";
+
+/**
+ * 「本会话内允许该工具」token 载荷：p=用途标签、r=requestID、s=sessionID、a=action、e=过期时间、n=nonce。
+ *
+ * 绑定 `sessionID + action + TTL + nonce`（任务 A 要求的最小绑定）；
+ * 额外带上 `r`（requestID）是为了：① 定位并 patch 点击的那张审批卡；
+ * ② 点击时顺带用 `once` 答复当前挂起的请求（否则当前请求仍会卡住）。
+ *
+ * 同样**不绑定 operator**：授权由 allowUsers/owner 白名单在点击时校验。
+ */
+export interface AllowSessionClaims {
+  readonly p: typeof ALLOW_SESSION_PURPOSE;
+  readonly r: string;
+  readonly s: string;
+  readonly a: string;
+  readonly e: number;
+  readonly n: string;
+}
+
+export function signAllowSession(
+  input: {
+    readonly requestID: string;
+    readonly sessionID: string;
+    readonly action: string;
+    readonly ttlMs: number;
+    readonly now?: number;
+  },
+  secret: string,
+  options: SignOptions = {},
+): string {
+  const now = input.now ?? Date.now();
+  const claims: AllowSessionClaims = {
+    p: ALLOW_SESSION_PURPOSE,
+    r: input.requestID,
+    s: input.sessionID,
+    a: input.action,
+    e: now + input.ttlMs,
+    n: options.nonce ?? randomBytes(9).toString("hex"),
+  };
+  const body = b64url(JSON.stringify(claims));
+  return `${body}.${hmac(body, secret)}`;
+}
+
+export interface VerifyAllowSessionOptions {
+  readonly now?: number;
+  /** 期望匹配的 sessionID（token 里的会话与当前操作对象一致）。 */
+  readonly expectSessionID?: string;
+  /** 期望匹配的 action（按钮 value 里的 action 与签名载荷一致）。 */
+  readonly expectAction?: string;
+}
+
+export function verifyAllowSession(
+  token: string,
+  secret: string,
+  options: VerifyAllowSessionOptions = {},
+): VerifyResult<AllowSessionClaims> {
+  const opened = openSigned(token, secret);
+  if (!opened.ok) return opened;
+  const claims = opened.payload as unknown as AllowSessionClaims;
+
+  if (
+    claims?.p !== ALLOW_SESSION_PURPOSE ||
+    typeof claims?.r !== "string" ||
+    typeof claims?.s !== "string" ||
+    typeof claims?.a !== "string" ||
+    typeof claims?.e !== "number" ||
+    typeof claims?.n !== "string"
+  ) {
+    return { ok: false, reason: "bad-claims" };
+  }
+
+  const now = options.now ?? Date.now();
+  if (claims.e <= now) return { ok: false, reason: "expired" };
+  if (options.expectSessionID && claims.s !== options.expectSessionID) {
+    return { ok: false, reason: "session-mismatch" };
+  }
+  if (options.expectAction && claims.a !== options.expectAction) {
+    return { ok: false, reason: "action-mismatch" };
+  }
+
+  return { ok: true, claims };
+}
 
 /**
  * 「强制停止」token 载荷：p=用途标签、s=sessionID、e=过期时间、n=nonce。

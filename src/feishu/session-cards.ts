@@ -164,27 +164,39 @@ export function parseSessionCardValue(raw: unknown): SessionCardValue | undefine
 }
 
 /**
- * 「进入话题」成功卡（P7）：`reply_in_thread` 落到新话题内，是话题的根卡。
- * 标题含会话标题；正文含会话 ID / 目录 / 最近活动 / 可用命令。
+ * 「进入话题 / 恢复会话」成功卡（P7 + 任务 B）：`reply_in_thread` 落到新话题内，是话题的根卡。
+ *
+ * 标题 = `🔄 <会话标题>`（截断保护），因此**话题显示名就是会话主题**；
+ * 正文含会话 ID / 目录 / 模型 / 最近活动 / 指引，可选**摘要区块**：
+ * - `summary` 有值 → 渲染摘要；
+ * - `summaryPending=true` → 显示「⏳ 正在总结该会话…」，稍后由调用方 patch 回同一张卡。
  */
 export function buildSessionOpenedCard(input: {
   readonly title: string;
   readonly sessionID: string;
   readonly dir?: string;
+  readonly model?: string;
   readonly updatedAt?: number;
   readonly now?: number;
+  /** 任务 B：会话摘要（已生成 / 复用）。 */
+  readonly summary?: string;
+  /** 任务 B：摘要生成中占位。 */
+  readonly summaryPending?: boolean;
 }): object {
-  const title = input.title.trim() || "(未命名)";
+  const title = truncateTitle(input.title.trim() || "(未命名)");
   const lines = [`会话「${title}」：\`${input.sessionID}\``];
   const setup: string[] = [];
   if (input.dir) setup.push(`- 目录：\`${input.dir}\``);
+  if (input.model) setup.push(`- 模型：${input.model}`);
   if (input.updatedAt && input.updatedAt > 0) {
     setup.push(`- 最近活动：${relativeTime(input.updatedAt, input.now ?? Date.now())}`);
   }
   if (setup.length > 0) lines.push("", ...setup);
+  lines.push("", "**在本话题内直接发消息**，OpenCode 就接着这个历史会话继续干活。");
+  if (input.summary || input.summaryPending) {
+    lines.push("", "**摘要**：", input.summary ?? "⏳ 正在总结该会话…");
+  }
   lines.push(
-    "",
-    "**在本话题内直接发消息**，OpenCode 就接着这个历史会话继续干活。",
     "",
     "话题内可用：`/current` `/stop` `/model` `/perm` `/cd` `/help`。",
     "会话管理（`/new` `/sessions` `/resume`）请回到主聊天流。",
@@ -192,7 +204,7 @@ export function buildSessionOpenedCard(input: {
   return {
     schema: "2.0",
     config: { update_multi: true },
-    header: { title: { tag: "plain_text", content: `✅ 已进入会话 · ${title}` }, template: "green" },
+    header: { title: { tag: "plain_text", content: `🔄 ${title}` }, template: "green" },
     body: {
       elements: [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }],
     },

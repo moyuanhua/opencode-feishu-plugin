@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
 import type { CardAction, IncomingMessage } from "../src/types.js";
 import { deriveSignSecret } from "../src/config.js";
-import { signStop } from "../src/security/token.js";
+import { signAllowSession, signStop } from "../src/security/token.js";
 import { FakeStorage } from "./helpers.js";
 
 /**
@@ -17,10 +17,18 @@ const h = vi.hoisted(() => ({
     | undefined,
   created: [] as unknown[],
   replied: [] as unknown[],
+  patched: [] as unknown[],
   switchCalls: [] as Array<{ sessionID: string; model: { id: string; providerID: string } }>,
   switchImpl: undefined as
     | undefined
     | ((input: { sessionID: string; model: { id: string; providerID: string } }) => Promise<void>),
+  evaluateHook: undefined as
+    | undefined
+    | ((event: { sessionID: string; action: string; effect?: string; message?: string }) => Promise<void>),
+  sessionUpdates: [] as Array<{ sessionID: string; permissions: Array<{ action: string; resource: string; effect: string }> }>,
+  contextRaw: undefined as unknown,
+  generateRaw: undefined as unknown,
+  generateCalls: [] as Array<{ sessionID: string; prompt: string }>,
 }));
 
 vi.mock("../src/feishu/gateway.js", () => ({
@@ -42,7 +50,10 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
           h.replied.push(payload);
           return { code: 0, data: { message_id: `om_r${h.replied.length}`, thread_id: "omt_new" } };
         },
-        patch: async () => ({ code: 0, data: {} }),
+        patch: async (payload: unknown) => {
+          h.patched.push(payload);
+          return { code: 0, data: {} };
+        },
         get: async (payload: { path: { message_id: string } }) => ({
           code: 0,
           data: { items: [{ message_id: payload.path.message_id, thread_id: "omt_from_get" }] },
@@ -126,9 +137,20 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
         h.switchCalls.push(input);
         if (h.switchImpl) await h.switchImpl(input);
       },
+      update: async (input: { sessionID: string; permissions: Array<{ action: string; resource: string; effect: string }> }) => {
+        h.sessionUpdates.push(input);
+      },
+      context: async () => h.contextRaw,
+      generate: async (input: { sessionID: string; prompt: string }) => {
+        h.generateCalls.push(input);
+        return h.generateRaw;
+      },
     },
     permission: {
-      hook: async () => ({ dispose: async () => undefined }),
+      hook: async (name: string, cb: unknown) => {
+        if (name === "evaluate") h.evaluateHook = cb as typeof h.evaluateHook;
+        return { dispose: async () => undefined };
+      },
       reply: async () => undefined,
     },
   };
@@ -178,12 +200,18 @@ describe("index 话题路由（集成）", () => {
     storage.clear();
     h.created.length = 0;
     h.replied.length = 0;
+    h.patched.length = 0;
     h.gatewayOptions = undefined;
     promptCalls.length = 0;
     interruptCalls.length = 0;
     sessionListRaw = [];
     h.switchCalls.length = 0;
     h.switchImpl = undefined;
+    h.evaluateHook = undefined;
+    h.sessionUpdates.length = 0;
+    h.contextRaw = undefined;
+    h.generateRaw = undefined;
+    h.generateCalls.length = 0;
     createSession.mockClear();
   });
 
@@ -395,5 +423,108 @@ describe("index 话题路由（集成）", () => {
     await deliver(msg("/model glm", { messageId: "om_sw2", threadId: "omt_sw", rootId: "omr_sw" }));
     expect(readStoredModel("ses_0")).toBe("glm-5.3-flash");
     expect(JSON.stringify(h.replied.at(-1))).toContain("未能读回");
+  });
+
+  // ── 任务 A：审批卡「本会话内允许该工具」（集成） ─────────────────────
+  function seedPermSession(): void {
+    storage.seed("feishu:v2:chat:oc_1:sessions", {
+      sessions: [{ sessionID: "ses_perm", title: "权限会话", updatedAt: 1 }],
+      active: "ses_perm",
+    });
+    storage.seed("feishu:v2:session:ses_perm", {
+      chatId: "oc_1",
+      openId: "ou_1",
+      perm: "askHigh",
+      gateMode: "gate",
+    });
+  }
+
+  test("会话内允许：点击 → allowActions 写入 + ruleset 追加 + gate 命中不再 ask；其它会话不受影响", async () => {
+    cleanup = await setup({ permissionGate: "gate" });
+    seedPermSession();
+    await deliver(msg("你好", { messageId: "om_bootA" })); // 绑定 owner 白名单
+    const evaluate = h.evaluateHook!;
+
+    const before = { sessionID: "ses_perm", action: "bash" } as { sessionID: string; action: string; effect?: string };
+    await evaluate(before);
+    expect(before.effect).toBe("ask");
+
+    const secret = deriveSignSecret("secret_test");
+    const token = signAllowSession(
+      { requestID: "per_1", sessionID: "ses_perm", action: "bash", ttlMs: 600_000 },
+      secret,
+    );
+    const res = (await click({ cmd: "allow_session", a: "bash", t: token })) as { toast: { type: string } };
+    expect(res.toast.type).toBe("success");
+
+    await vi.waitFor(() => {
+      const link = storage.raw("feishu:v2:session:ses_perm") as { allowActions?: string[] };
+      expect(link.allowActions).toContain("bash");
+      expect(link.allowActions).toContain("shell");
+    });
+    await vi.waitFor(() => {
+      expect(h.sessionUpdates.length).toBeGreaterThan(0);
+    });
+    const update = h.sessionUpdates.at(-1)!;
+    expect(update.sessionID).toBe("ses_perm");
+    expect(update.permissions).toContainEqual({ action: "bash", resource: "*", effect: "allow" });
+    expect(update.permissions).toContainEqual({ action: "shell", resource: "*", effect: "allow" });
+
+    const after = { sessionID: "ses_perm", action: "bash" } as { sessionID: string; action: string; effect?: string };
+    await evaluate(after);
+    expect(after.effect).toBe("allow");
+
+    // 同会话其它动作仍按会话预设 ask
+    const otherAction = { sessionID: "ses_perm", action: "edit" } as { sessionID: string; action: string; effect?: string };
+    await evaluate(otherAction);
+    expect(otherAction.effect).toBe("ask");
+
+    // 其它已映射会话不受影响（各自 gate 预设，无 allowActions）
+    storage.seed("feishu:v2:session:ses_other", {
+      chatId: "oc_1",
+      openId: "ou_1",
+      perm: "askHigh",
+      gateMode: "gate",
+    });
+    const otherSession = { sessionID: "ses_other", action: "bash" } as { sessionID: string; action: string; effect?: string };
+    await evaluate(otherSession);
+    expect(otherSession.effect).toBe("ask");
+  });
+
+  test("会话内允许：伪造 token 被拒，不写入", async () => {
+    cleanup = await setup({ permissionGate: "gate" });
+    seedPermSession();
+    await deliver(msg("你好", { messageId: "om_bootA2" }));
+    const token = signAllowSession(
+      { requestID: "per_1", sessionID: "ses_perm", action: "bash", ttlMs: 600_000 },
+      deriveSignSecret("secret_test"),
+    );
+    const res = (await click({ cmd: "allow_session", a: "bash", t: `${token}x` })) as { toast: { content: string } };
+    expect(res.toast.content).toContain("审批凭证无效");
+    expect((storage.raw("feishu:v2:session:ses_perm") as { allowActions?: string[] }).allowActions).toBeUndefined();
+  });
+
+  // ── 任务 B：恢复卡标题 + 摘要（集成） ────────────────────────────────
+  test("恢复卡：标题用会话主题；已有 compaction 摘要直接复用（不调用生成）", async () => {
+    sessionListRaw = [
+      { id: "ses_sum", title: "摘要会话", time: { updated: 1_700_000_000_000 }, location: { directory: "/home/ubuntu/work/app" } },
+    ];
+    h.contextRaw = [{ type: "compaction", status: "completed", summary: "1. 已完成 X\n2. 下一步 Y" }];
+    cleanup = await setup();
+    await deliver(msg("你好", { messageId: "om_bootB" }));
+
+    await click({ cmd: "open", s: "ses_sum", c: "oc_1" });
+    await vi.waitFor(() => {
+      expect(JSON.stringify(h.replied.at(-1))).toContain("🔄 摘要会话");
+    });
+    // 摘要在火后 patch 回同一张卡（复用 compaction 摘要，不产生生成调用）
+    await vi.waitFor(() => {
+      expect(JSON.stringify(h.patched.at(-1))).toContain("1. 已完成 X");
+    });
+    expect(h.generateCalls).toHaveLength(0);
+
+    // 话题内直接发消息 → 续上该会话
+    await deliver(msg("继续", { messageId: "om_sum_1", threadId: "omt_new", rootId: "om_root_s", parentId: "om_root_s" }));
+    expect(promptCalls.at(-1)).toEqual({ sessionID: "ses_sum", text: "继续" });
   });
 });

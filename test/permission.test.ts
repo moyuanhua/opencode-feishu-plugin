@@ -1,5 +1,11 @@
 import { describe, expect, test } from "vitest";
-import { decideEffect, decideEffectForSession, parseApprovalValue, type GateConfig } from "../src/permission.js";
+import {
+  decideEffect,
+  decideEffectForSession,
+  parseAllowSessionValue,
+  parseApprovalValue,
+  type GateConfig,
+} from "../src/permission.js";
 
 const cfg = (over: Partial<GateConfig> = {}): GateConfig => ({
   permissionGate: "gate",
@@ -67,6 +73,33 @@ describe("decideEffectForSession（P6 会话预设）", () => {
   });
 });
 
+describe("decideEffectForSession 会话内放行（任务 A）", () => {
+  test("allowActions 命中 → 不再降级为 ask，返回 allow", () => {
+    const session = { gateMode: "gate" as const, askActions: ["shell", "bash", "edit"] };
+    expect(decideEffectForSession("bash", cfg(), session, ["shell", "bash"]).effect).toBe("allow");
+    expect(decideEffectForSession("bash", cfg(), session, ["bash"]).effect).toBe("allow");
+    // 未命中的动作仍会 ask
+    expect(decideEffectForSession("edit", cfg(), session, ["shell", "bash"]).effect).toBe("ask");
+    // 仅放行 shell 时 bash 仍 ask（真实实现里两者一起放行，见 allowActionsForGrant）
+    expect(decideEffectForSession("bash", cfg(), session, ["shell"]).effect).toBe("ask");
+  });
+
+  test("denyTools 优先于 allowActions（安全红线）", () => {
+    const session = { gateMode: "gate" as const, askActions: ["bash"] };
+    expect(decideEffectForSession("bash", cfg({ denyTools: ["bash"] }), session, ["bash"]).effect).toBe("deny");
+  });
+
+  test("无会话预设（全局 gate）时命中 allowActions 也不 ask", () => {
+    expect(decideEffectForSession("bash", cfg(), undefined, ["bash"]).effect).toBe("allow");
+    // 未命中仍走全局判定 → ask
+    expect(decideEffectForSession("edit", cfg(), undefined, ["bash"]).effect).toBe("ask");
+  });
+
+  test("permissionGate=off 时不介入（allowActions 也不会强制 allow）", () => {
+    expect(decideEffectForSession("bash", cfg({ permissionGate: "off" }), undefined, ["bash"])).toEqual({});
+  });
+});
+
 describe("parseApprovalValue", () => {
   test("合法 value", () => {
     expect(parseApprovalValue({ t: "tok", d: "once" })).toEqual({ token: "tok", decision: "once" });
@@ -77,5 +110,22 @@ describe("parseApprovalValue", () => {
     expect(parseApprovalValue({ d: "once" })).toBeUndefined();
     expect(parseApprovalValue("string")).toBeUndefined();
     expect(parseApprovalValue(null)).toBeUndefined();
+  });
+});
+
+describe("parseAllowSessionValue", () => {
+  test("合法 value", () => {
+    expect(parseAllowSessionValue({ cmd: "allow_session", a: "bash", t: "tok" })).toEqual({
+      action: "bash",
+      token: "tok",
+    });
+  });
+
+  test("缺 action / token / 非本按钮返回 undefined", () => {
+    expect(parseAllowSessionValue({ cmd: "allow_session", t: "tok" })).toBeUndefined();
+    expect(parseAllowSessionValue({ cmd: "allow_session", a: "bash" })).toBeUndefined();
+    expect(parseAllowSessionValue({ cmd: "open", a: "bash", t: "tok" })).toBeUndefined();
+    expect(parseAllowSessionValue({ t: "tok", d: "once" })).toBeUndefined();
+    expect(parseAllowSessionValue(null)).toBeUndefined();
   });
 });

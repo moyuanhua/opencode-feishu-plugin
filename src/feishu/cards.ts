@@ -27,6 +27,11 @@ export interface ApprovalCardInput {
   readonly canPersistAlways: boolean;
   /** 按钮 value 里的自签 token。 */
   readonly token: string;
+  /**
+   * 「✅ 本会话内允许该工具」按钮的自签 token（任务 A）。
+   * 缺省 = 不渲染该按钮（`sessionAllowButton=false` 或运行时未装配签名）。
+   */
+  readonly allowSessionToken?: string;
   readonly maxResourcesShown: number;
 }
 
@@ -70,6 +75,22 @@ export function buildApprovalCard(input: ApprovalCardInput): object {
 
   const alwaysLabel = input.canPersistAlways ? "🔓 始终允许" : "🔓 始终允许（同一次）";
 
+  const buttons: object[] = [
+    button("✅ 允许一次", "primary", { t: input.token, d: "once" }),
+    button(alwaysLabel, "default", { t: input.token, d: "always" }),
+  ];
+  // 任务 A：会话粒度的中间档位。仅当配置开启且装配了签名时出现。
+  if (input.allowSessionToken) {
+    buttons.push(
+      button("✅ 本会话内允许该工具", "default", {
+        cmd: "allow_session",
+        a: input.action,
+        t: input.allowSessionToken,
+      }),
+    );
+  }
+  buttons.push(button("❌ 拒绝", "danger", { t: input.token, d: "reject" }));
+
   return {
     schema: "2.0",
     config: { update_multi: true },
@@ -80,9 +101,43 @@ export function buildApprovalCard(input: ApprovalCardInput): object {
     body: {
       elements: [
         { tag: "markdown", content: truncateCardContent(lines.join("\n")) },
-        button("✅ 允许一次", "primary", { t: input.token, d: "once" }),
-        button(alwaysLabel, "default", { t: input.token, d: "always" }),
-        button("❌ 拒绝", "danger", { t: input.token, d: "reject" }),
+        ...buttons,
+      ],
+    },
+  };
+}
+
+/** 「本会话内允许」点击后的结果卡（无按钮）。 */
+export interface SessionAllowOutcome {
+  readonly action: string;
+  readonly operatorOpenId: string;
+  readonly at: number;
+}
+
+export function buildSessionAllowResolvedCard(input: ApprovalCardInput, outcome: SessionAllowOutcome): object {
+  const when = new Date(outcome.at).toISOString();
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    header: {
+      title: { tag: "plain_text", content: `✅ 已允许本会话内 ${outcome.action}` },
+      template: "green",
+    },
+    body: {
+      elements: [
+        {
+          tag: "markdown",
+          content: truncateCardContent(
+            [
+              `**操作**：\`${escapeInline(input.action)}\``,
+              "",
+              "本会话内后续调用该工具将**不再询问**（其它会话不受影响）。",
+              "",
+              `**处理人**：\`${escapeInline(mask(outcome.operatorOpenId))}\``,
+              `**时间**：${when}`,
+            ].join("\n"),
+          ),
+        },
       ],
     },
   };

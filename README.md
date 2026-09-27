@@ -249,7 +249,8 @@ opencode mcp list        # 顺带确认服务健康
 **「▶️ 进入话题」— 把历史会话接到话题里**
 
 - 点按钮（值 `{cmd:"open", s, c}`）：先校验会话存在（`ctx.session.get`），不存在 → toast「会话不存在」并把列表卡改写成提示卡。
-- 存在 → 对**你点的这条列表卡消息** `reply_in_thread` 发一张「✅ 已进入会话」卡，拿到 `thread_id` 后绑定话题 ↔ 会话（同时记录话题根），之后**在该话题里发消息就续上这个历史会话**（opencode 会话上下文天然持久，等同于 resume）。
+- 存在 → 对**你点的这条列表卡消息** `reply_in_thread` 发一张恢复卡：**标题 = `🔄 <会话标题>`**（因此**话题显示名就是会话主题**），正文含会话 ID / 目录 / 模型 / 最近活动 / 摘要，拿到 `thread_id` 后绑定话题 ↔ 会话（同时记录话题根），之后**在该话题里发消息就续上这个历史会话**（opencode 会话上下文天然持久，等同于 resume）。
+- **摘要区块（任务 B）**：优先**复用**该会话已有的 compaction 摘要（读 `ctx.session.context`，**零模型调用**）；没有则先发卡显示「⏳ 正在总结该会话…」，再异步 `ctx.session.generate` 生成并 **patch 回同一张卡**；失败/超时（`resumeSummaryTimeoutMs`，默认 20s）降级为「（摘要生成失败，可直接发消息继续）」。可用 `resumeSummary: false` 关闭。
 - 已绑话题的会话按钮文案变成「▶️ 再开话题」，**同一会话可被多个话题路由**（每个话题各自会话上下文；回复落在触发话题内）。
 
 **`/resume [序号]` — 跳过列表直接进入**
@@ -273,6 +274,20 @@ opencode mcp list        # 顺带确认服务健康
 | 🔓 完全信任 | 什么都不问 | 全部放行 |
 
 档位写入**会话级** `permissions`，可在话题内用 `/perm` 随时改，不影响其它会话。
+
+### 审批卡：会话粒度的「本会话内允许该工具」
+
+审批卡默认有 **4 个按钮**：`✅ 允许一次` / `🔓 始终允许` / `✅ 本会话内允许该工具` / `❌ 拒绝`。
+
+「始终允许」只按 opencode 给的**命令前缀**（如 `ls *`）持久化，换个命令又会问；「完全信任」又太宽（连 edit / 越目录也放开）。「**本会话内允许该工具**」是中间粒度：
+
+- 只对**当前会话**生效：把该工具 action 记入会话的 `allowActions`，并**追加**到会话级 ruleset（`{action, resource:"*", effect:"allow"}`）；`permission.evaluate` gate 命中后**不再降级为 ask**，因此本会话后续同类调用不再打扰你。
+- **其它会话、全局配置都不变**——切到别的会话该问还是问。
+- `shell` 与 `bash` 一起放行（opencode 实测工具 id 是 `bash`，设计稿写作 `shell`，两者都覆盖）。
+- 点击会**同时**用「允许一次」答复当前这条挂起请求（否则本次执行仍会卡住），随后审批卡收敛为「✅ 已允许本会话内 `<action>`」（无按钮）。
+- 用 `/perm` **换档**属于显式权限变更，会**清除本会话已有的「本会话内允许」授权**，避免旧授权压过新档位。
+- 安全边界与「强制停止」一致：按钮 value 形如 `{cmd:"allow_session", a:"<action>", t:"<签名>"}`，token 复用 HMAC 并绑定 `sessionID + action + 过期时间 + nonce`（另带 requestID 以定位卡片），点击校验顺序为 **白名单 → 验签 → sessionID 匹配 → 防重放**；伪造 / 跨会话 / 重放都被拒，重复点击只回 toast。
+- 不想用这个按钮时设 `sessionAllowButton: false`（审批卡回到三按钮）。
 
 ### 排队与插队（`/steer` `/now`）
 
@@ -339,6 +354,9 @@ agent 主动调用 `question` 工具（或其它 form 类交互）时，opencode
 | `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
 | `staleExecutionMs` | number | `300000` | 看门狗阈值：执行态超过此时长无事件即视为卡死，主动中断并收尾；排队超过此时长仍无 `execution.started` 也提示。夹取 1–60 分钟 |
 | `maxResourcesShown` | number | `8` | 审批卡最多展示的资源行数 |
+| `sessionAllowButton` | boolean | `true` | 审批卡是否显示「✅ 本会话内允许该工具」按钮；关闭后回到「允许一次 / 始终允许 / 拒绝」三按钮 |
+| `resumeSummary` | boolean | `true` | 恢复卡是否展示会话摘要（优先复用已有 compaction 摘要，缺失才生成；关闭则完全不生成） |
+| `resumeSummaryTimeoutMs` | number | `20000` | 恢复卡摘要生成超时（夹取 3000–60000）；超时按失败处理并降级提示 |
 
 ---
 
@@ -349,6 +367,7 @@ permission.evaluate (插件 hook)                 permission.asked (事件流)
 ──────────────────────────                      ──────────────────────
 白名单工具      → allow                          事件带 {id, sessionID, action, resources, save}
 拒绝名单        → deny                                     │
+会话内已放行     → allow（allowActions 命中）                  │
 其余（按会话预设）→ ask ─────────────────────────────────────┘
                                                            ▼
                                             发飞书审批卡（按钮 value = 自签 token）
@@ -363,6 +382,7 @@ permission.evaluate (插件 hook)                 permission.asked (事件流)
 
 - **自签 token**：HMAC-SHA256，绑定 `requestID + sessionID + 点击人 openId + 过期时间 + nonce`；伪造 / 转发 / 重放都会被拒。
 - **强停按钮同源签名**：运行卡「强制停止」token 绑定 `sessionID + 用途标签 + 过期时间 + nonce`，点击先过 open_id 白名单再验签，且与审批 token 用途隔离（互不通用）。
+- **会话内放行同源签名**：审批卡「本会话内允许该工具」token 绑定 `sessionID + action + 过期时间 + nonce`（另带 requestID 定位卡片），用途标签隔离；命中会在 `SessionMap` 记 `allowActions` 并追加会话级 ruleset，`evaluate` gate 对命中 action **不再降级为 ask**（`denyTools` 安全红线仍优先），且**只影响该会话**。
 - **只对飞书来源的会话生效**：没有 chat↔session 映射的会话（例如你本地 TUI）**不会被降级为 ask**，否则会因为没有审批出口而永久挂起。
 - **三重单人边界**：平台可用范围「仅本人」+ 不申请群权限 + 代码层 open_id 白名单静默忽略。
 - **`always` 语义**：仅当请求带 `save[]` 时才持久化，否则等价于「允许一次」（卡片会提示）。

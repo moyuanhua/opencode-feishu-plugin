@@ -8,6 +8,10 @@ import type { DirValidation } from "../src/feishu/dirs.js";
 import { createLogger } from "../src/logger.js";
 import type { CardAction, IncomingMessage, ModelRef, PermissionPreset } from "../src/types.js";
 import type { ModelEntry, ModelSwitchOutcome } from "../src/feishu/models.js";
+import type {
+  SessionSummaryOutcome,
+  SummarizeSessionInput,
+} from "../src/session/resume-summary.js";
 import { FakeStorage } from "./helpers.js";
 
 const log = createLogger({ level: "error", sink: () => undefined });
@@ -103,6 +107,11 @@ function setup(
     switchThrows?: boolean;
     /** 覆盖读回模型（`getSessionModel`）。 */
     sessionModel?: (sessionID: string) => Promise<ModelRef | undefined>;
+    /** 任务 B：恢复卡摘要获取实现。 */
+    summarizeSession?: (input: SummarizeSessionInput) => Promise<SessionSummaryOutcome>;
+    /** 任务 B：是否启用摘要（默认 false，不影响既有用例）。 */
+    resumeSummary?: boolean;
+    resumeSummaryTimeoutMs?: number;
   } = {},
 ) {
   const storage = new FakeStorage();
@@ -158,6 +167,9 @@ function setup(
     ...(over.allSessions ? { listAllSessions: over.allSessions } : {}),
     ...(over.getSession ? { getSessionInfo: over.getSession } : {}),
     ...(over.sessionPageSize ? { sessionPageSize: over.sessionPageSize } : {}),
+    ...(over.summarizeSession ? { summarizeSession: over.summarizeSession } : {}),
+    ...(over.resumeSummary !== undefined ? { resumeSummary: over.resumeSummary } : {}),
+    ...(over.resumeSummaryTimeoutMs !== undefined ? { resumeSummaryTimeoutMs: over.resumeSummaryTimeoutMs } : {}),
   });
   return {
     commands,
@@ -902,7 +914,7 @@ describe("SessionCommands 进入话题（open 动作）", () => {
     expect(replied.messageId).toBe("om_list");
     expect(replied.replyInThread).toBe(true);
     const cardText = JSON.stringify(replied.card);
-    expect(cardText).toContain("✅ 已进入会话");
+    expect(cardText).toContain("🔄 历史会话");
     expect(cardText).toContain("ses_old");
     expect(cardText).toContain("/home/ubuntu/work/app");
 
@@ -990,6 +1002,80 @@ describe("SessionCommands /resume（续聊历史会话）", () => {
     await commands.handleText(threadMsg("/resume"));
     expect(sender.cards).toHaveLength(0);
     expect(sender.replies.at(-1)!.text).toContain("主聊天流");
+  });
+});
+
+describe("SessionCommands 恢复卡标题 + 摘要（任务 B）", () => {
+  const raw = { id: "ses_old", title: "历史会话", time: { updated: 900 }, location: { directory: "/home/ubuntu/work/app" } };
+  const action = {
+    rawValue: { cmd: "open", s: "ses_old", c: "oc_1" },
+    messageId: "om_list",
+    chatId: "oc_1",
+    operatorOpenId: "ou_1",
+  };
+
+  test("标题用会话主题（🔄 前缀），摘要在火后 patch 回同一张卡", async () => {
+    const summarize = vi.fn(async (_input: SummarizeSessionInput): Promise<SessionSummaryOutcome> => ({ summary: "1. 目标 A", source: "generated" }));
+    const { commands, sender } = setup({ getSession: async () => raw, summarizeSession: summarize });
+    sender.threadIdFor = () => "omt_b1";
+
+    await commands.handleCardAction(action);
+    await flush();
+
+    const opened = sender.repliedCards.at(-1)!;
+    expect(JSON.stringify(opened.card)).toContain("🔄 历史会话");
+    expect(JSON.stringify(opened.card)).toContain("正在总结该会话");
+
+    const patched = sender.patched.at(-1)!;
+    expect(patched.messageId).toBe("om_ready");
+    expect(JSON.stringify(patched.card)).toContain("1. 目标 A");
+    expect(summarize).toHaveBeenCalledTimes(1);
+    expect(summarize.mock.calls[0]![0]).toMatchObject({ sessionID: "ses_old", directory: "/home/ubuntu/work/app" });
+  });
+
+  test("摘要失败 → patch 成「生成失败」文案（不抛）", async () => {
+    const { commands, sender } = setup({
+      getSession: async () => raw,
+      summarizeSession: async () => ({ source: "none", error: "boom" }),
+    });
+    sender.threadIdFor = () => "omt_b2";
+    await commands.handleCardAction(action);
+    await flush();
+    expect(JSON.stringify(sender.patched.at(-1)!.card)).toContain("摘要生成失败");
+  });
+
+  test("摘要求解抛异常 → 只 log，不影响开话题", async () => {
+    const { commands, sender, sessionMap } = setup({
+      getSession: async () => raw,
+      summarizeSession: async () => { throw new Error("kaput"); },
+    });
+    sender.threadIdFor = () => "omt_b3";
+    await commands.handleCardAction(action);
+    await flush();
+    expect(await sessionMap.threadIdForSession("ses_old")).toBe("omt_b3");
+  });
+
+  test("resumeSummary=false → 无摘要区块、不调用摘要", async () => {
+    const summarize = vi.fn(async (): Promise<SessionSummaryOutcome> => ({ summary: "x", source: "generated" }));
+    const { commands, sender } = setup({
+      getSession: async () => raw,
+      summarizeSession: summarize,
+      resumeSummary: false,
+    });
+    sender.threadIdFor = () => "omt_b4";
+    await commands.handleCardAction(action);
+    await flush();
+    expect(JSON.stringify(sender.repliedCards.at(-1)!.card)).not.toContain("摘要");
+    expect(summarize).not.toHaveBeenCalled();
+    expect(sender.patched).toHaveLength(0);
+  });
+
+  test("未装配 summarizeSession → 不显示摘要占位", async () => {
+    const { commands, sender } = setup({ getSession: async () => raw });
+    sender.threadIdFor = () => "omt_b5";
+    await commands.handleCardAction(action);
+    await flush();
+    expect(JSON.stringify(sender.repliedCards.at(-1)!.card)).not.toContain("摘要");
   });
 });
 

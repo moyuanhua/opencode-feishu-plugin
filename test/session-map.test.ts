@@ -277,4 +277,28 @@ describe("SessionMap 会话元数据（P6）", () => {
     const map = new SessionMap(new FakeStorage(), log);
     expect(await map.setSessionMeta("ses_x", { perm: "edit" })).toBe(false);
   });
+
+  test("任务 A：allowActions 持久化 + 冷启动回填 + 非法值过滤", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.addSession("oc_1", "ses_1", "t", "ou_1");
+    await map.setSessionMeta("ses_1", { allowActions: ["shell", "bash"] });
+    expect(storage.raw(`${SESSION_KEY_PREFIX}ses_1`)).toEqual({
+      chatId: "oc_1",
+      openId: "ou_1",
+      allowActions: ["shell", "bash"],
+    });
+    const fresh = new SessionMap(storage, log);
+    expect((await fresh.resolveBySession("ses_1"))?.allowActions).toEqual(["shell", "bash"]);
+
+    // 非法值过滤 + 去重 + trim
+    storage.seed(`${SESSION_KEY_PREFIX}ses_2`, { chatId: "oc_1", openId: "ou_1", allowActions: [" shell ", "shell", 3, "", "edit"] });
+    const map2 = new SessionMap(storage, log);
+    expect((await map2.resolveBySession("ses_2"))?.allowActions).toEqual(["shell", "edit"]);
+
+    // 显式传 undefined 删除该字段（换档重置）
+    expect(await map.setSessionMeta("ses_1", { allowActions: undefined })).toBe(true);
+    expect(map.getLink("ses_1")?.allowActions).toBeUndefined();
+    expect((storage.raw(`${SESSION_KEY_PREFIX}ses_1`) as { allowActions?: string[] }).allowActions).toBeUndefined();
+  });
 });

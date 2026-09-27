@@ -144,18 +144,20 @@ describe("buildSessionListCard", () => {
 });
 
 describe("buildSessionOpenedCard（进入话题成功卡）", () => {
-  test("标题含会话标题；正文含 id/目录/最近活动/可用命令；无按钮", () => {
+  test("标题为会话主题（🔄 前缀）；正文含 id/目录/模型/最近活动/可用命令；无按钮", () => {
     const card = buildSessionOpenedCard({
       title: "我的项目",
       sessionID: "ses_old_1",
       dir: "/home/ubuntu/work/app",
+      model: "Claude Sonnet 4",
       updatedAt: NOW - 7200_000,
       now: NOW,
     }) as { header: { title: { content: string } }; body: { elements: Array<Record<string, unknown>> } };
-    expect(card.header.title.content).toBe("✅ 已进入会话 · 我的项目");
+    expect(card.header.title.content).toBe("🔄 我的项目");
     const text = JSON.stringify(card);
     expect(text).toContain("ses_old_1");
     expect(text).toContain("/home/ubuntu/work/app");
+    expect(text).toContain("Claude Sonnet 4");
     expect(text).toContain("2 小时前");
     expect(text).toContain("/current");
     expect(text).toContain("本话题内直接发消息");
@@ -163,7 +165,41 @@ describe("buildSessionOpenedCard（进入话题成功卡）", () => {
   });
 
   test("空标题回退 (未命名)", () => {
-    expect(JSON.stringify(buildSessionOpenedCard({ title: "  ", sessionID: "s" }))).toContain("✅ 已进入会话 · (未命名)");
+    expect(JSON.stringify(buildSessionOpenedCard({ title: "  ", sessionID: "s" }))).toContain("🔄 (未命名)");
+  });
+
+  test("长标题截断保护", () => {
+    const long = "很长的会话标题".repeat(20);
+    const card = buildSessionOpenedCard({ title: long, sessionID: "s" }) as {
+      header: { title: { content: string } };
+    };
+    const title = card.header.title.content;
+    expect(title.startsWith("🔄 ")).toBe(true);
+    expect(title).toContain("…");
+    expect(title.length).toBeLessThanOrEqual(34);
+  });
+
+  test("摘要区块：pending 显示占位；summary 显示正文", () => {
+    const pending = JSON.stringify(buildSessionOpenedCard({ title: "T", sessionID: "s", summaryPending: true }));
+    expect(pending).toContain("正在总结该会话");
+    const ready = JSON.stringify(buildSessionOpenedCard({ title: "T", sessionID: "s", summary: "1. 目标\n2. 完成" }));
+    expect(ready).toContain("摘要");
+    expect(ready).toContain("1. 目标");
+    // 关闭摘要（不传）时不渲染摘要区块
+    expect(JSON.stringify(buildSessionOpenedCard({ title: "T", sessionID: "s" }))).not.toContain("摘要");
+  });
+
+  test("卡片结构：JSON 2.0、无 1.0 tag:\"action\"、≤30KB", () => {
+    const card = buildSessionOpenedCard({
+      title: "标题".repeat(50),
+      sessionID: "ses_" + "x".repeat(60),
+      dir: "/home/ubuntu/work/deep/path/" + "y".repeat(200),
+      model: "m".repeat(100),
+      summary: "摘要".repeat(20000),
+    });
+    const json = JSON.stringify(card);
+    expect(json).not.toContain('"tag":"action"');
+    expect(Buffer.byteLength(json, "utf8")).toBeLessThanOrEqual(30 * 1024);
   });
 });
 

@@ -136,6 +136,11 @@ export interface SessionLink {
   readonly dir?: string;
   /** 当前模型（P6，`/model` 后更新；运行卡页脚展示）。 */
   readonly model?: ModelRef;
+  /**
+   * 会话内显式放行的工具 action（任务 A）。
+   * 由审批卡「✅ 本会话内允许该工具」写入；`permission.evaluate` gate 命中即**不降级为 ask**。
+   */
+  readonly allowActions?: readonly string[];
 }
 
 /** 话题 / 话题根 → 会话映射（P5：话题 = 会话）。 */

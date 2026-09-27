@@ -91,3 +91,36 @@ export function presetGateMode(preset: PermissionPreset): SessionGateMode {
 export function presetAskActions(preset: PermissionPreset): readonly string[] {
   return ASK_ACTIONS[preset] ?? [];
 }
+
+/**
+ * 「本会话内允许该工具」要放行的动作集合（任务 A）。
+ *
+ * shell 相关动作（`shell` / `bash`）一起放行：实测工具 id 为 `bash`，设计稿写作 `shell`，
+ * 两个名字都要覆盖，避免只放行一个、另一个仍被 gate 降级为 ask。
+ */
+export function allowActionsForGrant(action: string): string[] {
+  return SHELL_ACTIONS.includes(action) ? [...SHELL_ACTIONS] : [action];
+}
+
+/**
+ * 在现有规则集**基础上追加** allow 规则（任务 A）。
+ *
+ * - 先移除同 action 的旧 allow 规则（避免重复点击累积）；
+ * - 再追加新的 `{action, resource:"*", effect:"allow"}`；规则**最后匹配优先**，
+ *   因此会覆盖既有 `ask` 规则（如 edit 预设把 shell 转 ask）。
+ */
+export function appendAllowRules(
+  base: readonly PermissionRule[],
+  actions: readonly string[],
+): PermissionRule[] {
+  const granted = new Set(actions);
+  const kept = base.filter(
+    (rule) => !(granted.has(rule.action) && rule.resource === "*" && rule.effect === "allow"),
+  );
+  const appended: PermissionRule[] = actions.map((action) => ({
+    action,
+    resource: "*",
+    effect: "allow",
+  }));
+  return [...kept, ...appended];
+}
