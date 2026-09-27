@@ -426,6 +426,9 @@ npm run dev         # tsup --watch
 
 - **话题首条消息可能不带 `thread_id`**：飞书有时在事件里省略 `thread_id`（随后才归属到话题）。若此时你敲了 `/new` 这类仅限主聊天流的命令，它会被当作主聊天流命令执行（例如表单卡发到主聊天流）。遇到这种情况，直接进话题重新发普通消息即可。
 
+
+> 本地发布小贴士：`npm publish` 会触发 `prepublishOnly`（typecheck + build + test）。若 `node_modules` 不存在会**自动先跑 `npm ci`**，所以新克隆的仓库可以直接 `npm publish`，无需手动安装依赖。
+
 ## 许可证
 
 MIT

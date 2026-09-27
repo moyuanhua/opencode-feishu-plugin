@@ -419,6 +419,9 @@ This plugin targets **OpenCode V2 only** (`@opencode/plugin`, `Plugin.define`). 
 
 - **A topic's first message may omit `thread_id`**: Feishu sometimes delivers the event without `thread_id` (it is assigned afterwards). If you send a main-chat-only command such as `/new` at that moment, it runs as a main-chat command (e.g. the form card lands in the main chat). Just continue inside the topic with a normal message.
 
+
+> Publishing tip: `npm publish` triggers `prepublishOnly` (typecheck + build + test). If `node_modules` is missing it **runs `npm ci` first**, so a fresh clone can be published directly without a manual install.
+
 ## License
 
 MIT

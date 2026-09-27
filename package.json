@@ -25,7 +25,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "npm run typecheck && npm run build && npm test"
+    "prepublishOnly": "node -e \"require('fs').existsSync('node_modules')||require('child_process').execSync('npm ci --no-audit --no-fund',{stdio:'inherit'})\" && npm run typecheck && npm run build && npm test"
   },
   "keywords": [
     "opencode",
