@@ -254,7 +254,7 @@ Besides sessions created from Feishu, you can **load any past OpenCode session v
 - **How to continue**: simply **reply to the resume card** (Feishu forms a topic under it) to continue that past session. The user's first reply event **may carry only a `root_id` and no `thread_id`**; the plugin falls back to the `root → session` mapping to route to the session, and once a `thread_id` is available it writes the `thread → session` mapping. Later messages in that topic follow normal topic routing. (OpenCode session context is persistent, so this is effectively a resume.)
 - **Summary block (task B, three paths)**:
   1. **Reuse (zero model calls)**: read the session's **full messages** (`session.message.list`, i.e. `/api/session/{id}/message`; note `/context` is a reduced shape without `summary`) and take the latest `status:"completed"` compaction `summary`, labelled "会话摘要";
-  2. **Fast summary (default path)**: when no native summary exists, it **never feeds the whole session** — it takes the most recent messages, builds a **compact transcript** (per-message clipping, ≤6K chars total) and passes it to a **context-free** one-shot generation (`ctx.generate.text`), labelled "摘要（快摘要）"; timeout (`resumeSummaryTimeoutMs`, default **15s**, clamped 3–60s) degrades to "(summary generation failed; just send a message to continue)";
+  2. **Fast summary (default path)**: when no native summary exists, it **never feeds the whole session** — it takes the most recent messages, builds a **compact transcript** (per-message clipping, ≤6K chars total) and passes it to a one-shot generation labelled "摘要（快摘要）". That request **must carry `x-opencode-session`**, otherwise the opencode-go endpoint rejects it (`Request is missing x-opencode-session`). It is implemented **A first, B fallback**: A calls `ctx.generate.text(input, { headers: { "x-opencode-session": sessionID } })`; B calls the local HTTP `POST /api/experimental/generate` (Basic auth from `service.json` + URL-encoded `x-opencode-directory`) and sets the header explicitly. It **never** falls back to `ctx.session.generate` (that feeds the whole session and always times out on large sessions). Timeout (`resumeSummaryTimeoutMs`, default **15s**, clamped 3–60s) degrades to "(summary generation failed; just send a message to continue)";
   3. **Native compaction (user-initiated only)**: the card carries a **"🗜 压缩并总结"** button (value `{cmd:"compact", s, t}`, self-signed token + allowlist + replay guard). Tapping it returns a toast within 3s and **asynchronously** calls `POST /api/session/{id}/compact`; the card shows "🗜 正在压缩会话…" and polls the session messages every 2s until a **new** completed summary appears, then patches to "已压缩 · 会话摘要"; failure/timeout (`resumeCompactTimeoutMs`, default **120s**, clamped 30–300s) only patches an explanation, so you can keep working. **Compaction rewrites session history, so the plugin never triggers it implicitly when entering a session.**
   Set `resumeSummary: false` to disable the whole summary block and the compact button.
 - Only the clicked session is affected: the card binds just that session's root; other sessions' mappings are untouched.
@@ -293,6 +293,20 @@ The topic root card (the `/new` created card / the `/resume` resume card) reflec
 - This is fully independent from the per-message **run card**: a status refresh only touches the topic root card and does not change the run card's streaming behaviour.
 
 Config: `topicStatus` (default `true`; disable to stop refreshing entirely), `topicStatusInTitle` (default `false`), `topicStatusThrottleMs` (default `1000`, clamped 500–10000).
+
+### Card content guard (table over-limit degradation)
+
+A Feishu card supports **at most 5 table components**; beyond that `im.message.patch` returns 400 `code=230099 card table number over limit`. The real-world trap: when a single assistant reply contains **many markdown comparison tables** (5+ in one go), **every card patch fails**, the card is stuck on old content, and the user thinks the bot has "frozen".
+
+The plugin guards the **whole card** (not each element separately):
+
+- **Tables are counted cumulatively per card**: multiple markdown elements **share** one budget (default `cardMaxTables=4`, leaving one slot of headroom; clamped 1–5, so even 5 equals the Feishu hard limit).
+- **Tables beyond the budget are degraded into fenced code blocks** (`` ``` `` / `~~~`): **no content is lost**, they are simply no longer rendered as tables, so the 400 is avoided.
+- **A `|` inside a code block is never misdetected as a table**: a per-line fence mask (``` / ~~~, up to 3 leading spaces) is computed first and fenced lines are skipped. Degrading is therefore **idempotent** and never loops.
+- **Element-count backstop**: a single card's component count is clamped to ≤200 (oldest elements are dropped first, keeping the newest content), avoiding another class of 400.
+- Applies to run-card text blocks, topic root / resume cards and their summaries, plus a **final backstop in the send layer** (`sendCard` / `replyCard` / `patchCard`) — no path can emit an over-limit card. A degradation logs a `warn` keyed by `sessionID` (with detected/degraded counts) for observability.
+
+Config: `cardMaxTables` (default `4`, clamped `1–5`).
 
 ### Permission presets
 
@@ -385,6 +399,7 @@ Without this relay, any clarifying question would stall the Feishu session forev
 | `topicStatus` | boolean | `true` | Topic root card status master switch (colour + footer). Disable to stop refreshing entirely |
 | `topicStatusInTitle` | boolean | `false` | Add a status emoji prefix to the root card title (e.g. `🟡 session name`). Off by default: the topic name shows in the sidebar, and flipping it would be noisy |
 | `topicStatusThrottleMs` | number | `1000` | Min root-card status refresh interval (clamped 500–10000); patched only when the kind changes |
+| `cardMaxTables` | number | `4` | Max markdown tables kept per card (clamped 1–5); tables beyond it are degraded **cumulatively per card** into fenced code blocks (no content lost) to avoid Feishu 400 `code=230099` |
 
 ---
 

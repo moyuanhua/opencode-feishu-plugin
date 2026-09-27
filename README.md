@@ -254,7 +254,7 @@ opencode mcp list        # 顺带确认服务健康
 - **如何续聊**：**直接回复这张恢复卡**（飞书会在该卡下形成话题）即可继续这个历史会话。用户首次回复的入站事件**可能只带 `root_id` 而不带 `thread_id`**，插件靠 `root → session` 兜底路由到会话，并在拿到 `thread_id` 后补写 `thread → session` 映射；之后该话题内的消息按常规话题路由。（opencode 会话上下文天然持久，等同于 resume。）
 - **摘要区块（任务 B，三条路径）**：
   1. **复用（零模型调用）**：读该会话**完整消息**（`session.message.list`，即 `/api/session/{id}/message`；注意 `/context` 是精简形状、不含 `summary`），取最近一条 `status:"completed"` 的 compaction `summary`，标注「会话摘要」直接渲染；
-  2. **快摘要（默认路径）**：无原生摘要时，**绝不喂整个会话**——只取最近消息构造**精简转写**（每条截断、总量 ≤6K 字符）交给**无会话上下文**的临时生成（`ctx.generate.text`），标注「摘要（快摘要）」，秒级完成；超时（`resumeSummaryTimeoutMs`，默认 **15s**，夹取 3–60s）降级为「（摘要生成失败，可直接发消息继续）」；
+  2. **快摘要（默认路径）**：无原生摘要时，**绝不喂整个会话**——只取最近消息构造**精简转写**（每条截断、总量 ≤6K 字符）交给一次性临时生成，标注「摘要（快摘要）」，秒级完成；该请求**必须携带 `x-opencode-session`**（否则 opencode-go 端按路由要求拒绝：`Request is missing x-opencode-session`）。实现为**优先 A、失败回退 B**：A 用 `ctx.generate.text(input, { headers: { "x-opencode-session": sessionID } })`；B 用本机 HTTP `POST /api/experimental/generate`（`service.json` 的 Basic 认证 + URL 编码的 `x-opencode-directory`）并显式带该头。**绝不**回退到 `ctx.session.generate`（会把整个会话喂给模型，大会话必超时）。超时（`resumeSummaryTimeoutMs`，默认 **15s**，夹取 3–60s）降级为「（摘要生成失败，可直接发消息继续）」；
   3. **原生压缩（仅用户主动）**：卡片带**「🗜 压缩并总结」**按钮（值 `{cmd:"compact", s, t}`，自签 token + 白名单 + 防重放）。点击后（3 秒内回 toast）**异步** `POST /api/session/{id}/compact`，卡片进入「🗜 正在压缩会话…」态，并每 2s 轮询该会话消息直到出现**新的** completed 摘要，patch 为「已压缩 · 会话摘要」；失败/超时（`resumeCompactTimeoutMs`，默认 **120s**，夹取 30–300s）只 patch 说明，不影响继续干活。**压缩会修改会话历史，插件绝不在「进入会话」时隐式触发**。
   可用 `resumeSummary: false` 关闭整个摘要区块与压缩按钮。
 - 只影响被点击的那一个会话：恢复卡只绑定该会话的 root，其它会话的映射不受影响。
@@ -293,6 +293,20 @@ opencode mcp list        # 顺带确认服务健康
 - 与每条消息那张**运行卡**完全独立：状态刷新只碰话题根卡，不影响运行卡既有的流式行为。
 
 配置：`topicStatus`（默认 `true`，关闭则完全不刷新）、`topicStatusInTitle`（默认 `false`）、`topicStatusThrottleMs`（默认 `1000`，夹取 500–10000）。
+
+### 卡片内容守卫（表格超限降级）
+
+飞书**单张卡片最多 5 个表格组件**，超限时 `im.message.patch` 直接返回 400 `code=230099 card table number over limit`。真实的坑：某次 assistant 回复里出现**大量 markdown 对照表**（一次 5 个以上）时，**每一次卡片 patch 都失败**，卡片永远停在旧内容 → 用户以为机器人「卡死」。
+
+插件对**整张卡片**做内容守卫（不只是每个元素各自计数）：
+
+- **表格数按整卡累计**：多个 markdown 元素**共用**一个额度（默认 `cardMaxTables=4`，留 1 个余量；夹取 1–5，即使配到 5 也正好等于飞书硬上限）。
+- **超出额度的表格降级为围栏代码块**（`` ``` `` / `~~~`）：内容**一字不丢**，只是不再被飞书当作表格渲染，因此不会触发 400。
+- **代码块内的 `|` 绝不被误判为表格**：识别前先逐行计算围栏遮罩（``` / ~~~，允许最多 3 空格缩进），代码块内的行一律跳过；因此降级后的结果**再次处理是幂等的**，不会无限降级。
+- **组件数兜底**：单卡组件数收敛到 ≤200（超限时从**最旧**元素开始丢弃，保留最新内容），避免另一类 400。
+- 应用范围：运行卡文本块、话题根卡 / 恢复卡 / 摘要，以及发送层（`sendCard` / `replyCard` / `patchCard`）的**最后一道兜底**——任何路径都不会把超限卡片发出去。发生降级时按 `sessionID` 记 `warn`（含识别表格数 / 降级数）便于观测。
+
+配置：`cardMaxTables`（默认 `4`，夹取 `1–5`）。
 
 ### 四档权限预设
 
@@ -391,6 +405,7 @@ agent 主动调用 `question` 工具（或其它 form 类交互）时，opencode
 | `topicStatus` | boolean | `true` | 话题根卡工作状态总开关（颜色 + 页脚）。关闭则完全不刷新根卡状态 |
 | `topicStatusInTitle` | boolean | `false` | 是否在根卡标题加状态 emoji 前缀（如 `🟡 会话名`）。默认关闭：话题名显示在侧栏，频繁变动会很乱 |
 | `topicStatusThrottleMs` | number | `1000` | 根卡状态刷新最小间隔（夹取 500–10000）；仅在档位变化时才 patch |
+| `cardMaxTables` | number | `4` | 单卡最多保留的 markdown 表格数（夹取 1–5）；超出的表格**按整卡累计**降级为围栏代码块（内容不丢），避免飞书 400 `code=230099` |
 
 ---
 

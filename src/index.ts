@@ -62,6 +62,7 @@ import {
 } from "./session/resume-summary.js";
 import { CompactController } from "./session/compact.js";
 import { compactSessionHttp, fetchSessionMessagesHttp } from "./session/compact-http.js";
+import { quickGenerateWithSession } from "./session/quick-generate.js";
 import type {
   IncomingMessage,
   ModelRef,
@@ -146,7 +147,7 @@ async function start(
     appSecret: config.appSecret,
     domain: config.domain === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu,
   });
-  const sender = createFeishuSender(client, log);
+  const sender = createFeishuSender(client, log, { cardMaxTables: config.cardMaxTables });
 
   await owner.load().catch((err) => log.warn("owner 读取失败", { error: errorMessage(err) }));
 
@@ -160,6 +161,7 @@ async function start(
     log,
     enabled: config.stream,
     throttleMs: config.streamThrottleMs,
+    cardMaxTables: config.cardMaxTables,
     // 每次 patch 重签强停 token（`stop` 在下方定义，闭包运行时才求值）。
     buildStopValue: (sessionID) => stop.buildStopValue(sessionID),
   });
@@ -452,12 +454,29 @@ async function start(
     const readMessages = async (sessionID: string, directory: string | undefined): Promise<unknown> =>
       readSessionMessages(ctx, sessionID, directory, log);
 
-    const generateText = async (prompt: string, _directory: string | undefined): Promise<unknown> => {
+    // 快摘要临时生成：优先 A（`ctx.generate.text` + `x-opencode-session` 请求头），
+    // 失败/空结果回退 B（本机 HTTP `POST /api/experimental/generate`，显式带头）。
+    // **绝不**回退 `ctx.session.generate`——那会把整个会话喂给模型，大会话必超时。
+    const generateText = async (prompt: string, directory: string | undefined): Promise<unknown> => {
       const api = (ctx.generate as unknown as {
-        text?: (arg: { prompt: string }) => Promise<unknown>;
-      })?.text;
-      if (typeof api !== "function") return undefined;
-      return api({ prompt });
+        text?: (
+          arg: { prompt: string },
+          options?: { headers?: Record<string, string> },
+        ) => Promise<unknown>;
+      }).text;
+      const outcome = await quickGenerateWithSession(
+        {
+          log,
+          ...(typeof api === "function"
+            ? {
+                generateText: (p: string, requestOptions: { headers: Record<string, string> }) =>
+                  api({ prompt: p }, requestOptions),
+              }
+            : {}),
+        },
+        { prompt, sessionID: input.sessionID, ...(directory ? { directory } : {}) },
+      );
+      return outcome.result;
     };
 
     return summarizeSessionImpl({ log, readMessages, generateText }, input);
@@ -565,6 +584,7 @@ async function start(
     resumeSummary: config.resumeSummary,
     resumeSummaryTimeoutMs: config.resumeSummaryTimeoutMs,
     resumeCompactTimeoutMs: config.resumeCompactTimeoutMs,
+    cardMaxTables: config.cardMaxTables,
     summarizeSession: summarizeSessionForResume,
     signCompact: (sessionID) => signCompactToken(sessionID, config.signSecret),
   });

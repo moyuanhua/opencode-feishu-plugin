@@ -24,6 +24,11 @@ export interface RunControllerDeps {
   readonly enabled: boolean;
   readonly throttleMs: number;
   /**
+   * 单卡最多保留的 markdown 表格数（默认 4，夹取 1–5）。
+   * 飞书单卡表格超 5 会 400（code=230099），运行卡文本块是主要来源。
+   */
+  readonly cardMaxTables?: number;
+  /**
    * 构建运行卡「强制停止」按钮 value（含当次签名 token）。
    * 每次 patch 都会调用 → 长任务 token 始终保持新鲜；缺省不渲染按钮。
    */
@@ -102,9 +107,20 @@ export function createRunController(deps: RunControllerDeps): RunController {
     return runs;
   };
 
-  /** 渲染一张卡片（每次重签强停 token）。 */
+  /** 渲染一张卡片（每次重签强停 token）；表格/组件超限时按 sessionID 记 warn。 */
   const renderCard = (sessionID: string, state: RunState): object =>
-    renderRunCard(state, deps.buildStopValue?.(sessionID));
+    renderRunCard(state, deps.buildStopValue?.(sessionID), {
+      maxTables: deps.cardMaxTables,
+      onLimit: (report) => {
+        deps.log.warn("运行卡内容超限，已降级", {
+          sessionID,
+          tables: report.tables,
+          degradedTables: report.degradedTables,
+          elements: report.elements,
+          droppedElements: report.droppedElements,
+        });
+      },
+    });
 
   const patch = async (card: Card): Promise<void> => {
     if (disposed) return;

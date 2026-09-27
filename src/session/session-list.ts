@@ -14,6 +14,7 @@ import {
   type SessionListRow,
 } from "../feishu/session-cards.js";
 import { modelLabel } from "../feishu/models.js";
+import type { CardLimitReport } from "../feishu/card-limits.js";
 import {
   fallbackEntries,
   normalizeSessionInfo,
@@ -138,6 +139,9 @@ export async function enterSessionThread(
   const link = await ctx.deps.sessionMap.resolveBySession(sessionID);
   const dir = info?.directory ?? link?.dir;
   const showSummary = (ctx.deps.resumeSummary ?? true) && Boolean(ctx.deps.summarizeSession);
+  const onLimit = (report: CardLimitReport): void => {
+    ctx.deps.log.warn("会话恢复卡内容超限，已降级", { sessionID, ...report });
+  };
   const cardInput = {
     title: info?.title ?? "",
     sessionID,
@@ -145,6 +149,8 @@ export async function enterSessionThread(
     ...(link?.model ? { model: modelLabel(link.model) } : {}),
     ...(info?.updatedAt ? { updatedAt: info.updatedAt } : {}),
     now: ctx.now(),
+    ...(ctx.deps.cardMaxTables !== undefined ? { maxTables: ctx.deps.cardMaxTables } : {}),
+    onLimit,
     ...(showSummary ? { summaryPending: true } : {}),
     // 「🗜 压缩并总结」只在开关开启且运行时装配了签名时渲染。
     ...(showSummary && ctx.deps.signCompact

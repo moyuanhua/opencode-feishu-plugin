@@ -130,6 +130,15 @@ export interface ResolvedConfig {
    * 仅在状态档位发生变化时才 patch，且两次 patch 至少间隔该时长。
    */
   readonly topicStatusThrottleMs: number;
+  /**
+   * 单张卡片最多保留的 markdown 表格数（默认 4，夹取 1–5）。
+   *
+   * 飞书**单卡最多 5 个表格组件**，超限时 `im.message.patch` 直接 400
+   * （`code=230099 card table number over limit`）。一次回复里出现 5 个以上对照表时，
+   * 每一次 patch 都失败 → 卡片停在旧内容 → 用户以为机器人「卡死」。
+   * 超过本额度（按**整卡累计**）的表格会被**降级为围栏代码块**（内容不丢），默认留 1 个余量。
+   */
+  readonly cardMaxTables: number;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -200,6 +209,7 @@ export function resolveConfig(
   const topicStatus = asBoolean(merged.topicStatus, true);
   const topicStatusInTitle = asBoolean(merged.topicStatusInTitle, false);
   const topicStatusThrottleMs = clamp(asNumber(merged.topicStatusThrottleMs, 1_000), 500, 10_000);
+  const cardMaxTables = clamp(asNumber(merged.cardMaxTables, 4), 1, 5);
   const domain = merged.domain === "lark" ? "lark" : "feishu";
   const logFile = resolveLogFile(merged.logFile, env, deps);
   const gatewayLocation = asString(merged.gatewayLocation).trim() || undefined;
@@ -251,6 +261,7 @@ export function resolveConfig(
     topicStatus,
     topicStatusInTitle,
     topicStatusThrottleMs,
+    cardMaxTables,
   };
 }
 

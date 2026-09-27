@@ -119,6 +119,8 @@ export interface SessionCommandsDeps {
   readonly resumeSummaryTimeoutMs?: number;
   /** 任务 B：用户主动压缩后的轮询超时（默认 120000ms，夹取 30000–300000）。 */
   readonly resumeCompactTimeoutMs?: number;
+  /** 单卡最多保留的 markdown 表格数（默认 4，夹取 1–5）；见 `feishu/card-limits.ts`。 */
+  readonly cardMaxTables?: number;
   /**
    * 任务 B：获取会话摘要（复用已有 compaction 摘要 → 缺失才走**快摘要**）。
    * 缺省 = 恢复卡不显示摘要（即使 `resumeSummary=true`），也不显示压缩按钮。

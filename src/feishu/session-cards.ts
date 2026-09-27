@@ -12,6 +12,7 @@
  * 回调数据走 `behaviors`。
  */
 import { truncateCardContent, type CardTemplate } from "./cards.js";
+import { enforceCardLimits, type CardLimitReport } from "./card-limits.js";
 import { shortSessionId } from "./commands.js";
 import { directoryTail, relativeTime } from "./session-list.js";
 import {
@@ -142,7 +143,7 @@ export function buildSessionListCard(input: SessionListCardInput): object {
   }
 
   const template: CardTemplate = "blue";
-  return {
+  return guardCard({
     schema: "2.0",
     config: { update_multi: true },
     header: {
@@ -150,7 +151,7 @@ export function buildSessionListCard(input: SessionListCardInput): object {
       template,
     },
     body: { elements },
-  };
+  });
 }
 
 /** 解析会话卡片按钮 value；非会话卡片返回 undefined（交给审批卡路由）。 */
@@ -200,6 +201,10 @@ export function buildSessionRootCard(
     readonly statusInTitle?: boolean;
     /** 状态刷新时重签的压缩按钮 token（不落盘）。 */
     readonly compactToken?: string;
+    /** 单卡最多保留的 markdown 表格数（默认 4，夹取 1–5）。 */
+    readonly maxTables?: number;
+    /** 发生表格降级 / 元素丢弃时回调（调用方按 sessionID 记日志）。 */
+    readonly onLimit?: (report: CardLimitReport) => void;
   } = {},
 ): object {
   const now = options.now ?? Date.now();
@@ -233,12 +238,30 @@ export function buildSessionRootCard(
   const template: CardTemplate = status ? topicStatusMeta(status.kind).color : "green";
   const content =
     status && options.statusInTitle ? topicStatusTitle(headerTitle, status, true) : headerTitle;
-  return {
-    schema: "2.0",
-    config: { update_multi: true },
-    header: { title: { tag: "plain_text", content }, template },
-    body: { elements },
-  };
+  return guardCard(
+    {
+      schema: "2.0",
+      config: { update_multi: true },
+      header: { title: { tag: "plain_text", content }, template },
+      body: { elements },
+    },
+    options,
+  );
+}
+
+/**
+ * 卡片内容守卫封装：整卡表格累计 ≤`maxTables`（超出降级为代码块），组件数 ≤200。
+ * `onLimit` 仅在**确实发生**降级 / 丢弃时回调，避免正常卡片产生噪声日志。
+ */
+function guardCard(
+  card: object,
+  options: { readonly maxTables?: number; readonly onLimit?: (report: CardLimitReport) => void } = {},
+): object {
+  const { card: guarded, report } = enforceCardLimits(card, { maxTables: options.maxTables });
+  if (options.onLimit && (report.degradedTables > 0 || report.droppedElements > 0)) {
+    options.onLimit(report);
+  }
+  return guarded;
 }
 
 /** `resumed` 风格正文（恢复卡）。 */
@@ -311,6 +334,10 @@ export function buildSessionOpenedCard(input: {
   readonly compactError?: string;
   /** 「🗜 压缩并总结」按钮（用户主动触发原生压缩）。 */
   readonly compactButton?: SessionOpenedCompactButton;
+  /** 单卡最多保留的 markdown 表格数（默认 4，夹取 1–5）。 */
+  readonly maxTables?: number;
+  /** 发生表格降级 / 元素丢弃时回调（调用方按 sessionID 记日志）。 */
+  readonly onLimit?: (report: CardLimitReport) => void;
 }): object {
   const base: SessionRootCardBase = {
     style: "resumed",
@@ -329,6 +356,8 @@ export function buildSessionOpenedCard(input: {
   return buildSessionRootCard(base, undefined, {
     now: input.now ?? Date.now(),
     ...(input.compactButton ? { compactToken: input.compactButton.token } : {}),
+    ...(input.maxTables !== undefined ? { maxTables: input.maxTables } : {}),
+    ...(input.onLimit ? { onLimit: input.onLimit } : {}),
   });
 }
 
@@ -360,12 +389,12 @@ export function buildSessionMissingCard(sessionID: string, reason?: string): obj
     "发送 `/sessions` 重新获取列表。",
   ];
   if (reason) lines.splice(1, 0, "", `原因：${reason}`);
-  return {
+  return guardCard({
     schema: "2.0",
     config: { update_multi: true },
     header: { title: { tag: "plain_text", content: "⚠️ 会话不存在" }, template: "orange" },
     body: { elements: [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }] },
-  };
+  });
 }
 
 /**
@@ -393,14 +422,14 @@ export function buildSessionReadyCard(input: {
     "话题内可用：`/current` `/stop` `/model` `/perm` `/cd` `/help`。",
     "会话管理（`/new` `/sessions` `/use`）请回到主聊天流。",
   );
-  return {
+  return guardCard({
     schema: "2.0",
     config: { update_multi: true },
     header: { title: { tag: "plain_text", content: "✅ 会话已就绪" }, template: "green" },
     body: {
       elements: [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }],
     },
-  };
+  });
 }
 
 export interface SessionCreatedCardInput {

@@ -10,6 +10,7 @@
  * （`enforceSize`），保证序列化 ≤ `MAX_CARD_BYTES`。
  */
 import { cardButton, MAX_CARD_BYTES, truncateCardContent, type CardTemplate } from "./cards.js";
+import { enforceCardLimits, type CardLimitReport } from "./card-limits.js";
 import type { RunBlock, RunState, ToolEntry } from "./run-state.js";
 
 const COLLAPSE_TOOL_THRESHOLD = 3;
@@ -29,13 +30,28 @@ interface TextGroup {
 }
 type Group = ToolGroup | TextGroup;
 
+/** 运行卡内容守卫参数（表格 ≤`maxTables`、组件数上限）。 */
+export interface RenderRunCardOptions {
+  /** 单卡最多保留的 markdown 表格数（默认见 `DEFAULT_CARD_MAX_TABLES`，夹取 1–5）。 */
+  readonly maxTables?: number;
+  /** 发生表格降级 / 元素丢弃时回调（供调用方按 sessionID 记日志；纯函数本身不打日志）。 */
+  readonly onLimit?: (report: CardLimitReport) => void;
+}
+
 /**
  * 渲染整张运行卡片。
  *
  * `stopValue` 由调用方（RunController）构建并**每次 patch 重签**，保持本函数纯函数可单测；
  * 缺省不渲染停止按钮（向后兼容）。按钮为 JSON 2.0：直放 `body.elements`、回调走 `behaviors`。
+ *
+ * 内容守卫：先按 `enforceCardLimits` 把整卡表格数收敛到 `maxTables` 内（超出的表格降级为
+ * 围栏代码块，避免飞书 230099），再做体积保护 `enforceSize`。
  */
-export function renderRunCard(state: RunState, stopValue?: Record<string, unknown>): object {
+export function renderRunCard(
+  state: RunState,
+  stopValue?: Record<string, unknown>,
+  options: RenderRunCardOptions = {},
+): object {
   const elements: object[] = [];
 
   for (const group of groupBlocks(state.blocks)) {
@@ -78,7 +94,12 @@ export function renderRunCard(state: RunState, stopValue?: Record<string, unknow
     },
     body: { elements },
   };
-  return enforceSize(card);
+  // 表格 / 组件数守卫必须**先于**体积保护：降级后的围栏代码块体积由 enforceSize 兜底。
+  const { card: guarded, report } = enforceCardLimits(card, { maxTables: options.maxTables });
+  if (options.onLimit && (report.degradedTables > 0 || report.droppedElements > 0)) {
+    options.onLimit(report);
+  }
+  return enforceSize(guarded);
 }
 
 /** 连续的工具块归为一组；文本块单独成组，保持原始顺序。 */

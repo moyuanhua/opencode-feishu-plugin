@@ -5,6 +5,7 @@
  */
 import type * as Lark from "@larksuiteoapi/node-sdk";
 import { errorMessage } from "../logger.js";
+import { enforceCardLimits } from "./card-limits.js";
 import type { Logger } from "../types.js";
 
 /**
@@ -70,7 +71,31 @@ export interface FeishuSender {
 
 type LarkClient = InstanceType<typeof Lark.Client>;
 
-export function createFeishuSender(client: LarkClient, log: Logger): FeishuSender {
+export interface SenderOptions {
+  /** 单卡最多保留的 markdown 表格数（默认 4，夹取 1–5）。 */
+  readonly cardMaxTables?: number;
+}
+
+export function createFeishuSender(client: LarkClient, log: Logger, options: SenderOptions = {}): FeishuSender {
+  /**
+   * 发送/更新前的**最后一道内容守卫**：无论哪张卡片、哪个构建器，表格数都收敛到上限内，
+   * 组件数也 ≤200——避免任何遗漏的路径把飞书 400（`code=230099`）发出去。
+   * 构建器已守卫过的卡片再次处理是幂等的（降级后的表格已变成代码块）。
+   */
+  const guard = (card: object, tag: string): object => {
+    const { card: guarded, report } = enforceCardLimits(card, { maxTables: options.cardMaxTables });
+    if (report.degradedTables > 0 || report.droppedElements > 0) {
+      log.warn("卡片内容超限，已降级（发送层兜底）", {
+        where: tag,
+        tables: report.tables,
+        degradedTables: report.degradedTables,
+        elements: report.elements,
+        droppedElements: report.droppedElements,
+      });
+    }
+    return guarded;
+  };
+
   return {
     async sendCard(chatId, card) {
       if (!chatId) return { ok: false, error: "missing chatId" };
@@ -80,7 +105,7 @@ export function createFeishuSender(client: LarkClient, log: Logger): FeishuSende
           data: {
             receive_id: chatId,
             msg_type: "interactive",
-            content: JSON.stringify(card),
+            content: JSON.stringify(guard(card, "create")),
           },
         });
         if (res?.code && res.code !== 0) {
@@ -102,7 +127,7 @@ export function createFeishuSender(client: LarkClient, log: Logger): FeishuSende
           path: { message_id: messageId },
           data: {
             msg_type: "interactive",
-            content: JSON.stringify(card),
+            content: JSON.stringify(guard(card, "reply")),
             ...(opts?.replyInThread ? { reply_in_thread: true } : {}),
           },
         });
@@ -129,7 +154,7 @@ export function createFeishuSender(client: LarkClient, log: Logger): FeishuSende
       try {
         const res = await client.im.message.patch({
           path: { message_id: messageId },
-          data: { content: JSON.stringify(card) },
+          data: { content: JSON.stringify(guard(card, "patch")) },
         });
         if (res?.code && res.code !== 0) {
           log.warn("更新卡片失败", { messageId, code: res.code, msg: res.msg });

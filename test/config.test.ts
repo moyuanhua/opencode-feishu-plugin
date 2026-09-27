@@ -178,6 +178,14 @@ describe("resolveConfig", () => {
     expect(resolve({ appId: "a", appSecret: "s", topicStatusInTitle: true }, {}).topicStatusInTitle).toBe(true);
   });
 
+  test("卡片表格守卫：cardMaxTables 默认 4，夹取 1–5", () => {
+    expect(resolve({ appId: "a", appSecret: "s" }, {}).cardMaxTables).toBe(4);
+    expect(resolve({ appId: "a", appSecret: "s", cardMaxTables: 0 }, {}).cardMaxTables).toBe(1);
+    expect(resolve({ appId: "a", appSecret: "s", cardMaxTables: 99 }, {}).cardMaxTables).toBe(5);
+    expect(resolve({ appId: "a", appSecret: "s", cardMaxTables: 5 }, {}).cardMaxTables).toBe(5);
+    expect(resolve({ appId: "a", appSecret: "s", cardMaxTables: 2 }, {}).cardMaxTables).toBe(2);
+  });
+
   test("话题根卡状态：topicStatusThrottleMs 默认 1000，夹取 500–10000", () => {
     expect(resolve({ appId: "a", appSecret: "s" }, {}).topicStatusThrottleMs).toBe(1_000);
     expect(resolve({ appId: "a", appSecret: "s", topicStatusThrottleMs: 1 }, {}).topicStatusThrottleMs).toBe(500);
