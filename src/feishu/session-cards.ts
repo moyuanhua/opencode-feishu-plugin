@@ -192,7 +192,7 @@ export function buildSessionOpenedCard(input: {
     setup.push(`- 最近活动：${relativeTime(input.updatedAt, input.now ?? Date.now())}`);
   }
   if (setup.length > 0) lines.push("", ...setup);
-  lines.push("", "**在本话题内直接发消息**，OpenCode 就接着这个历史会话继续干活。");
+  lines.push("", "**回复本卡片**即可继续这个历史会话（飞书回复会在本卡下形成话题）。");
   if (input.summary || input.summaryPending) {
     lines.push("", "**摘要**：", input.summary ?? "⏳ 正在总结该会话…");
   }
