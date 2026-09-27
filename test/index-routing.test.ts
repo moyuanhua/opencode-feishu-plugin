@@ -27,8 +27,11 @@ const h = vi.hoisted(() => ({
     | ((event: { sessionID: string; action: string; effect?: string; message?: string }) => Promise<void>),
   sessionUpdates: [] as Array<{ sessionID: string; permissions: Array<{ action: string; resource: string; effect: string }> }>,
   contextRaw: undefined as unknown,
+  messagesRaw: undefined as unknown as { data: unknown[] } | undefined,
   generateRaw: undefined as unknown,
   generateCalls: [] as Array<{ sessionID: string; prompt: string }>,
+  compactCalls: [] as Array<{ sessionID: string }>,
+  generateTextCalls: [] as string[],
 }));
 
 vi.mock("../src/feishu/gateway.js", () => ({
@@ -141,9 +144,26 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
         h.sessionUpdates.push(input);
       },
       context: async () => h.contextRaw,
+      compact: async (input: { sessionID: string }) => {
+        h.compactCalls.push(input);
+        // 模拟压缩"完成"：随后的轮询能读到新的 completed 摘要。
+        h.messagesRaw = { data: [{ type: "compaction", status: "completed", summary: "压缩后的摘要" }] };
+        return { id: "msg_c", sessionID: input.sessionID, type: "compaction" };
+      },
       generate: async (input: { sessionID: string; prompt: string }) => {
         h.generateCalls.push(input);
         return h.generateRaw;
+      },
+    },
+    // 完整消息通道（恢复卡"复用摘要"必须走这里，而不是精简形状的 session.context）。
+    message: {
+      list: async (_input: { sessionID: string; limit?: number }) => h.messagesRaw,
+    },
+    // 快摘要走**无会话上下文**的临时生成（绝不用 session.generate）。
+    generate: {
+      text: async (input: { prompt: string }) => {
+        h.generateTextCalls.push(input.prompt);
+        return h.generateRaw as { text: string } | undefined;
       },
     },
     permission: {
@@ -210,8 +230,11 @@ describe("index 话题路由（集成）", () => {
     h.evaluateHook = undefined;
     h.sessionUpdates.length = 0;
     h.contextRaw = undefined;
+    h.messagesRaw = undefined;
     h.generateRaw = undefined;
     h.generateCalls.length = 0;
+    h.compactCalls.length = 0;
+    h.generateTextCalls.length = 0;
     createSession.mockClear();
   });
 
@@ -527,11 +550,14 @@ describe("index 话题路由（集成）", () => {
   });
 
   // ── 任务 B：恢复卡标题 + 摘要（集成） ────────────────────────────────
-  test("恢复卡：标题用会话主题；已有 compaction 摘要直接复用（不调用生成）", async () => {
+  test("恢复卡：标题用会话主题；完整消息里的 compaction 摘要直接复用（不调用生成）", async () => {
     sessionListRaw = [
       { id: "ses_sum", title: "摘要会话", time: { updated: 1_700_000_000_000 }, location: { directory: "/home/ubuntu/work/app" } },
     ];
-    h.contextRaw = [{ type: "compaction", status: "completed", summary: "1. 已完成 X\n2. 下一步 Y" }];
+    // 完整消息通道：compaction 消息带 status:"completed" + summary。
+    h.messagesRaw = { data: [{ type: "compaction", status: "completed", summary: "1. 已完成 X\n2. 下一步 Y" }] };
+    // session.context 是精简形状（不含 summary）；即便有也不能用来复用。
+    h.contextRaw = [{ type: "assistant", content: [{ type: "text", text: "不该被当成摘要" }] }];
     cleanup = await setup();
     await deliver(msg("你好", { messageId: "om_bootB" }));
 
@@ -546,6 +572,7 @@ describe("index 话题路由（集成）", () => {
       expect(JSON.stringify(h.patched.at(-1))).toContain("1. 已完成 X");
     });
     expect(h.generateCalls).toHaveLength(0);
+    expect(h.generateTextCalls).toHaveLength(0);
 
     const rootSet = storage.setCalls.find((c) => c.key.startsWith("feishu:v2:root:"));
     const cardId = rootSet!.key.replace("feishu:v2:root:", "");
@@ -554,4 +581,116 @@ describe("index 话题路由（集成）", () => {
     expect(promptCalls.at(-1)).toEqual({ sessionID: "ses_sum", text: "继续" });
     expect((storage.raw("feishu:v2:thread:omt_from_get") as { sessionID: string }).sessionID).toBe("ses_sum");
   });
+
+  test("恢复卡无原生摘要：走快摘要（无会话上下文的 generate.text），不调用 session.generate", async () => {
+    sessionListRaw = [
+      { id: "ses_fast", title: "快摘要会话", time: { updated: 1_700_000_000_000 }, location: { directory: "/home/ubuntu/work/app" } },
+    ];
+    h.messagesRaw = { data: [{ type: "user", text: "帮我改 bug" }, { type: "assistant", content: [{ type: "text", text: "好的" }] }] };
+    h.generateRaw = { text: "快摘要结果" };
+    cleanup = await setup();
+    await deliver(msg("你好", { messageId: "om_bootFast" }));
+
+    await click({ cmd: "open", s: "ses_fast", c: "oc_1" });
+    await vi.waitFor(() => {
+      expect(JSON.stringify(h.patched.at(-1))).toContain("快摘要结果");
+    });
+    // 关键：走临时生成（generate.text），**绝不**用会把整个会话喂进去的 session.generate。
+    expect(h.generateTextCalls).toHaveLength(1);
+    expect(h.generateTextCalls[0]).toContain("用户：帮我改 bug");
+    expect(h.generateCalls).toHaveLength(0);
+  });
+
+  test("进入会话**绝不**隐式触发压缩（不调用 session.compact）", async () => {
+    sessionListRaw = [
+      { id: "ses_nc", title: "不压缩", time: { updated: 1_700_000_000_000 }, location: { directory: "/home/ubuntu/work/app" } },
+    ];
+    h.messagesRaw = { data: [{ type: "user", text: "hi" }] };
+    cleanup = await setup();
+    await deliver(msg("你好", { messageId: "om_bootNC" }));
+    await click({ cmd: "open", s: "ses_nc", c: "oc_1" });
+    await vi.waitFor(() => {
+      expect(JSON.stringify(h.created.at(-1))).toContain("🔄 不压缩");
+    });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(h.compactCalls).toHaveLength(0);
+  });
+
+  test("压缩按钮：点击 → 触发 session.compact；轮询到新摘要 → patch「已压缩 · 会话摘要」", async () => {
+    sessionListRaw = [
+      { id: "ses_cmp", title: "压缩会话", time: { updated: 1_700_000_000_000 }, location: { directory: "/home/ubuntu/work/app" } },
+    ];
+    h.messagesRaw = { data: [{ type: "user", text: "hi" }] };
+    cleanup = await setup();
+    await deliver(msg("你好", { messageId: "om_bootCmp" }));
+
+    await click({ cmd: "open", s: "ses_cmp", c: "oc_1" });
+    await vi.waitFor(() => {
+      expect(JSON.stringify(h.created.at(-1))).toContain("🔄 压缩会话");
+    });
+    // 恢复卡带压缩按钮（签名由插件生成）。
+    const cardJson = JSON.stringify(h.created.at(-1));
+    expect(cardJson).toContain("🗜 压缩并总结");
+    // 等快摘要 patch 完，拿到按钮 token。
+    await vi.waitFor(() => {
+      const patched = JSON.stringify(h.patched.at(-1));
+      expect(patched).toContain("摘要");
+    });
+    // 压缩"完成"由 mock 的 session.compact 触发：之后消息里出现新的 completed 摘要。
+    const token = extractCompactToken(h.created.at(-1));
+    expect(token).toBeTruthy();
+    const res = (await click({ cmd: "compact", s: "ses_cmp", t: token })) as { toast: { type: string } };
+    expect(res.toast.type).toBe("success");
+    await vi.waitFor(() => expect(h.compactCalls).toHaveLength(1));
+    await vi.waitFor(
+      () => {
+        expect(JSON.stringify(h.patched.at(-1))).toContain("已压缩 · 会话摘要");
+      },
+      { timeout: 6000 },
+    );
+  });
+
+  test("压缩按钮：伪造 token 被拒，不调用 session.compact", async () => {
+    sessionListRaw = [
+      { id: "ses_bad", title: "坏token", time: { updated: 1_700_000_000_000 }, location: { directory: "/home/ubuntu/work/app" } },
+    ];
+    h.messagesRaw = { data: [{ type: "user", text: "hi" }] };
+    cleanup = await setup();
+    await deliver(msg("你好", { messageId: "om_bootBad" }));
+    await click({ cmd: "open", s: "ses_bad", c: "oc_1" });
+    await vi.waitFor(() => expect(JSON.stringify(h.created.at(-1))).toContain("🔄 坏token"));
+    const token = extractCompactToken(h.created.at(-1))!;
+    const res = (await click({ cmd: "compact", s: "ses_bad", t: `${token}x` })) as { toast: { content: string } };
+    expect(res.toast.content).toContain("操作凭证无效");
+    expect(h.compactCalls).toHaveLength(0);
+  });
 });
+
+/**
+ * 从卡片消息 payload 里抠出压缩按钮的 token（集成测试用）。
+ *
+ * 卡片经 `sender.sendCard` 发出时是 `payload.content = JSON.stringify(card)`，
+ * 所以 payload 序列化后引号被转义。这里递归所有字符串并重新解析，再匹配 value。
+ */
+function extractCompactToken(payload: unknown): string | undefined {
+  const texts: string[] = [];
+  const walk = (node: unknown): void => {
+    if (typeof node === "string") {
+      texts.push(node);
+      return;
+    }
+    if (Array.isArray(node)) {
+      for (const n of node) walk(n);
+      return;
+    }
+    if (node && typeof node === "object") {
+      for (const v of Object.values(node as Record<string, unknown>)) walk(v);
+    }
+  };
+  walk(payload);
+  for (const text of texts) {
+    const match = text.match(/"cmd":"compact","s":"[^"]+","t":"([^"]+)"/);
+    if (match?.[1]) return match[1];
+  }
+  return undefined;
+}

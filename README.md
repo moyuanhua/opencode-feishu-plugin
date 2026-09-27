@@ -251,7 +251,11 @@ opencode mcp list        # 顺带确认服务健康
 - 点按钮（值 `{cmd:"open", s, c}`）：先校验会话存在（`ctx.session.get`），不存在 → toast「会话不存在」并把列表卡改写成提示卡。
 - 存在 → 在**主聊天流**发一张普通恢复卡：**标题 = `🔄 <会话标题>`**，正文含会话 ID / 目录 / 模型 / 最近活动 / 摘要；同时把**这张卡片消息**记为会话的 root（`root → session` 映射）。**此阶段不预先开话题、不绑 `thread_id`**。
 - **如何续聊**：**直接回复这张恢复卡**（飞书会在该卡下形成话题）即可继续这个历史会话。用户首次回复的入站事件**可能只带 `root_id` 而不带 `thread_id`**，插件靠 `root → session` 兜底路由到会话，并在拿到 `thread_id` 后补写 `thread → session` 映射；之后该话题内的消息按常规话题路由。（opencode 会话上下文天然持久，等同于 resume。）
-- **摘要区块（任务 B）**：优先**复用**该会话已有的 compaction 摘要（读 `ctx.session.context`，**零模型调用**）；没有则先发卡显示「⏳ 正在总结该会话…」，再异步 `ctx.session.generate` 生成并 **patch 回同一张恢复卡**；失败/超时（`resumeSummaryTimeoutMs`，默认 20s）降级为「（摘要生成失败，可直接发消息继续）」。可用 `resumeSummary: false` 关闭。
+- **摘要区块（任务 B，三条路径）**：
+  1. **复用（零模型调用）**：读该会话**完整消息**（`session.message.list`，即 `/api/session/{id}/message`；注意 `/context` 是精简形状、不含 `summary`），取最近一条 `status:"completed"` 的 compaction `summary`，标注「会话摘要」直接渲染；
+  2. **快摘要（默认路径）**：无原生摘要时，**绝不喂整个会话**——只取最近消息构造**精简转写**（每条截断、总量 ≤6K 字符）交给**无会话上下文**的临时生成（`ctx.generate.text`），标注「摘要（快摘要）」，秒级完成；超时（`resumeSummaryTimeoutMs`，默认 **15s**，夹取 3–60s）降级为「（摘要生成失败，可直接发消息继续）」；
+  3. **原生压缩（仅用户主动）**：卡片带**「🗜 压缩并总结」**按钮（值 `{cmd:"compact", s, t}`，自签 token + 白名单 + 防重放）。点击后（3 秒内回 toast）**异步** `POST /api/session/{id}/compact`，卡片进入「🗜 正在压缩会话…」态，并每 2s 轮询该会话消息直到出现**新的** completed 摘要，patch 为「已压缩 · 会话摘要」；失败/超时（`resumeCompactTimeoutMs`，默认 **120s**，夹取 30–300s）只 patch 说明，不影响继续干活。**压缩会修改会话历史，插件绝不在「进入会话」时隐式触发**。
+  可用 `resumeSummary: false` 关闭整个摘要区块与压缩按钮。
 - 只影响被点击的那一个会话：恢复卡只绑定该会话的 root，其它会话的映射不受影响。
 - 已绑话题的会话按钮文案变成「▶️ 再开话题」，**同一会话可被多个话题路由**（每个话题各自会话上下文；回复落在触发话题内）。
 
@@ -357,8 +361,9 @@ agent 主动调用 `question` 工具（或其它 form 类交互）时，opencode
 | `staleExecutionMs` | number | `300000` | 看门狗阈值：执行态超过此时长无事件即视为卡死，主动中断并收尾；排队超过此时长仍无 `execution.started` 也提示。夹取 1–60 分钟 |
 | `maxResourcesShown` | number | `8` | 审批卡最多展示的资源行数 |
 | `sessionAllowButton` | boolean | `true` | 审批卡是否显示「✅ 本会话内允许该工具」按钮；关闭后回到「允许一次 / 始终允许 / 拒绝」三按钮 |
-| `resumeSummary` | boolean | `true` | 恢复卡是否展示会话摘要（优先复用已有 compaction 摘要，缺失才生成；关闭则完全不生成） |
-| `resumeSummaryTimeoutMs` | number | `20000` | 恢复卡摘要生成超时（夹取 3000–60000）；超时按失败处理并降级提示 |
+| `resumeSummary` | boolean | `true` | 恢复卡是否展示会话摘要（复用原生 compaction 摘要 → 缺失才走快摘要；关闭则完全不生成、也不显示压缩按钮） |
+| `resumeSummaryTimeoutMs` | number | `15000` | 恢复卡**快摘要**生成超时（夹取 3000–60000）；超时按失败处理并降级提示 |
+| `resumeCompactTimeoutMs` | number | `120000` | 恢复卡**用户主动压缩**（`session.compact`）后的轮询超时（夹取 30000–300000）；超时只 patch 说明。压缩是显式操作、会修改会话历史 |
 
 ---
 

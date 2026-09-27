@@ -44,7 +44,8 @@ export type SessionCardValue =
   | { readonly cmd: "use"; readonly sessionID: string; readonly chatId: string }
   | { readonly cmd: "new"; readonly chatId: string }
   | { readonly cmd: "open"; readonly sessionID: string; readonly chatId: string }
-  | { readonly cmd: "list"; readonly page: number; readonly chatId: string };
+  | { readonly cmd: "list"; readonly page: number; readonly chatId: string }
+  | { readonly cmd: "compact"; readonly sessionID: string; readonly token: string };
 
 /** 飞书卡片 JSON 2.0 按钮：回调数据走 behaviors，value 为对象；2.0 不支持 tag:"action" 容器。 */
 function button(text: string, type: "primary" | "default" | "danger", value: Record<string, unknown>): object {
@@ -160,7 +161,20 @@ export function parseSessionCardValue(raw: unknown): SessionCardValue | undefine
     const page = parsePage(record.p);
     return { cmd: "list", page, chatId };
   }
+  if (record.cmd === "compact") {
+    const sessionID = typeof record.s === "string" ? record.s : "";
+    const token = typeof record.t === "string" ? record.t : "";
+    if (!sessionID || !token) return undefined;
+    return { cmd: "compact", sessionID, token };
+  }
   return undefined;
+}
+
+/** 恢复卡压缩按钮的 value（`{cmd:"compact", s, t}`）；缺省不渲染按钮。 */
+export interface SessionOpenedCompactButton {
+  readonly sessionID: string;
+  /** 自签 token（由调用方签名，每次构建都可重签）。 */
+  readonly token: string;
 }
 
 /**
@@ -168,8 +182,12 @@ export function parseSessionCardValue(raw: unknown): SessionCardValue | undefine
  *
  * 标题 = `🔄 <会话标题>`（截断保护），因此**话题显示名就是会话主题**；
  * 正文含会话 ID / 目录 / 模型 / 最近活动 / 指引，可选**摘要区块**：
- * - `summary` 有值 → 渲染摘要；
- * - `summaryPending=true` → 显示「⏳ 正在总结该会话…」，稍后由调用方 patch 回同一张卡。
+ * - `summary` 有值 → 渲染摘要（`summaryLabel` 区分「复用原生摘要」/「已压缩」/「快摘要」）；
+ * - `summaryPending=true` → 显示「⏳ 正在总结该会话…」；
+ * - `compactPending=true` → 显示「🗜 正在压缩会话…」；
+ * - `compactError` → 显示压缩失败/超时说明。
+ *
+ * `compactButton` 存在时渲染「🗜 压缩并总结」按钮（**用户主动**触发原生压缩）。
  */
 export function buildSessionOpenedCard(input: {
   readonly title: string;
@@ -178,10 +196,18 @@ export function buildSessionOpenedCard(input: {
   readonly model?: string;
   readonly updatedAt?: number;
   readonly now?: number;
-  /** 任务 B：会话摘要（已生成 / 复用）。 */
+  /** 任务 B：会话摘要（已生成 / 复用 / 已压缩）。 */
   readonly summary?: string;
+  /** 摘要来源标注（如「会话摘要」「已压缩 · 会话摘要」）；缺省只显示「摘要：」。 */
+  readonly summaryLabel?: string;
   /** 任务 B：摘要生成中占位。 */
   readonly summaryPending?: boolean;
+  /** 压缩进行中占位。 */
+  readonly compactPending?: boolean;
+  /** 压缩失败/超时说明。 */
+  readonly compactError?: string;
+  /** 「🗜 压缩并总结」按钮（用户主动触发原生压缩）。 */
+  readonly compactButton?: SessionOpenedCompactButton;
 }): object {
   const title = truncateTitle(input.title.trim() || "(未命名)");
   const lines = [`会话「${title}」：\`${input.sessionID}\``];
@@ -193,22 +219,55 @@ export function buildSessionOpenedCard(input: {
   }
   if (setup.length > 0) lines.push("", ...setup);
   lines.push("", "**回复本卡片**即可继续这个历史会话（飞书回复会在本卡下形成话题）。");
-  if (input.summary || input.summaryPending) {
-    lines.push("", "**摘要**：", input.summary ?? "⏳ 正在总结该会话…");
+  if (input.summary || input.summaryPending || input.compactPending || input.compactError) {
+    lines.push("", `**${input.summaryLabel ?? "摘要"}**：`);
+    if (input.summaryPending) lines.push("⏳ 正在总结该会话…");
+    if (input.compactPending) lines.push("🗜 正在压缩会话…（压缩会修改会话历史，请稍候）");
+    if (input.summary) lines.push(input.summary);
+    if (input.compactError) lines.push(input.compactError);
   }
   lines.push(
     "",
     "话题内可用：`/current` `/stop` `/model` `/perm` `/cd` `/help`。",
     "会话管理（`/new` `/sessions` `/resume`）请回到主聊天流。",
   );
+  const elements: object[] = [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }];
+  // 「🗜 压缩并总结」按钮直放 body.elements（JSON 2.0 不支持 1.0 的 tag:"action" 容器）。
+  if (input.compactButton) {
+    elements.push(
+      button("🗜 压缩并总结", "default", {
+        cmd: "compact",
+        s: input.compactButton.sessionID,
+        t: input.compactButton.token,
+      }),
+    );
+  }
   return {
     schema: "2.0",
     config: { update_multi: true },
     header: { title: { tag: "plain_text", content: `🔄 ${title}` }, template: "green" },
-    body: {
-      elements: [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }],
-    },
+    body: { elements },
   };
+}
+
+/** 恢复卡「🗜 压缩并总结」的**待压缩态**卡片（点击后立刻反馈）。
+ *
+ * 白名单 / 验签 / 防重放 / 后台压缩与轮询由 `CompactController` 负责；
+ * 本函数只负责构建「🗜 正在压缩会话…」卡片。
+ */
+export function buildResumeCompactPendingCard(
+  title: string,
+  sessionID: string,
+  token: string,
+  now: number,
+): object {
+  return buildSessionOpenedCard({
+    title,
+    sessionID,
+    now,
+    compactPending: true,
+    compactButton: { sessionID, token },
+  });
 }
 
 /** 会话不存在 / 进入话题失败时的提示卡（patch 到原列表卡位置）。 */

@@ -90,11 +90,27 @@ export interface ResolvedConfig {
   readonly sessionAllowButton: boolean;
   /**
    * 恢复卡是否展示会话摘要（任务 B，默认 true）。
-   * 优先复用会话已有 compaction 摘要，缺失才异步生成并 patch 回卡片。
+   *
+   * 三条路径（成本从低到高）：① 复用会话已有 compaction 摘要（零模型调用）；
+   * ② 快摘要：读最近消息构造精简转写 + 临时生成（**不喂整个会话**，秒级）；
+   * ③ 原生压缩：**必须用户主动点「🗜 压缩并总结」**，插件绝不隐式触发。
    */
   readonly resumeSummary: boolean;
-  /** 恢复卡摘要生成超时（任务 B，默认 20000ms，夹取 3000–60000）。 */
+  /**
+   * 恢复卡**快摘要**生成超时（任务 B，默认 15000ms，夹取 3000–60000）。
+   *
+   * 快摘要只喂精简转写（≤6K 字符）+ 无会话上下文的临时生成，正常远快于此；
+   * 超时即降级为「生成失败」，绝不阻塞恢复卡。
+   */
   readonly resumeSummaryTimeoutMs: number;
+  /**
+   * 恢复卡**用户主动压缩**（`session.compact`）后的轮询超时
+   * （任务 B，默认 120000ms，夹取 30000–300000）。
+   *
+   * 压缩是显式操作、会**修改会话历史**，因此允许更长的等待窗口；
+   * 超时只 patch 说明，不影响用户继续在该话题/卡片下干活。
+   */
+  readonly resumeCompactTimeoutMs: number;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -160,7 +176,8 @@ export function resolveConfig(
   const sessionPageSize = clamp(asNumber(merged.sessionPageSize, 8), 5, 20);
   const sessionAllowButton = asBoolean(merged.sessionAllowButton, true);
   const resumeSummary = asBoolean(merged.resumeSummary, true);
-  const resumeSummaryTimeoutMs = clamp(asNumber(merged.resumeSummaryTimeoutMs, 20_000), 3_000, 60_000);
+  const resumeSummaryTimeoutMs = clamp(asNumber(merged.resumeSummaryTimeoutMs, 15_000), 3_000, 60_000);
+  const resumeCompactTimeoutMs = clamp(asNumber(merged.resumeCompactTimeoutMs, 120_000), 30_000, 300_000);
   const domain = merged.domain === "lark" ? "lark" : "feishu";
   const logFile = resolveLogFile(merged.logFile, env, deps);
   const gatewayLocation = asString(merged.gatewayLocation).trim() || undefined;
@@ -208,6 +225,7 @@ export function resolveConfig(
     sessionAllowButton,
     resumeSummary,
     resumeSummaryTimeoutMs,
+    resumeCompactTimeoutMs,
   };
 }
 

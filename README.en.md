@@ -251,7 +251,11 @@ Besides sessions created from Feishu, you can **load any past OpenCode session v
 - Tap the button (value `{cmd:"open", s, c}`): first the session is checked for existence (`ctx.session.get`); if missing → toast "session not found" and the list card is patched into a notice.
 - If it exists → a plain resume card is posted in the **main chat**: **title `🔄 <session title>`**, body contains session id / directory / model / last activity / summary, and **that card message** is recorded as the session's root (`root → session`). **No topic is opened and no `thread_id` is bound at this stage.**
 - **How to continue**: simply **reply to the resume card** (Feishu forms a topic under it) to continue that past session. The user's first reply event **may carry only a `root_id` and no `thread_id`**; the plugin falls back to the `root → session` mapping to route to the session, and once a `thread_id` is available it writes the `thread → session` mapping. Later messages in that topic follow normal topic routing. (OpenCode session context is persistent, so this is effectively a resume.)
-- **Summary block (task B)**: first **reuse** an existing compaction summary (`ctx.session.context`, **zero model calls**); if none, the card first shows "⏳ summarizing…", then `ctx.session.generate` runs asynchronously and the result is **patched back into the same resume card**; failure/timeout (`resumeSummaryTimeoutMs`, default 20s) degrades to "(summary generation failed; just send a message to continue)". Disable with `resumeSummary: false`.
+- **Summary block (task B, three paths)**:
+  1. **Reuse (zero model calls)**: read the session's **full messages** (`session.message.list`, i.e. `/api/session/{id}/message`; note `/context` is a reduced shape without `summary`) and take the latest `status:"completed"` compaction `summary`, labelled "会话摘要";
+  2. **Fast summary (default path)**: when no native summary exists, it **never feeds the whole session** — it takes the most recent messages, builds a **compact transcript** (per-message clipping, ≤6K chars total) and passes it to a **context-free** one-shot generation (`ctx.generate.text`), labelled "摘要（快摘要）"; timeout (`resumeSummaryTimeoutMs`, default **15s**, clamped 3–60s) degrades to "(summary generation failed; just send a message to continue)";
+  3. **Native compaction (user-initiated only)**: the card carries a **"🗜 压缩并总结"** button (value `{cmd:"compact", s, t}`, self-signed token + allowlist + replay guard). Tapping it returns a toast within 3s and **asynchronously** calls `POST /api/session/{id}/compact`; the card shows "🗜 正在压缩会话…" and polls the session messages every 2s until a **new** completed summary appears, then patches to "已压缩 · 会话摘要"; failure/timeout (`resumeCompactTimeoutMs`, default **120s**, clamped 30–300s) only patches an explanation, so you can keep working. **Compaction rewrites session history, so the plugin never triggers it implicitly when entering a session.**
+  Set `resumeSummary: false` to disable the whole summary block and the compact button.
 - Only the clicked session is affected: the card binds just that session's root; other sessions' mappings are untouched.
 - For an already topic-bound session the button becomes "▶️ New topic" — **one session can be routed from several topics** (each topic has its own conversation context; replies land in the triggering topic).
 
@@ -351,8 +355,9 @@ Without this relay, any clarifying question would stall the Feishu session forev
 | `staleExecutionMs` | number | `300000` | Watchdog threshold: an execution with no event for this long is treated as stuck and auto-interrupted; a queue stuck this long without `execution.started` also triggers a notice. Clamped to 1–60 minutes |
 | `maxResourcesShown` | number | `8` | Max resource lines shown on an approval card |
 | `sessionAllowButton` | boolean | `true` | Show the "✅ Allow this tool in this session" button on approval cards; disable to go back to three buttons |
-| `resumeSummary` | boolean | `true` | Show a summary on the resume card (reuse an existing compaction summary first, generate only if missing; disabling also skips generation) |
-| `resumeSummaryTimeoutMs` | number | `20000` | Resume-card summary generation timeout (clamped 3000–60000); a timeout is treated as failure and degrades gracefully |
+| `resumeSummary` | boolean | `true` | Show a summary on the resume card (reuse a native compaction summary first, else the fast summary; disabling also removes the compact button) |
+| `resumeSummaryTimeoutMs` | number | `15000` | Resume-card **fast summary** timeout (clamped 3000–60000); a timeout is treated as failure and degrades gracefully |
+| `resumeCompactTimeoutMs` | number | `120000` | Poll timeout after a **user-initiated** compaction (`session.compact`), clamped 30000–300000; a timeout only patches an explanation. Compaction is explicit and rewrites session history |
 
 ---
 

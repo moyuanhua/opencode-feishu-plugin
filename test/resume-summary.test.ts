@@ -2,6 +2,8 @@ import { describe, expect, test, vi } from "vitest";
 import { createLogger } from "../src/logger.js";
 import {
   RESUME_SUMMARY_PROMPT,
+  TRANSCRIPT_LINE_LIMIT,
+  buildSummaryPrompt,
   buildTranscript,
   extractGeneratedText,
   extractLatestSummary,
@@ -12,10 +14,11 @@ import {
 
 const log = createLogger({ level: "error", sink: () => undefined });
 
-const compaction = (summary: string) => ({ type: "compaction", status: "completed", summary });
+const compaction = (summary: string, status = "completed") => ({ type: "compaction", status, summary });
+const user = (text: string) => ({ type: "user", text });
 
 describe("extractLatestSummary", () => {
-  test("取最近一条 compaction 的 summary（数组）", () => {
+  test("取最近一条 completed compaction 的 summary（数组）", () => {
     expect(
       extractLatestSummary([
         compaction("旧的摘要"),
@@ -23,6 +26,20 @@ describe("extractLatestSummary", () => {
         compaction("最新的摘要"),
       ]),
     ).toBe("最新的摘要");
+  });
+
+  test("跳过 status != completed（running/failed 不作为摘要）", () => {
+    expect(extractLatestSummary([compaction("完成的", "completed")])).toBe("完成的");
+    expect(extractLatestSummary([compaction("进行中的", "running")])).toBeUndefined();
+    expect(extractLatestSummary([compaction("失败的", "failed")])).toBeUndefined();
+    // 最新的 running 被跳过，继续往前取最近的 completed。
+    expect(extractLatestSummary([compaction("早先完成", "completed"), compaction("进行中", "running")])).toBe(
+      "早先完成",
+    );
+  });
+
+  test("缺 status 的旧形状视为不可用（只认 completed）", () => {
+    expect(extractLatestSummary([{ type: "compaction", summary: "无状态" }])).toBeUndefined();
   });
 
   test("兼容 {data}/{messages}/{items} 包裹", () => {
@@ -51,10 +68,30 @@ describe("buildTranscript", () => {
     expect(out).not.toContain("想");
   });
 
+  test("单条消息截断到 lineLimit（防止一条超大文本吃满预算）", () => {
+    const out = buildTranscript([user("x".repeat(1000))], 6000, 50);
+    expect(out).toBe(`用户：${"x".repeat(50)}`);
+    expect(out!.length).toBeLessThanOrEqual(TRANSCRIPT_LINE_LIMIT + 3);
+  });
+
+  test("总量 ≤ limit，优先保留最近的记录", () => {
+    const out = buildTranscript([user("旧的" + "a".repeat(200)), user("最新")], 30, 600);
+    expect(Buffer.byteLength(out!, "utf8")).toBeLessThanOrEqual(30);
+    expect(out).toContain("最新");
+  });
+
   test("空/非法返回 undefined", () => {
     expect(buildTranscript([])).toBeUndefined();
     expect(buildTranscript(undefined)).toBeUndefined();
     expect(buildTranscript([{ type: "user", text: "" }])).toBeUndefined();
+  });
+});
+
+describe("buildSummaryPrompt", () => {
+  test("有转写 → 指令 + 会话最近记录；无转写 → 仅指令", () => {
+    expect(buildSummaryPrompt(undefined)).toBe(RESUME_SUMMARY_PROMPT);
+    expect(buildSummaryPrompt("用户：hi")).toContain(RESUME_SUMMARY_PROMPT);
+    expect(buildSummaryPrompt("用户：hi")).toContain("用户：hi");
   });
 });
 
@@ -70,36 +107,60 @@ describe("extractGeneratedText", () => {
 describe("summarizeSession", () => {
   const input = { sessionID: "ses_1", timeoutMs: 1000 };
 
-  test("复用已有 compaction 摘要：不调用生成", async () => {
-    const generate = vi.fn(async () => ({ text: "不该被调用" }));
+  test("复用已有 completed compaction 摘要：不调用生成", async () => {
+    const generateText = vi.fn(async () => ({ text: "不该被调用" }));
     const outcome = await summarizeSession(
-      { log, readContext: async () => [compaction("已有摘要")], generate },
+      { log, readMessages: async () => [compaction("已有摘要")], generateText },
       input,
     );
     expect(outcome).toEqual({ summary: "已有摘要", source: "reused" });
-    expect(generate).not.toHaveBeenCalled();
+    expect(generateText).not.toHaveBeenCalled();
   });
 
-  test("无已有摘要 → 走生成", async () => {
+  test("只有 running/failed compaction → 不复用，走快摘要", async () => {
+    const generateText = vi.fn(async () => ({ text: "快摘要结果" }));
     const outcome = await summarizeSession(
-      { log, readContext: async () => [{ type: "user", text: "x" }], generate: async (sid, prompt) => {
-        expect(sid).toBe("ses_1");
+      { log, readMessages: async () => [compaction("进行中", "running")], generateText },
+      input,
+    );
+    expect(outcome).toEqual({ summary: "快摘要结果", source: "generated" });
+    expect(generateText).toHaveBeenCalledTimes(1);
+  });
+
+  test("快摘要：不喂整个会话，只喂精简转写；走临时生成（无会话上下文）", async () => {
+    const big = [
+      { type: "user", text: "帮我改 bug" },
+      { type: "assistant", content: [{ type: "reasoning", text: "很长很长的思考" }, { type: "text", text: "好的" }] },
+      { type: "user", text: "x".repeat(5000) },
+    ];
+    const generateText = vi.fn(async (prompt: string) => {
+      // prompt 必须包含转写，且绝不含 reasoning。
+      expect(prompt).toContain(RESUME_SUMMARY_PROMPT);
+      expect(prompt).toContain("用户：帮我改 bug");
+      expect(prompt).not.toContain("很长很长的思考");
+      return { text: "生成的摘要" };
+    });
+    const outcome = await summarizeSession({ log, readMessages: async () => big, generateText }, input);
+    expect(outcome).toEqual({ summary: "生成的摘要", source: "generated" });
+    expect(generateText).toHaveBeenCalledTimes(1);
+    // 第 3 条被截断，prompt 总量远小于整个会话。
+    expect(generateText.mock.calls[0]![0].length).toBeLessThan(7000);
+  });
+
+  test("无 readMessages 直接走快摘要（只有指令）", async () => {
+    const outcome = await summarizeSession(
+      { log, generateText: async (prompt) => {
         expect(prompt).toBe(RESUME_SUMMARY_PROMPT);
-        return { text: "生成的摘要" };
+        return "纯文本摘要";
       } },
       input,
     );
-    expect(outcome).toEqual({ summary: "生成的摘要", source: "generated" });
-  });
-
-  test("无 readContext 直接生成", async () => {
-    const outcome = await summarizeSession({ log, generate: async () => "纯文本摘要" }, input);
     expect(outcome).toEqual({ summary: "纯文本摘要", source: "generated" });
   });
 
-  test("生成抛错 → source none + error", async () => {
+  test("快摘要抛错 → source none + error", async () => {
     const outcome = await summarizeSession(
-      { log, generate: async () => { throw new Error("boom"); } },
+      { log, generateText: async () => { throw new Error("boom"); } },
       input,
     );
     expect(outcome.source).toBe("none");
@@ -107,11 +168,11 @@ describe("summarizeSession", () => {
     expect(outcome.error).toContain("boom");
   });
 
-  test("生成超时 → source none（不抛异常）", async () => {
+  test("快摘要超时 → source none（不抛异常）", async () => {
     const outcome = await summarizeSession(
       {
         log,
-        generate: () => new Promise((resolve) => setTimeout(() => resolve({ text: "late" }), 200)),
+        generateText: () => new Promise((resolve) => setTimeout(() => resolve({ text: "late" }), 200)),
       },
       { sessionID: "ses_1", timeoutMs: 10 },
     );
@@ -119,12 +180,12 @@ describe("summarizeSession", () => {
     expect(outcome.summary).toBeUndefined();
   });
 
-  test("读上下文抛错不阻断生成", async () => {
+  test("读消息抛错不阻断快摘要", async () => {
     const outcome = await summarizeSession(
       {
         log,
-        readContext: async () => { throw new Error("read fail"); },
-        generate: async () => ({ text: "仍然生成" }),
+        readMessages: async () => { throw new Error("read fail"); },
+        generateText: async () => ({ text: "仍然生成" }),
       },
       input,
     );
@@ -133,6 +194,14 @@ describe("summarizeSession", () => {
 
   test("都没有可用依赖 → none", async () => {
     expect(await summarizeSession({ log }, input)).toEqual({ source: "none" });
+  });
+
+  test("没有 session 级生成依赖：只会调用临时生成（deps 结构上不可能喂整个会话）", async () => {
+    // SummarizeSessionDeps 刻意不暴露 session.generate —— 这里断言函数签名里没有该能力。
+    const deps = { log, generateText: async () => "ok" };
+    expect("generate" in deps).toBe(false);
+    const outcome = await summarizeSession(deps, input);
+    expect(outcome.source).toBe("generated");
   });
 });
 

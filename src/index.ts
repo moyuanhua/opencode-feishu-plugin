@@ -36,6 +36,7 @@ import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js";
 import { decideRoute } from "./feishu/routing.js";
 import { buildConsoleHintCard, buildStopNoticeCard } from "./feishu/cards.js";
+import { buildSessionOpenedCard, buildResumeCompactPendingCard } from "./feishu/session-cards.js";
 import { validateDirectory } from "./feishu/dirs.js";
 import { WizardStore } from "./feishu/wizard.js";
 import { RecentStore } from "./feishu/recent.js";
@@ -54,11 +55,12 @@ import { SessionCommands } from "./session-commands.js";
 import { routeEvent, extractErrorText, type EventRouterDeps } from "./runtime/event-router.js";
 import { routeCardAction } from "./runtime/card-action-router.js";
 import {
-  buildTranscript,
   summarizeSession as summarizeSessionImpl,
   type SessionSummaryOutcome,
   type SummarizeSessionInput,
 } from "./session/resume-summary.js";
+import { CompactController } from "./session/compact.js";
+import { compactSessionHttp, fetchSessionMessagesHttp } from "./session/compact-http.js";
 import type {
   IncomingMessage,
   ModelRef,
@@ -388,49 +390,53 @@ async function start(
   }
 
   /**
-   * 任务 B：获取会话摘要（复用已有 compaction 摘要 → 缺失才生成）。
+   * 任务 B：恢复卡「🗜 压缩并总结」控制器（**用户主动**触发原生压缩）。
    *
-   * 优先 `ctx.session.context`（零模型调用）；无摘要则 `ctx.session.generate`；
-   * 运行时未暴露 `session.generate` 时，退化为 `ctx.generate.text` + 上下文精简转写
-   * （等价兜底，会消耗一次模型调用）。
+   * 压缩会**修改会话历史**，因此只挂在按钮回调上；`enterSessionThread` 绝不调用它。
+   * 轮询读取该会话消息（`session.message.list`），拿到新的 completed 摘要后 patch 回卡片。
+   */
+  const compact = new CompactController({
+    log,
+    isAllowed: (openId) => owner.isAllowed(openId),
+    // 与强停同族校验：绑定 sessionID + 用途标签("compact") + TTL + nonce。
+    verify: (token, sessionID) =>
+      verifyStop(token, config.signSecret, { expectSessionID: sessionID }),
+    replay: new ReplayGuard(config.approvalTtlMs),
+    compact: (sessionID) => compactSession(ctx, sessionID, sessionMap, log),
+    readMessages: (sessionID) =>
+      readSessionMessages(ctx, sessionID, undefined, log),
+    patchPending: (sessionID, messageId, token) =>
+      patchResumeCompactPendingCard(sessionID, messageId, token, sessionMap, sender, log),
+    patch: (sessionID, summary, kind, messageId) =>
+      patchResumeCompactCard(sessionID, summary, kind, messageId, sessionMap, sender, log, (sid) =>
+        signCompactToken(sid, config.signSecret),
+      ),
+    pollIntervalMs: 2000,
+    timeoutMs: config.resumeCompactTimeoutMs,
+  });
+
+  /**
+   * 任务 B：获取恢复卡摘要（三条路径的 ①复用 + ②快摘要）。
+   *
+   * - 复用：读**完整消息**（`session.message.list`，**不是** `/context` 精简形状）找 completed
+   *   compaction 摘要，零模型调用；
+   * - 快摘要：无原生摘要时，只喂**精简转写**（`buildTranscript`）给**无会话上下文**的
+   *   `ctx.generate.text`——绝不喂整个会话（大会话必超时）；
+   * - ③ 原生压缩不在本函数内（必须用户主动点按钮，见 `compact` 控制器）。
    */
   async function summarizeSessionForResume(input: SummarizeSessionInput): Promise<SessionSummaryOutcome> {
-    const readContext = async (sessionID: string, directory: string | undefined): Promise<unknown> => {
-      const api = (ctx.session as unknown as {
-        context?: (
-          arg: { sessionID: string },
-          options?: { headers?: Record<string, string> },
-        ) => Promise<unknown>;
-      }).context;
-      if (typeof api !== "function") return undefined;
-      return api({ sessionID }, directory ? { headers: { "x-opencode-directory": directory } } : undefined);
-    };
+    const readMessages = async (sessionID: string, directory: string | undefined): Promise<unknown> =>
+      readSessionMessages(ctx, sessionID, directory, log);
 
-    const generate = async (
-      sessionID: string,
-      prompt: string,
-      directory: string | undefined,
-    ): Promise<unknown> => {
-      const api = (ctx.session as unknown as {
-        generate?: (
-          arg: { sessionID: string; prompt: string },
-          options?: { headers?: Record<string, string> },
-        ) => Promise<unknown>;
-      }).generate;
-      if (typeof api === "function") {
-        return api({ sessionID, prompt }, directory ? { headers: { "x-opencode-directory": directory } } : undefined);
-      }
-      // 等价兜底：session.generate 不在运行时暴露时，用 generate.text + 上下文转写。
-      const generateText = (ctx.generate as unknown as {
+    const generateText = async (prompt: string, _directory: string | undefined): Promise<unknown> => {
+      const api = (ctx.generate as unknown as {
         text?: (arg: { prompt: string }) => Promise<unknown>;
-      } | undefined)?.text;
-      if (typeof generateText !== "function") return undefined;
-      const transcript = buildTranscript(await readContext(sessionID, directory));
-      const fullPrompt = transcript ? `${prompt}\n\n会话最近记录：\n${transcript}` : prompt;
-      return generateText({ prompt: fullPrompt });
+      })?.text;
+      if (typeof api !== "function") return undefined;
+      return api({ prompt });
     };
 
-    return summarizeSessionImpl({ log, readContext, generate }, input);
+    return summarizeSessionImpl({ log, readMessages, generateText }, input);
   }
 
   /**
@@ -534,7 +540,9 @@ async function start(
     getSessionInfo: getSessionInfoRaw,
     resumeSummary: config.resumeSummary,
     resumeSummaryTimeoutMs: config.resumeSummaryTimeoutMs,
+    resumeCompactTimeoutMs: config.resumeCompactTimeoutMs,
     summarizeSession: summarizeSessionForResume,
+    signCompact: (sessionID) => signCompactToken(sessionID, config.signSecret),
   });
 
   // ── 审批门 ────────────────────────────────────────────────────────────
@@ -757,6 +765,7 @@ async function start(
         log,
         handleForm: (a) => formRelay.handleCardAction(a),
         handleStop: (a) => stop.handleCardAction(a),
+        handleCompact: (a) => compact.handleCardAction(a),
         handleCommands: (a) => commands.handleCardAction(a),
         handleApprovals: (a) => approvals.handleCardAction(a),
       }),
@@ -1046,4 +1055,140 @@ async function promptSession(
     delivery: Delivery;
   }) => Promise<unknown>;
   await api({ sessionID, text, delivery });
+}
+
+/**
+ * 读会话**完整消息**（`session.message.list` 优先，回退 `session.context`）。
+ *
+ * 关键：恢复卡"复用摘要"必须拿到完整消息（compaction 消息带 `summary`）；
+ * `/api/session/{id}/context` 返回**精简形状**（无 summary 字段），只能兜底作转写来源。
+ * `directory` 有值时带 `x-opencode-directory` 头，保证跨 location 会话也能读到。
+ */
+async function readSessionMessages(
+  ctx: Plugin.Context,
+  sessionID: string,
+  directory: string | undefined,
+  log: ReturnType<typeof createLogger>,
+): Promise<unknown> {
+  const options = directory ? { headers: { "x-opencode-directory": directory } } : undefined;
+  const session = ctx.session as unknown as {
+    context?: (arg: { sessionID: string }, options?: unknown) => Promise<unknown>;
+  };
+  const messageApi = (ctx as unknown as {
+    message?: { list?: (arg: { sessionID: string; limit?: number }, options?: unknown) => Promise<unknown> };
+  }).message;
+  const sessionMessageApi = (session as unknown as {
+    message?: { list?: (arg: { sessionID: string; limit?: number }, options?: unknown) => Promise<unknown> };
+  }).message;
+  // 1) 插件运行时若装配了 message.list，优先用它（完整消息，含 compaction summary）。
+  for (const api of [sessionMessageApi, messageApi]) {
+    if (typeof api?.list === "function") {
+      try {
+        const raw = await api.list({ sessionID, limit: 200 }, options);
+        if (raw !== undefined) return raw;
+      } catch (err) {
+        log.debug("session.message.list 读取失败，继续回退", { sessionID, error: errorMessage(err) });
+      }
+    }
+  }
+  // 2) 本机 HTTP `GET /api/session/{id}/message`（完整消息，含 compaction summary）。
+  try {
+    return await fetchSessionMessagesHttp(sessionID, directory, { log });
+  } catch (err) {
+    log.debug("HTTP 读取会话消息失败，回退 session.context", { sessionID, error: errorMessage(err) });
+  }
+  // 3) `session.context`（**精简形状**，无 summary，仅作转写兜底）。
+  if (typeof session.context === "function") {
+    return session.context({ sessionID }, options);
+  }
+  return undefined;
+}
+
+/**
+ * 触发原生会话压缩：`ctx.session.compact` 优先，运行时未暴露时回退本机 HTTP API
+ * （`POST /api/session/{id}/compact`，见 form-reply.ts 的同类兜底）。
+ */
+async function compactSession(
+  ctx: Plugin.Context,
+  sessionID: string,
+  sessionMap: SessionMap,
+  log: ReturnType<typeof createLogger>,
+): Promise<void> {
+  const api = (ctx.session as unknown as {
+    compact?: (arg: { sessionID: string }, options?: { headers?: Record<string, string> }) => Promise<unknown>;
+  }).compact;
+  const link = await sessionMap.resolveBySession(sessionID);
+  const options = link?.dir ? { headers: { "x-opencode-directory": link.dir } } : undefined;
+  if (typeof api === "function") {
+    await api({ sessionID }, options);
+    return;
+  }
+  // 运行时未暴露 session.compact：回退本机 HTTP API（`POST /api/session/{id}/compact`）。
+  await compactSessionHttp(sessionID, link?.dir, { log });
+}
+
+/**
+ * 把卡片 patch 成「🗜 正在压缩会话…」（用户点击后立刻反馈）。
+ * 恢复卡所在消息 id = card action 的 messageId；标题从 SessionMap 取（取不到用空标题）。
+ */
+async function patchResumeCompactPendingCard(
+  sessionID: string,
+  messageId: string,
+  token: string,
+  sessionMap: SessionMap,
+  sender: import("./feishu/sender.js").FeishuSender,
+  log: ReturnType<typeof createLogger>,
+): Promise<void> {
+  const link = await sessionMap.resolveBySession(sessionID);
+  const entry = link ? await sessionMap.getSession(link.chatId, sessionID) : undefined;
+  const card = buildResumeCompactPendingCard(entry?.title ?? "", sessionID, token, Date.now());
+  const res = await sender.patchCard(messageId, card);
+  if (!res.ok) log.warn("压缩中卡片更新失败", { sessionID, error: res.error ?? "unknown" });
+}
+
+/**
+ * 把压缩结果 patch 回恢复卡（成功显示「已压缩 · 会话摘要」，失败/超时显示说明）。
+ * 卡片信息尽量从 SessionMap 取；取不到时用最小卡片（仍保证可读 + 按钮）。
+ */
+async function patchResumeCompactCard(
+  sessionID: string,
+  summary: string,
+  kind: "completed" | "failed",
+  messageId: string,
+  sessionMap: SessionMap,
+  sender: import("./feishu/sender.js").FeishuSender,
+  log: ReturnType<typeof createLogger>,
+  signCompact: (sessionID: string) => string,
+): Promise<void> {
+  const link = await sessionMap.resolveBySession(sessionID);
+  const entry = link ? await sessionMap.getSession(link.chatId, sessionID) : undefined;
+  const card =
+    kind === "completed"
+      ? buildSessionOpenedCard({
+          title: entry?.title ?? "",
+          sessionID,
+          ...(link?.dir ? { dir: link.dir } : {}),
+          summary,
+          summaryLabel: "已压缩 · 会话摘要",
+          compactButton: { sessionID, token: signCompact(sessionID) },
+        })
+      : buildSessionOpenedCard({
+          title: entry?.title ?? "",
+          sessionID,
+          ...(link?.dir ? { dir: link.dir } : {}),
+          compactError: summary,
+          compactButton: { sessionID, token: signCompact(sessionID) },
+        });
+  // 优先 patch 用户点击的那张恢复卡（messageId）；否则回退到话题锚点消息。
+  const target = messageId || link?.replyMessageId;
+  if (!target) {
+    log.warn("压缩结果 patch 跳过：无卡片消息 id", { sessionID });
+    return;
+  }
+  const res = await sender.patchCard(target, card);
+  if (!res.ok) log.warn("压缩结果卡片更新失败", { sessionID, error: res.error ?? "unknown" });
+}
+
+function signCompactToken(sessionID: string, secret: string): string {
+  return signStop({ sessionID, ttlMs: 24 * 60 * 60 * 1000 }, secret);
 }

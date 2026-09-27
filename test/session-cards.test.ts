@@ -160,7 +160,7 @@ describe("buildSessionOpenedCard（进入话题成功卡）", () => {
     expect(text).toContain("Claude Sonnet 4");
     expect(text).toContain("2 小时前");
     expect(text).toContain("/current");
-    expect(text).toContain("本话题内直接发消息");
+    expect(text).toContain("回复本卡片");
     expect(buttonsOf(card)).toHaveLength(0);
   });
 
@@ -189,6 +189,38 @@ describe("buildSessionOpenedCard（进入话题成功卡）", () => {
     expect(JSON.stringify(buildSessionOpenedCard({ title: "T", sessionID: "s" }))).not.toContain("摘要");
   });
 
+  test("压缩按钮：装配 compactButton 时渲染「🗜 压缩并总结」且 value 为 {cmd:compact,s,t}", () => {
+    const card = buildSessionOpenedCard({
+      title: "T",
+      sessionID: "ses_x",
+      compactButton: { sessionID: "ses_x", token: "tok" },
+    });
+    const buttons = buttonsOf(card);
+    expect(buttons).toHaveLength(1);
+    const value = (buttons[0]!.behaviors as Array<{ value: unknown }>)[0]!.value;
+    expect(value).toEqual({ cmd: "compact", s: "ses_x", t: "tok" });
+    expect(JSON.stringify(card)).toContain("🗜 压缩并总结");
+  });
+
+  test("压缩中 / 失败态文案", () => {
+    const pending = JSON.stringify(buildSessionOpenedCard({ title: "T", sessionID: "s", compactPending: true }));
+    expect(pending).toContain("正在压缩会话");
+    expect(pending).toContain("修改会话历史");
+    const failed = JSON.stringify(buildSessionOpenedCard({ title: "T", sessionID: "s", compactError: "⚠️ 压缩失败 X" }));
+    expect(failed).toContain("压缩失败 X");
+  });
+
+  test("摘要来源标注：summaryLabel 区分「会话摘要」「已压缩 · 会话摘要」", () => {
+    const copied = JSON.stringify(
+      buildSessionOpenedCard({ title: "T", sessionID: "s", summary: "S", summaryLabel: "会话摘要" }),
+    );
+    expect(copied).toContain("**会话摘要**");
+    const compacted = JSON.stringify(
+      buildSessionOpenedCard({ title: "T", sessionID: "s", summary: "S", summaryLabel: "已压缩 · 会话摘要" }),
+    );
+    expect(compacted).toContain("已压缩 · 会话摘要");
+  });
+
   test("卡片结构：JSON 2.0、无 1.0 tag:\"action\"、≤30KB", () => {
     const card = buildSessionOpenedCard({
       title: "标题".repeat(50),
@@ -196,6 +228,7 @@ describe("buildSessionOpenedCard（进入话题成功卡）", () => {
       dir: "/home/ubuntu/work/deep/path/" + "y".repeat(200),
       model: "m".repeat(100),
       summary: "摘要".repeat(20000),
+      compactButton: { sessionID: "ses_" + "x".repeat(60), token: "t".repeat(200) },
     });
     const json = JSON.stringify(card);
     expect(json).not.toContain('"tag":"action"');
@@ -292,6 +325,16 @@ describe("parseSessionCardValue", () => {
 
   test("new 不要求 sessionID", () => {
     expect(parseSessionCardValue({ cmd: "new", c: "oc_1" })).toEqual({ cmd: "new", chatId: "oc_1" });
+  });
+
+  test("compact 需要 sessionID + token", () => {
+    expect(parseSessionCardValue({ cmd: "compact", s: "ses_1", t: "tok" })).toEqual({
+      cmd: "compact",
+      sessionID: "ses_1",
+      token: "tok",
+    });
+    expect(parseSessionCardValue({ cmd: "compact", s: "ses_1" })).toBeUndefined();
+    expect(parseSessionCardValue({ cmd: "compact", t: "tok" })).toBeUndefined();
   });
 
   test("审批卡 value / 非对象返回 undefined", () => {

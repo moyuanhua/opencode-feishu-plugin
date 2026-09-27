@@ -20,6 +20,7 @@ function makeDeps(over: Partial<CardActionRouterDeps> = {}): CardActionRouterDep
     log,
     handleForm: vi.fn(() => undefined),
     handleStop: vi.fn(() => ({ toast: { type: "success", content: "stop" } })),
+    handleCompact: vi.fn(() => ({ toast: { type: "success", content: "compact" } })),
     handleCommands: vi.fn(() => ({ toast: { type: "success", content: "cmd" } })),
     handleApprovals: vi.fn(() => ({ toast: { type: "success", content: "appr" } })),
     ...over,

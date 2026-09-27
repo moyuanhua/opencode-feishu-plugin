@@ -118,6 +118,11 @@ function setup(
     /** 任务 B：是否启用摘要（默认 false，不影响既有用例）。 */
     resumeSummary?: boolean;
     resumeSummaryTimeoutMs?: number;
+    resumeCompactTimeoutMs?: number;
+    /** 任务 B：压缩按钮 token 签名（缺省不渲染按钮）。 */
+    signCompact?: (sessionID: string) => string;
+    /** 任务 B：用户主动压缩触发实现（缺省不渲染按钮）。 */
+    compactSession?: (sessionID: string) => void;
   } = {},
 ) {
   const storage = new FakeStorage();
@@ -176,6 +181,9 @@ function setup(
     ...(over.summarizeSession ? { summarizeSession: over.summarizeSession } : {}),
     ...(over.resumeSummary !== undefined ? { resumeSummary: over.resumeSummary } : {}),
     ...(over.resumeSummaryTimeoutMs !== undefined ? { resumeSummaryTimeoutMs: over.resumeSummaryTimeoutMs } : {}),
+    ...(over.resumeCompactTimeoutMs !== undefined ? { resumeCompactTimeoutMs: over.resumeCompactTimeoutMs } : {}),
+    ...(over.signCompact ? { signCompact: over.signCompact } : {}),
+    ...(over.compactSession ? { compactSession: over.compactSession } : {}),
   });
   return {
     commands,
@@ -1101,6 +1109,56 @@ describe("SessionCommands 恢复卡标题 + 摘要（任务 B）", () => {
     await commands.handleCardAction(action);
     await flush();
     expect(JSON.stringify(sender.cards.at(-1)!.card)).not.toContain("摘要");
+  });
+
+  test("装配 signCompact → 恢复卡带「🗜 压缩并总结」按钮", async () => {
+    const { commands, sender } = setup({
+      getSession: async () => raw,
+      summarizeSession: async () => ({ source: "none" }),
+      signCompact: () => "tok",
+    });
+    await commands.handleCardAction(action);
+    await flush();
+    const json = JSON.stringify(sender.cards.at(-1)!.card);
+    expect(json).toContain("🗜 压缩并总结");
+    expect(json).toContain('"cmd":"compact"');
+    expect(json).toContain('"s":"ses_old"');
+  });
+
+  test("未装配 signCompact → 恢复卡无压缩按钮", async () => {
+    const { commands, sender } = setup({
+      getSession: async () => raw,
+      summarizeSession: async () => ({ source: "none" }),
+    });
+    await commands.handleCardAction(action);
+    await flush();
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).not.toContain("压缩");
+  });
+
+  test("进入会话**绝不**触发压缩（compactSession 语义只属于用户主动点击）", async () => {
+    const { commands, sender } = setup({
+      getSession: async () => raw,
+      summarizeSession: async () => ({ source: "none" }),
+      signCompact: () => "tok",
+    });
+    await commands.handleCardAction(action);
+    await flush();
+    // 恢复卡带按钮（供用户主动点），但进入会话本身不调用任何压缩。
+    expect(JSON.stringify(sender.cards.at(-1)!.card)).toContain("🗜 压缩并总结");
+  });
+
+  test("resumeSummary=false → 即使装配了压缩签名也不渲染按钮、不摘要", async () => {
+    const { commands, sender } = setup({
+      getSession: async () => raw,
+      summarizeSession: async () => ({ source: "none" }),
+      signCompact: () => "tok",
+      resumeSummary: false,
+    });
+    await commands.handleCardAction(action);
+    await flush();
+    const json = JSON.stringify(sender.cards.at(-1)!.card);
+    expect(json).not.toContain("摘要");
+    expect(json).not.toContain("压缩");
   });
 });
 

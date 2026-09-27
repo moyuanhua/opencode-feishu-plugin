@@ -114,7 +114,8 @@ export async function buildListCard(
  * thread + root 映射。成功后该话题内消息即续上历史会话（opencode 上下文天然持久）。
  *
  * 任务 B：标题 = 会话主题（话题显示名即会话主题）；正文带会话 ID/目录/模型/最近活动，
- * 并异步补一个**会话摘要**（优先复用已有 compaction 摘要，缺失才生成并 patch 回同一张卡）。
+ * 并异步补一个**会话摘要**（优先复用已有 compaction 摘要，缺失才走**快摘要**）。
+ * 卡片另带**用户主动**的「🗜 压缩并总结」按钮——**绝不隐式触发**压缩（它会修改会话历史）。
  */
 export async function enterSessionThread(
   ctx: SessionPrimitives,
@@ -145,6 +146,10 @@ export async function enterSessionThread(
     ...(info?.updatedAt ? { updatedAt: info.updatedAt } : {}),
     now: ctx.now(),
     ...(showSummary ? { summaryPending: true } : {}),
+    // 「🗜 压缩并总结」只在开关开启且运行时装配了签名时渲染。
+    ...(showSummary && ctx.deps.signCompact
+      ? { compactButton: { sessionID, token: ctx.deps.signCompact(sessionID) } }
+      : {}),
   };
   const card = buildSessionOpenedCard(cardInput);
   // 恢复会话：在主聊天流发一张**普通消息卡**作为该会话的"恢复卡"。
@@ -175,7 +180,8 @@ export async function enterSessionThread(
   await ctx.deps.sessionMap.bindRoot(res.messageId, sessionID);
   ctx.deps.log.info("resume card bound root to session", { sessionID, rootId: res.messageId });
 
-  // 任务 B：摘要**火后执行**——先发卡（回调 3 秒内已回 toast），拿到结果再 patch 同一张卡。
+  // 任务 B：快摘要**火后执行**——先发卡（回调 3 秒内已回 toast），拿到结果再 patch 同一张卡。
+  // 刻意**不**在此处触发压缩（压缩会修改会话历史，必须用户主动点按钮）。
   if (showSummary) {
     void patchResumeSummary(ctx, sessionID, dir, res.messageId, cardInput);
   }
@@ -183,8 +189,15 @@ export async function enterSessionThread(
   return { ok: true, messageId: res.messageId };
 }
 
+/** 摘要来源标注：复用原生摘要 / 快摘要 / 已压缩。 */
+const SUMMARY_LABEL: Record<string, string> = {
+  reused: "会话摘要",
+  generated: "摘要（快摘要）",
+  compacted: "已压缩 · 会话摘要",
+};
+
 /**
- * 任务 B：异步获取摘要并 patch 回恢复卡。失败/超时降级为「摘要生成失败，可直接发消息继续」。
+ * 任务 B：异步获取**快摘要**并 patch 回恢复卡。失败/超时降级为「摘要生成失败，可直接发消息继续」。
  * 永不抛异常（只 log.warn），绝不影响已发出去的恢复卡与话题绑定。
  */
 async function patchResumeSummary(
@@ -198,12 +211,17 @@ async function patchResumeSummary(
     const outcome = await ctx.deps.summarizeSession!({
       sessionID,
       ...(dir ? { directory: dir } : {}),
-      timeoutMs: ctx.deps.resumeSummaryTimeoutMs ?? 20_000,
+      timeoutMs: ctx.deps.resumeSummaryTimeoutMs ?? 15_000,
     });
     const summary = outcome.summary ?? "（摘要生成失败，可直接发消息继续）";
     const res = await ctx.deps.sender.patchCard(
       messageId,
-      buildSessionOpenedCard({ ...cardInput, summaryPending: false, summary }),
+      buildSessionOpenedCard({
+        ...cardInput,
+        summaryPending: false,
+        summary,
+        summaryLabel: SUMMARY_LABEL[outcome.source] ?? "摘要",
+      }),
     );
     if (!res.ok) ctx.deps.log.warn("恢复卡摘要更新失败", { sessionID, error: res.error ?? "unknown" });
     ctx.deps.log.info("恢复卡摘要已更新", { sessionID, source: outcome.source, hasSummary: Boolean(outcome.summary) });
@@ -270,6 +288,9 @@ export async function applySessionCardAction(
   action: CardAction,
   value: SessionCardValue,
 ): Promise<void> {
+  // 压缩按钮已由 card-action-router 独立校验路径（CompactController）处理；到达此处即防御式忽略。
+  if (value.cmd === "compact") return;
+
   const chatId = action.chatId || value.chatId;
   if (!chatId) return;
 

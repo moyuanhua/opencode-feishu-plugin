@@ -8,6 +8,7 @@
 import type { CardAction, Logger } from "../types.js";
 import { parseStopActionValue } from "../feishu/run-stop.js";
 import { parseSessionCardValue } from "../feishu/session-cards.js";
+import { parseCompactActionValue } from "../session/compact.js";
 import { isSetupFormAction, parseSetupCardValue } from "../feishu/setup-cards.js";
 
 export interface CardActionRouterDeps {
@@ -16,6 +17,8 @@ export interface CardActionRouterDeps {
   readonly handleForm: (action: CardAction) => object | undefined;
   /** 运行卡「强制停止」按钮（独立校验路径）。 */
   readonly handleStop: (action: CardAction) => object;
+  /** 恢复卡「🗜 压缩并总结」按钮（独立校验路径：白名单 → 验签 → 防重放）。 */
+  readonly handleCompact: (action: CardAction) => object;
   /** 会话卡 / 向导卡 / 表单提交。 */
   readonly handleCommands: (action: CardAction) => object | Promise<object>;
   /** 审批卡。 */
@@ -36,6 +39,11 @@ export function routeCardAction(
   // 运行卡「强制停止」按钮（与审批卡/会话卡并列，独立校验路径）。
   if (parseStopActionValue(value)) {
     return deps.handleStop(action);
+  }
+
+  // 恢复卡「🗜 压缩并总结」按钮（独立校验路径，**用户主动**触发，绝不隐式）。
+  if (parseCompactActionValue(value)) {
+    return deps.handleCompact(action);
   }
 
   const hasForm = action.formValue !== undefined;

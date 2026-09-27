@@ -112,16 +112,23 @@ export interface SessionCommandsDeps {
   /** `/sessions` 每页数量（P7，默认 8，夹取 5–20）。 */
   readonly sessionPageSize?: number;
   /**
-   * 任务 B：恢复卡摘要开关（默认 true）。关闭时不显示摘要区块、也不生成。
+   * 任务 B：恢复卡摘要开关（默认 true）。关闭时不显示摘要区块、也不生成、也不显示压缩按钮。
    */
   readonly resumeSummary?: boolean;
-  /** 任务 B：摘要生成超时（默认 20000ms，夹取 3000–60000）。 */
+  /** 任务 B：快摘要生成超时（默认 15000ms，夹取 3000–60000）。 */
   readonly resumeSummaryTimeoutMs?: number;
+  /** 任务 B：用户主动压缩后的轮询超时（默认 120000ms，夹取 30000–300000）。 */
+  readonly resumeCompactTimeoutMs?: number;
   /**
-   * 任务 B：获取会话摘要（复用已有 compaction 摘要，缺失才生成）。
-   * 缺省 = 恢复卡不显示摘要（即使 `resumeSummary=true`）。
+   * 任务 B：获取会话摘要（复用已有 compaction 摘要 → 缺失才走**快摘要**）。
+   * 缺省 = 恢复卡不显示摘要（即使 `resumeSummary=true`），也不显示压缩按钮。
    */
   readonly summarizeSession?: (input: SummarizeSessionInput) => Promise<SessionSummaryOutcome>;
+  /**
+   * 任务 B：恢复卡「🗜 压缩并总结」按钮的 token 签名。
+   * 缺省 = 不渲染该按钮（用户无法主动触发原生压缩）。
+   */
+  readonly signCompact?: (sessionID: string) => string;
 }
 
 /** 向导状态（结构化子集，避免与持久化类型强耦合）。 */

@@ -151,14 +151,22 @@ describe("resolveConfig", () => {
     expect(resolve({ appId: "a", appSecret: "s", sessionAllowButton: "false" }, {}).sessionAllowButton).toBe(false);
   });
 
-  test("任务 B：resumeSummary 默认 true；resumeSummaryTimeoutMs 默认 20000，夹取 3000–60000", () => {
+  test("任务 B：resumeSummary 默认 true；resumeSummaryTimeoutMs 默认 15000，夹取 3000–60000", () => {
     const base = resolve({ appId: "a", appSecret: "s" }, {});
     expect(base.resumeSummary).toBe(true);
-    expect(base.resumeSummaryTimeoutMs).toBe(20_000);
+    expect(base.resumeSummaryTimeoutMs).toBe(15_000);
     expect(resolve({ appId: "a", appSecret: "s", resumeSummary: false }, {}).resumeSummary).toBe(false);
     expect(resolve({ appId: "a", appSecret: "s", resumeSummaryTimeoutMs: 1000 }, {}).resumeSummaryTimeoutMs).toBe(3_000);
     expect(resolve({ appId: "a", appSecret: "s", resumeSummaryTimeoutMs: 99_999 }, {}).resumeSummaryTimeoutMs).toBe(60_000);
     expect(resolve({ appId: "a", appSecret: "s", resumeSummaryTimeoutMs: 12_345 }, {}).resumeSummaryTimeoutMs).toBe(12_345);
+  });
+
+  test("任务 B：resumeCompactTimeoutMs 默认 120000，夹取 30000–300000", () => {
+    const base = resolve({ appId: "a", appSecret: "s" }, {});
+    expect(base.resumeCompactTimeoutMs).toBe(120_000);
+    expect(resolve({ appId: "a", appSecret: "s", resumeCompactTimeoutMs: 1000 }, {}).resumeCompactTimeoutMs).toBe(30_000);
+    expect(resolve({ appId: "a", appSecret: "s", resumeCompactTimeoutMs: 999_999 }, {}).resumeCompactTimeoutMs).toBe(300_000);
+    expect(resolve({ appId: "a", appSecret: "s", resumeCompactTimeoutMs: 60_000 }, {}).resumeCompactTimeoutMs).toBe(60_000);
   });
 });
 
