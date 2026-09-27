@@ -159,6 +159,23 @@ One topic = one session. **Plain text inside a topic is a prompt to the agent**;
 | `/now` | Promote this session's queued messages to run immediately |
 | `/current` `/stop` `/help` | Same as main chat, scoped to this topic's session |
 
+### What `/model` really does
+
+A `/model` switch only affects **subsequent** model calls; it does **not** rewrite history:
+
+- opencode's `switchModel` means "switch the model used by subsequent provider turns" and appends a `model-switched` marker to the session. Earlier assistant messages keep the model they **actually ran on** at the time.
+- So seeing "`Session.Info.model` is already the new model, but an earlier batch of messages is still the old model" is **expected**, not a failed switch.
+- To be safe, the plugin **reads back** `ctx.session.get` after switching: it shows "✅ model switched" only when the read-back matches; a mismatch is reported as "⚠️ model may not have taken effect"; a failed read-back degrades to the requested value with a note. **The run-card footer and `/current` also display the read-back truth**.
+- A failed switch (no permission / session not found) reports the error instead of pretending success.
+
+### Topic soft guidance (topics never hard-block off-topic messages)
+
+When you create a session from Feishu via `/new <title>` or the form, the title becomes the topic's "theme". The plugin does **not** block off-topic messages; it only injects a short system note so the model can **briefly remind** the user to open a new session with `/new` when they clearly drift away — without refusing to answer or lecturing:
+
+- Injected only for **Feishu-originated sessions**; local TUI sessions are **never** touched (no pollution of your own sessions).
+- Skipped when the session title is unavailable; injection failures only `log.warn` and never affect execution.
+- Disable it entirely with `topicGuidance: false`.
+
 ### Creating a session (`/new` and `/form` are fully equivalent)
 
 ```
@@ -307,6 +324,7 @@ Without this relay, any clarifying question would stall the Feishu session forev
 | `stream` | boolean | `true` | Stream replies into the card |
 | `streamThrottleMs` | number | `400` | Min card update interval (floor 400ms; Feishu limit is 5 QPS) |
 | `threadRouting` | boolean | `true` | Topic routing master switch; `false` restores the legacy behaviour |
+| `topicGuidance` | boolean | `true` | Topic soft guidance: inject a short "use `/new` for a new topic" system note into Feishu sessions (never blocks messages); local TUI sessions are never touched |
 | `recentDirsLimit` | number | `5` | Number of recent directories (1–20) |
 | `recentModelsLimit` | number | `5` | Number of recent models (1–20) |
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | Log level (secrets are never logged, only their presence) |
@@ -363,6 +381,7 @@ otherwise (per session preset) → ask ─────────────�
 | No plugin logs | Plugin stderr is discarded in service mode; set `logFile: true` and read `<configDir>/plugins/feishu.log` |
 | Main chat replies with a hint card | Expected: the main chat is management-only. Use `/new` and work inside a topic; set `threadRouting: false` to revert |
 | Session looks stuck and messages only queue | The watchdog auto-interrupts it after `staleExecutionMs` (default 5 min) and cancels the queue, then sends a notice card; you can also tap the card's "⏹ force stop" or send `/stop` |
+| Switched `/model` but older messages still show the old model | Expected: a switch only affects **subsequent** replies; history keeps each message's model. The receipt / run-card footer / `/current` all show the read-back truth |
 
 ---
 

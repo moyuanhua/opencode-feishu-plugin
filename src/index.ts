@@ -42,7 +42,15 @@ import { isSetupFormAction, parseSetupCardValue } from "./feishu/setup-cards.js"
 import { validateDirectory } from "./feishu/dirs.js";
 import { WizardStore } from "./feishu/wizard.js";
 import { RecentStore } from "./feishu/recent.js";
-import { modelLabel, normalizeModelList } from "./feishu/models.js";
+import {
+  extractSessionModel,
+  modelLabel,
+  normalizeModelList,
+  sameModel,
+  type ModelSwitchOutcome,
+} from "./feishu/models.js";
+import { extractSessionTitle } from "./feishu/session-list.js";
+import { injectTopicGuidance } from "./feishu/topic-guidance.js";
 import { presetAskActions, presetGateMode, presetToRuleset } from "./feishu/perm-presets.js";
 import { ApprovalManager, decideEffectForSession, type ReplyInput } from "./permission.js";
 import { SessionCommands } from "./session-commands.js";
@@ -82,6 +90,7 @@ export default Plugin.define({
       stream: config.stream,
       streamThrottleMs: config.streamThrottleMs,
       threadRouting: config.threadRouting,
+      topicGuidance: config.topicGuidance,
       hasAppSecret: hasSecret(config.appSecret),
     });
 
@@ -245,10 +254,77 @@ async function start(
     }
   }
 
-  async function switchSessionModel(sessionID: string, model: ModelRef): Promise<void> {
-    await ctx.session.switchModel({ sessionID, model: { id: model.id, providerID: model.providerID } });
-    await sessionMap.setSessionMeta(sessionID, { model });
-    runs.setModel(sessionID, modelLabel(model));
+  /**
+   * 运行卡页脚 / `/current` 用：静默读回会话真实模型（`ctx.session.get`）。
+   * 读回失败只 debug，返回 undefined 由调用方降级到插件记录值。
+   */
+  async function readSessionModelQuiet(sessionID: string, directory?: string): Promise<ModelRef | undefined> {
+    const api = (ctx.session as unknown as {
+      get?: (input: { sessionID: string }, options?: { headers?: Record<string, string> }) => Promise<unknown>;
+    }).get;
+    if (typeof api !== "function") return undefined;
+    try {
+      // 跨 location 会话必须带目录头，否则服务端在网关 location 找不到会话。
+      const options = directory ? { headers: { "x-opencode-directory": directory } } : undefined;
+      return extractSessionModel(await api({ sessionID }, options));
+    } catch (err) {
+      log.debug("读回会话模型失败，回退记录值", { sessionID, error: errorMessage(err) });
+      return undefined;
+    }
+  }
+
+  /**
+   * `/model` 切换 + **读回校验**。
+   *
+   * 取证结论：`switchModel` 只影响**后续** provider turn，历史消息仍保留旧模型；
+   * `Session.Info.model` 才是权威的「下一轮」模型。因此切换后读回 `ctx.session.get`
+   * 并以读回值写入记录 / 运行卡页脚：
+   * - 读回一致 → verified；
+   * - 读回不一致 → mismatch（log.warn + 回执明确告知，不假装成功）；
+   * - 读回失败 → 降级为请求值并 warn。
+   */
+  async function switchSessionModel(sessionID: string, model: ModelRef): Promise<ModelSwitchOutcome> {
+    // 跨 location 会话（网关在 A、会话在 B）必须带目录头，否则服务端找不到会话。
+    const link = await sessionMap.resolveBySession(sessionID);
+    const options = link?.dir ? { headers: { "x-opencode-directory": link.dir } } : undefined;
+    const api = ctx.session.switchModel as unknown as (
+      input: { sessionID: string; model: { id: string; providerID: string } },
+      requestOptions?: { headers?: Record<string, string> },
+    ) => Promise<void>;
+    await api({ sessionID, model: { id: model.id, providerID: model.providerID } }, options);
+    const actual = extractSessionModel(await getSessionInfoRaw(sessionID, link?.dir));
+    let effective = model;
+    let verified = false;
+    let mismatch: boolean | undefined;
+    let warning: string | undefined;
+    if (actual) {
+      effective = actual;
+      verified = true;
+      mismatch = !sameModel(actual, model);
+      if (mismatch) {
+        log.warn("模型切换后读回不一致", {
+          sessionID,
+          requested: `${model.providerID}/${model.id}`,
+          actual: `${actual.providerID}/${actual.id}`,
+        });
+        warning = `请求 ${modelLabel(model)}，实际读到 ${modelLabel(actual)}`;
+      }
+    } else {
+      log.warn("模型切换后读回失败，降级为请求值", {
+        sessionID,
+        requested: `${model.providerID}/${model.id}`,
+      });
+      warning = "切换后未能读回校验模型";
+    }
+    await sessionMap.setSessionMeta(sessionID, { model: effective });
+    runs.setModel(sessionID, modelLabel(effective));
+    return {
+      requested: model,
+      effective,
+      verified,
+      ...(mismatch ? { mismatch } : {}),
+      ...(warning ? { warning } : {}),
+    };
   }
 
   async function applyPermissionPreset(sessionID: string, preset: PermissionPreset): Promise<void> {
@@ -277,15 +353,57 @@ async function start(
     return api({ order: "desc" });
   }
 
-  /** 按 id 查会话是否存在（P7）：`ctx.session.get` 抛错（不存在）时返回 undefined。 */
-  async function getSessionInfoRaw(sessionID: string): Promise<unknown> {
-    const api = (ctx.session as unknown as { get?: (input: { sessionID: string }) => Promise<unknown> }).get;
+  /**
+   * 按 id 查会话是否存在（P7）：`ctx.session.get` 抛错（不存在）时返回 undefined。
+   * `directory` 有值时带目录头，保证跨 location 会话也能查到。
+   */
+  async function getSessionInfoRaw(sessionID: string, directory?: string): Promise<unknown> {
+    const api = (ctx.session as unknown as {
+      get?: (input: { sessionID: string }, options?: { headers?: Record<string, string> }) => Promise<unknown>;
+    }).get;
     if (typeof api !== "function") return undefined;
     try {
-      return await api({ sessionID });
+      const options = directory ? { headers: { "x-opencode-directory": directory } } : undefined;
+      return await api({ sessionID }, options);
     } catch (err) {
       log.warn("会话查询失败（可能不存在）", { sessionID, error: errorMessage(err) });
       return undefined;
+    }
+  }
+
+  /**
+   * 主题软引导（P5.3）：仅对**从飞书发起**的会话注入一句 system 说明。
+   * - 用 `sessionMap.resolveBySession` 判定是否飞书会话（非飞书会话绝不注入）；
+   * - 标题先取 SessionMap，再 `ctx.session.get` 兜底；取不到就跳过注入；
+   * - `topicGuidance=false` 时不注册；
+   * - 运行时未暴露 `session.hook` 时只 warn 跳过；注入失败只 warn，不影响执行。
+   */
+  let topicGuidanceRegistration: { dispose: () => Promise<void> } | undefined;
+  if (config.topicGuidance) {
+    const hook = (ctx.session as unknown as {
+      hook?: (
+        name: "context",
+        cb: (input: { sessionID: string; system: unknown }) => unknown,
+      ) => Promise<{ dispose: () => Promise<void> }>;
+    }).hook;
+    if (typeof hook === "function") {
+      try {
+        topicGuidanceRegistration = await hook("context", (input) =>
+          injectTopicGuidance(input, {
+            log,
+            resolveSession: (sessionID) => sessionMap.resolveBySession(sessionID),
+            resolveTitle: async (sessionID, chatId) => {
+              const entry = await sessionMap.getSession(chatId, sessionID);
+              if (entry?.title.trim()) return entry.title;
+              return extractSessionTitle(await getSessionInfoRaw(sessionID));
+            },
+          }),
+        );
+      } catch (err) {
+        log.warn("主题软引导 hook 注册失败", { error: errorMessage(err) });
+      }
+    } else {
+      log.warn("运行时未暴露 session.hook，主题软引导已跳过");
     }
   }
 
@@ -309,6 +427,7 @@ async function start(
       promoteQueuedInbox(ctx, sessionID, await sessionMap.resolveBySession(sessionID), log),
     listModels,
     switchSessionModel,
+    getSessionModel: readSessionModelQuiet,
     applyPermissionPreset,
     moveSessionDir,
     validateDir,
@@ -477,9 +596,10 @@ async function start(
   ): Promise<void> {
     // 原生排队：该 session 正在跑 execution 就 queue，否则 steer。`/steer` 强制 steer。
     const delivery: Delivery = forceDelivery ?? decideDelivery(executions.isRunning(sessionID));
-    // P6：运行卡页脚展示当前模型（会话元数据里记录的）。
+    // P6：运行卡页脚展示当前模型。以**读回的真实值**为准（读回失败才回退记录值）。
     const link = await sessionMap.resolveBySession(sessionID);
-    const model = link?.model ? modelLabel(link.model) : undefined;
+    const modelRef = (await readSessionModelQuiet(sessionID, link?.dir)) ?? link?.model;
+    const model = modelRef ? modelLabel(modelRef) : undefined;
 
     // 关键顺序：**先**发回执卡（含状态页脚），再发起 prompt。
     const receipt = await runs.beginRun({
@@ -755,6 +875,7 @@ async function start(
     approvals.dispose();
     formRelay.dispose();
     await evaluateRegistration.dispose().catch((err) => log.warn("evaluate hook 释放失败", { error: errorMessage(err) }));
+    await topicGuidanceRegistration?.dispose().catch((err) => log.warn("主题软引导 hook 释放失败", { error: errorMessage(err) }));
     gateway.stop();
     logSink?.close();
     releaseProcessGuard();

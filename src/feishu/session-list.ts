@@ -56,6 +56,12 @@ export function normalizeSessionInfo(raw: unknown): SessionListEntry | undefined
   };
 }
 
+/** 从 `ctx.session.get()` 原始返回里提取标题（trim 后；空串返回 undefined）。 */
+export function extractSessionTitle(raw: unknown): string | undefined {
+  const title = normalizeSessionInfo(raw)?.title.trim();
+  return title ? title : undefined;
+}
+
 /**
  * 把 number(ms) / 数字字符串 / ISO 字符串 / Date / Effect DateTime 归一成 ms。
  * 无法识别返回 0。

@@ -75,7 +75,13 @@ import {
   presetLabel,
   presetToRuleset,
 } from "./feishu/perm-presets.js";
-import { matchModel, modelLabel, modelMatchErrorText, type ModelEntry } from "./feishu/models.js";
+import {
+  matchModel,
+  modelLabel,
+  modelMatchErrorText,
+  type ModelEntry,
+  type ModelSwitchOutcome,
+} from "./feishu/models.js";
 import type { WizardStore } from "./feishu/wizard.js";
 import type { RecentStore } from "./feishu/recent.js";
 import { scanRootSubdirs } from "./feishu/root-scan.js";
@@ -122,8 +128,16 @@ export interface SessionCommandsDeps {
   readonly recent: RecentStore;
   /** 列出可用模型（P6，已归一化）。 */
   readonly listModels: () => Promise<readonly ModelEntry[]>;
-  /** 切换已存在会话的模型（含记录 + 运行卡页脚）。 */
-  readonly switchSessionModel: (sessionID: string, model: ModelRef) => Promise<void>;
+  /**
+   * 切换已存在会话的模型（含读回校验 + 记录 + 运行卡页脚）。
+   * 返回 `undefined` 视为「无法校验」（兼容旧实现/测试替身），回执按成功处理。
+   */
+  readonly switchSessionModel: (sessionID: string, model: ModelRef) => Promise<ModelSwitchOutcome | undefined>;
+  /**
+   * 读回会话**真实**当前模型（`ctx.session.get`）。
+   * 用于 `/current` 与模型卡展示，避免只显示插件记录的那份。读回失败返回 undefined。
+   */
+  readonly getSessionModel?: (sessionID: string, directory?: string) => Promise<ModelRef | undefined>;
   /** 应用权限预设（含 ruleset + gateMode 记录）。 */
   readonly applyPermissionPreset: (sessionID: string, preset: PermissionPreset) => Promise<void>;
   /** 移动会话工作目录（move + 记录）。 */
@@ -477,9 +491,15 @@ export class SessionCommands {
         await this.reply(message, modelMatchErrorText(matched.reason, matched.candidates));
         return;
       }
-      await this.deps.switchSessionModel(sessionID, matched.model);
-      await this.deps.recent.addModel(matched.model);
-      await this.reply(message, `✅ 已切换模型：**${modelLabel(matched.model)}**\n\`${matched.model.providerID}/${matched.model.id}\``);
+      try {
+        const outcome = await this.deps.switchSessionModel(sessionID, matched.model);
+        await this.deps.recent.addModel(matched.model);
+        await this.reply(message, modelSwitchReply(outcome, matched.model));
+      } catch (err) {
+        // 切换失败（抛错/无权限/会话不存在）：明确回错误原因，绝不假装成功。
+        this.deps.log.warn("切换会话模型失败", { sessionID, error: errorMessage(err) });
+        await this.reply(message, `⚠️ 切换模型失败：${errorMessage(err)}`);
+      }
       return;
     }
 
@@ -737,11 +757,13 @@ export class SessionCommands {
       }
       const entry = await this.deps.sessionMap.getSession(message.chatId, sessionID);
       const link = await this.deps.sessionMap.resolveBySession(sessionID);
+      // 模型以读回的真实值为准；读回失败才降级到插件记录值。
+      const model = (await this.currentModel(sessionID)) ?? link?.model;
       const lines = [
         `本话题会话：「${entry?.title.trim() || "(未命名)"}」`,
         `\`${sessionID}\``,
         ...(link?.dir ? [`目录：\`${link.dir}\``] : []),
-        ...(link?.model ? [`模型：${modelLabel(link.model)}`] : []),
+        ...(model ? [`模型：${modelLabel(model)}`] : []),
         ...(link?.perm ? [`权限：${presetLabel(link.perm)}`] : []),
       ];
       await this.reply(message, lines.join("\n"));
@@ -916,12 +938,17 @@ export class SessionCommands {
     // 已存在会话的操作卡（话题内 `/model` `/perm`）
     if (value.kind !== "dir" && value.sid) {
       if (value.kind === "model") {
-        await this.deps.switchSessionModel(value.sid, value.model);
-        await this.deps.recent.addModel(value.model);
-        await this.patchCard(
-          action.messageId,
-          buildSetupDoneCard("✅ 已切换模型", [`当前模型：**${modelLabel(value.model)}**`]),
-        );
+        try {
+          const outcome = await this.deps.switchSessionModel(value.sid, value.model);
+          await this.deps.recent.addModel(value.model);
+          await this.patchCard(action.messageId, modelSwitchDoneCard(outcome, value.model));
+        } catch (err) {
+          this.deps.log.warn("卡片切换模型失败", { sessionID: value.sid, error: errorMessage(err) });
+          await this.patchCard(
+            action.messageId,
+            buildSetupDoneCard("⚠️ 切换模型失败", [errorMessage(err)]),
+          );
+        }
         return;
       }
       if (value.kind === "perm") {
@@ -933,13 +960,13 @@ export class SessionCommands {
         return;
       }
       if (value.kind === "more") {
-        const link = await this.deps.sessionMap.resolveBySession(value.sid);
+        const current = await this.currentModel(value.sid);
         const models = await this.loadModels();
         const recent = await this.deps.recent.listModels();
         const card = buildModelCard({
           models,
           recent,
-          ...(link?.model ? { current: link.model } : {}),
+          ...(current ? { current } : {}),
           page: value.page,
           pageSize: this.modelPageSize,
           recentLimit: this.recentModelsLimit(),
@@ -1240,19 +1267,37 @@ export class SessionCommands {
   }
 
   private async sendModelCardToThread(message: IncomingMessage, sessionID: string, page: number): Promise<void> {
-    const link = await this.deps.sessionMap.resolveBySession(sessionID);
+    const current = await this.currentModel(sessionID);
     const models = await this.loadModels();
     const recent = await this.deps.recent.listModels();
     const card = buildModelCard({
       models,
       recent,
-      ...(link?.model ? { current: link.model } : {}),
+      ...(current ? { current } : {}),
       page,
       pageSize: this.modelPageSize,
       recentLimit: this.recentModelsLimit(),
       sid: sessionID,
     });
     await this.deps.sender.replyCard(message.messageId, card);
+  }
+
+  /**
+   * 读回会话**真实**当前模型（优先 `ctx.session.get`），失败则降级到插件记录值。
+   * 展示（运行卡页脚 / `/current` / 模型卡）一律以读回值为准，避免只显示我们记录的那份。
+   */
+  private async currentModel(sessionID: string): Promise<ModelRef | undefined> {
+    const link = await this.deps.sessionMap.resolveBySession(sessionID);
+    if (this.deps.getSessionModel) {
+      try {
+        // 带目录头，保证跨 location 会话也能读回。
+        const model = await this.deps.getSessionModel(sessionID, link?.dir);
+        if (model) return model;
+      } catch (err) {
+        this.deps.log.warn("读回会话模型失败，回退记录值", { sessionID, error: errorMessage(err) });
+      }
+    }
+    return link?.model;
   }
 
   private async sendPermCardToThread(message: IncomingMessage, sessionID: string): Promise<void> {
@@ -1338,6 +1383,49 @@ function confirmInput(state: WizardStateLike): {
 function permUsageText(): string {
   const list = PERMISSION_PRESETS.map((p) => `\`${p.id}\`（${presetInfo(p.id).icon}${p.label}）`).join("、");
   return `未知权限档位。可用：${list}。\n例如：\`/perm edit\`。`;
+}
+
+/**
+ * 模型切换回执文案（纯文本）。
+ * - 读回不一致 → ⚠️ 明确告知「可能未生效」，绝不假装成功；
+ * - 读回失败 → 说明「未能读回校验」；
+ * - 成功 → ✅，并说明切换只影响后续回复（历史消息仍是旧模型属正常）。
+ */
+function modelSwitchReply(outcome: ModelSwitchOutcome | undefined, requested: ModelRef): string {
+  const effective = outcome?.effective ?? requested;
+  const ref = `**${modelLabel(effective)}**\n\`${effective.providerID}/${effective.id}\``;
+  if (outcome?.mismatch) {
+    return [
+      `⚠️ 模型可能未生效：请求 **${modelLabel(outcome.requested)}**，服务端实际为 ${ref}。`,
+      "切换只影响**后续**回复；历史消息仍是旧模型，属正常。",
+    ].join("\n");
+  }
+  if (outcome && !outcome.verified) {
+    return `✅ 已请求切换模型：${ref}\n未能读回校验${outcome.warning ? `（${outcome.warning}）` : ""}；切换只影响**后续**回复。`;
+  }
+  return `✅ 已切换模型：${ref}\n切换只影响**后续**回复；该会话此前的历史消息仍显示旧模型，属正常。`;
+}
+
+/** 卡片版模型切换结果（与文本回执同语义）。 */
+function modelSwitchDoneCard(outcome: ModelSwitchOutcome | undefined, requested: ModelRef): object {
+  const effective = outcome?.effective ?? requested;
+  if (outcome?.mismatch) {
+    return buildSetupDoneCard("⚠️ 模型可能未生效", [
+      `请求：**${modelLabel(outcome.requested)}**`,
+      `实际：**${modelLabel(effective)}**`,
+      "切换只影响**后续**回复；历史消息仍是旧模型，属正常。",
+    ]);
+  }
+  if (outcome && !outcome.verified) {
+    return buildSetupDoneCard("✅ 已切换模型", [
+      `当前模型：**${modelLabel(effective)}**`,
+      "（未能读回校验；切换只影响**后续**回复。）",
+    ]);
+  }
+  return buildSetupDoneCard("✅ 已切换模型", [
+    `当前模型：**${modelLabel(effective)}**`,
+    "（切换只影响**后续**回复；历史消息仍是旧模型，属正常。）",
+  ]);
 }
 
 function setupToast(value: SetupCardValue): object {

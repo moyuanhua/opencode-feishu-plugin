@@ -38,6 +38,14 @@ export interface ResolvedConfig {
    * - false：完全回到 P3 行为（主聊天流普通文本进当前会话，忽略 thread_id），出问题一键回退。
    */
   readonly threadRouting: boolean;
+  /**
+   * 主题软引导（P5.3）。默认 true。
+   *
+   * 开启时对**从飞书发起的会话**（sessionMap 有映射）在 system 注入一句主题说明：
+   * 提示用户明显离题时可用 `/new` 开新会话，但**不拦截**消息、也不说教。
+   * 非飞书会话（本地 TUI 等）绝不注入，避免污染用户自己的会话。
+   */
+  readonly topicGuidance: boolean;
   readonly logLevel: LogLevel;
   /**
    * 日志同时追加写入的文件全路径；`undefined` = 只写 stderr。
@@ -127,6 +135,7 @@ export function resolveConfig(
   const logLevel = asLogLevel(merged.logLevel);
   const stream = asBoolean(merged.stream, true);
   const threadRouting = asBoolean(merged.threadRouting, true);
+  const topicGuidance = asBoolean(merged.topicGuidance, true);
   const throttle = clamp(asNumber(merged.streamThrottleMs, 400), 400, 60_000);
   const approvalTtlMs = clamp(asNumber(merged.approvalTtlMs, 10 * 60 * 1000), 30_000, 24 * 60 * 60 * 1000);
   const staleExecutionMs = clamp(asNumber(merged.staleExecutionMs, 5 * 60 * 1000), 60_000, 60 * 60 * 1000);
@@ -169,6 +178,7 @@ export function resolveConfig(
     stream,
     streamThrottleMs: throttle,
     threadRouting,
+    topicGuidance,
     logLevel,
     logFile,
     gatewayLocation,

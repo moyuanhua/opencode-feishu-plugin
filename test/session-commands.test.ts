@@ -7,7 +7,7 @@ import type { FeishuSender, SendCardResult } from "../src/feishu/sender.js";
 import type { DirValidation } from "../src/feishu/dirs.js";
 import { createLogger } from "../src/logger.js";
 import type { CardAction, IncomingMessage, ModelRef, PermissionPreset } from "../src/types.js";
-import type { ModelEntry } from "../src/feishu/models.js";
+import type { ModelEntry, ModelSwitchOutcome } from "../src/feishu/models.js";
 import { FakeStorage } from "./helpers.js";
 
 const log = createLogger({ level: "error", sink: () => undefined });
@@ -97,6 +97,12 @@ function setup(
     allSessions?: () => Promise<unknown>;
     getSession?: (sessionID: string) => Promise<unknown>;
     sessionPageSize?: number;
+    /** 覆盖模型切换实现（返回 ModelSwitchOutcome | undefined）。 */
+    switchImpl?: (sessionID: string, model: ModelRef) => Promise<ModelSwitchOutcome | undefined>;
+    /** true = 切换抛错（模拟无权限/会话不存在）。 */
+    switchThrows?: boolean;
+    /** 覆盖读回模型（`getSessionModel`）。 */
+    sessionModel?: (sessionID: string) => Promise<ModelRef | undefined>;
   } = {},
 ) {
   const storage = new FakeStorage();
@@ -112,7 +118,13 @@ function setup(
     return { id };
   });
   const interruptSession = vi.fn(async (_sessionID: string) => undefined);
-  const switchSessionModel = vi.fn(async (_sessionID: string, _model: ModelRef) => undefined);
+  const switchSessionModel = over.switchThrows
+    ? vi.fn(async (_sessionID: string, _model: ModelRef): Promise<ModelSwitchOutcome | undefined> => {
+        throw new Error("permission denied");
+      })
+    : over.switchImpl
+      ? vi.fn(over.switchImpl)
+      : vi.fn(async (_sessionID: string, _model: ModelRef): Promise<ModelSwitchOutcome | undefined> => undefined);
   const applyPermissionPreset = vi.fn(async (_sessionID: string, _preset: PermissionPreset) => undefined);
   const moveSessionDir = vi.fn(async (_sessionID: string, _dir: string) => undefined);
   const steerPrompt = vi.fn(async (_message: IncomingMessage, _sessionID: string, _text: string) => undefined);
@@ -133,6 +145,7 @@ function setup(
     interruptSession,
     listModels: async () => MODELS,
     switchSessionModel,
+    ...(over.sessionModel ? { getSessionModel: over.sessionModel } : {}),
     applyPermissionPreset,
     moveSessionDir,
     steerPrompt,
@@ -392,6 +405,101 @@ describe("SessionCommands 话题内命令矩阵（P5.2 白名单）", () => {
     expect(sender.replies.at(-1)!.text).toContain("已切换模型");
   });
 
+  test("话题内 /model 切换成功：回执以读回的真实值为准", async () => {
+    const { commands, sender, sessionMap } = setup({
+      switchImpl: async (_sid, model) => ({
+        requested: model,
+        // 读回值故意不带 name，验证回执用的是读回值而非请求值。
+        effective: { providerID: "anthropic", id: "claude-sonnet-4" },
+        verified: true,
+      }),
+    });
+    await sessionMap.addSession("oc_1", "ses_t", "t", "ou_1", { setActive: false });
+    await sessionMap.bindThread("omt_1", "ses_t", "oc_1", "ou_1", "om_root");
+    await commands.handleText(threadMsg("/model claude"));
+    const text = sender.replies.at(-1)!.text;
+    expect(text).toContain("已切换模型");
+    expect(text).toContain("anthropic/claude-sonnet-4");
+    expect(text).toContain("后续");
+  });
+
+  test("话题内 /model 读回不一致：明确告知可能未生效，不假装成功", async () => {
+    const { commands, sender, sessionMap } = setup({
+      switchImpl: async (_sid, model) => ({
+        requested: model,
+        effective: { providerID: "opencode-go", id: "deepseek-v4.1-flash" },
+        verified: true,
+        mismatch: true,
+        warning: "请求不一致",
+      }),
+    });
+    await sessionMap.addSession("oc_1", "ses_t", "t", "ou_1", { setActive: false });
+    await sessionMap.bindThread("omt_1", "ses_t", "oc_1", "ou_1", "om_root");
+    await commands.handleText(threadMsg("/model claude"));
+    const text = sender.replies.at(-1)!.text;
+    expect(text).toContain("可能未生效");
+    expect(text).not.toContain("✅ 已切换模型");
+    expect(text).toContain("deepseek-v4.1-flash");
+  });
+
+  test("话题内 /model 读回失败：降级为请求值并说明未校验", async () => {
+    const { commands, sender, sessionMap } = setup({
+      switchImpl: async (_sid, model) => ({
+        requested: model,
+        effective: model,
+        verified: false,
+        warning: "切换后未能读回校验模型",
+      }),
+    });
+    await sessionMap.addSession("oc_1", "ses_t", "t", "ou_1", { setActive: false });
+    await sessionMap.bindThread("omt_1", "ses_t", "oc_1", "ou_1", "om_root");
+    await commands.handleText(threadMsg("/model claude"));
+    const text = sender.replies.at(-1)!.text;
+    expect(text).toContain("未能读回");
+    expect(text).toContain("Claude Sonnet 4");
+  });
+
+  test("话题内 /model 切换抛错：回执错误原因，不误报成功", async () => {
+    const { commands, sender, sessionMap } = setup({ switchThrows: true });
+    await sessionMap.addSession("oc_1", "ses_t", "t", "ou_1", { setActive: false });
+    await sessionMap.bindThread("omt_1", "ses_t", "oc_1", "ou_1", "om_root");
+    await commands.handleText(threadMsg("/model claude"));
+    const text = sender.replies.at(-1)!.text;
+    expect(text).toContain("切换模型失败");
+    expect(text).toContain("permission denied");
+    expect(text).not.toContain("已切换模型");
+  });
+
+  test("话题内 /current：模型显示读回真实值（优先于记录值）", async () => {
+    const { commands, sender, sessionMap } = setup({
+      sessionModel: async () => ({ providerID: "opencode-go", id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" }),
+    });
+    await sessionMap.addSession("oc_1", "ses_t", "t", "ou_1", { setActive: false });
+    await sessionMap.setSessionMeta("ses_t", {
+      model: { providerID: "opencode-go", id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
+    });
+    await sessionMap.bindThread("omt_1", "ses_t", "oc_1", "ou_1", "om_root");
+    await commands.handleText(threadMsg("/current"));
+    const text = sender.replies.at(-1)!.text;
+    expect(text).toContain("DeepSeek V4.1 Flash");
+    expect(text).not.toContain("GLM 5.3 Flash");
+  });
+
+  test("话题内 /current：读回失败时降级显示记录值", async () => {
+    const { commands, sender, sessionMap } = setup({
+      sessionModel: async () => {
+        throw new Error("read-back boom");
+      },
+    });
+    await sessionMap.addSession("oc_1", "ses_t", "t", "ou_1", { setActive: false });
+    await sessionMap.setSessionMeta("ses_t", {
+      model: { providerID: "opencode-go", id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
+    });
+    await sessionMap.bindThread("omt_1", "ses_t", "oc_1", "ou_1", "om_root");
+    await commands.handleText(threadMsg("/current"));
+    expect(sender.replies.at(-1)!.text).toContain("GLM 5.3 Flash");
+  });
+
   test("话题内 /model 无参：发带 sid 的模型卡（reply 落话题）", async () => {
     const { commands, sender, sessionMap } = setup();
     await sessionMap.addSession("oc_1", "ses_t", "t", "ou_1", { setActive: false });
@@ -568,6 +676,41 @@ describe("SessionCommands 向导卡片回调", () => {
     await flush();
     expect(switchSessionModel).toHaveBeenCalledWith("ses_t", expect.objectContaining({ id: "gpt-5" }));
     expect(JSON.stringify(sender.patched.at(-1)!.card)).toContain("已切换模型");
+  });
+
+  test("会话内模型按钮：读回不一致 → patch 提示未生效（不显示成功）", async () => {
+    const { commands, sender } = setup({
+      switchImpl: async (_sid, model) => ({
+        requested: model,
+        effective: { providerID: "opencode-go", id: "deepseek-v4.1-flash" },
+        verified: true,
+        mismatch: true,
+      }),
+    });
+    commands.handleCardAction({
+      rawValue: { wizard: "model", p: "openai", m: "gpt-5", n: "GPT-5", sid: "ses_t" },
+      messageId: "om_model",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await flush();
+    const card = JSON.stringify(sender.patched.at(-1)!.card);
+    expect(card).toContain("可能未生效");
+    expect(card).not.toContain("✅ 已切换模型");
+  });
+
+  test("会话内模型按钮：切换抛错 → patch 错误原因", async () => {
+    const { commands, sender } = setup({ switchThrows: true });
+    commands.handleCardAction({
+      rawValue: { wizard: "model", p: "openai", m: "gpt-5", sid: "ses_t" },
+      messageId: "om_model",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await flush();
+    const card = JSON.stringify(sender.patched.at(-1)!.card);
+    expect(card).toContain("切换模型失败");
+    expect(card).not.toContain("已切换模型");
   });
 });
 

@@ -63,6 +63,40 @@ export function sameModel(a: ModelRef | undefined, b: ModelRef | undefined): boo
   return a.providerID === b.providerID && a.id === b.id;
 }
 
+/**
+ * 从 `ctx.session.get()` 的原始返回里提取当前模型（读回校验用）。
+ *
+ * 兼容两种形状：`Session.Info`（`{ model: { providerID, id } }`）与直接的 `Model.Ref`。
+ * 缺 providerID/id 返回 undefined（由调用方降级处理）。
+ */
+export function extractSessionModel(raw: unknown): ModelRef | undefined {
+  if (!isRecord(raw)) return undefined;
+  const candidate = isRecord(raw.model) ? raw.model : raw;
+  const providerID = str(candidate.providerID);
+  const id = str(candidate.id);
+  if (!providerID || !id) return undefined;
+  return { providerID, id };
+}
+
+/**
+ * 模型切换结果（`switchSessionModel` 的返回值）。
+ *
+ * 语义：`switchModel` 只影响**后续** provider turn；`Session.Info.model` 是权威的
+ * 「下一轮」模型，因此切换后要 Read-back 校验，并以读回值作为展示/记录依据。
+ */
+export interface ModelSwitchOutcome {
+  /** 用户请求切换到的模型。 */
+  readonly requested: ModelRef;
+  /** 读回校验后的实际模型；读回失败时降级为 `requested`。 */
+  readonly effective: ModelRef;
+  /** 是否成功读回并校验。false = 读回失败（降级）。 */
+  readonly verified: boolean;
+  /** 读回值与请求值不一致（切换可能未生效）。 */
+  readonly mismatch?: boolean;
+  /** 非致命说明（读回失败原因等），不回显 secret。 */
+  readonly warning?: string;
+}
+
 export type ModelMatch =
   | { readonly ok: true; readonly model: ModelEntry }
   | { readonly ok: false; readonly reason: "empty" | "not_found" | "ambiguous"; readonly candidates: ModelEntry[] };

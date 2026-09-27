@@ -17,6 +17,10 @@ const h = vi.hoisted(() => ({
     | undefined,
   created: [] as unknown[],
   replied: [] as unknown[],
+  switchCalls: [] as Array<{ sessionID: string; model: { id: string; providerID: string } }>,
+  switchImpl: undefined as
+    | undefined
+    | ((input: { sessionID: string; model: { id: string; providerID: string } }) => Promise<void>),
 }));
 
 vi.mock("../src/feishu/gateway.js", () => ({
@@ -59,6 +63,7 @@ let sessionListRaw: Array<{
   title: string;
   time: { updated: number };
   location: { directory: string };
+  model?: { providerID: string; id: string };
 }> = [];
 const createSession = vi.fn(async (_input: { title?: string }) => ({ id: `ses_${createSession.mock.calls.length - 1}` }));
 
@@ -94,6 +99,14 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
         },
       }),
     },
+    model: {
+      list: async () => ({
+        data: [
+          { providerID: "opencode-go", id: "glm-5.3-flash", name: "GLM 5.3 Flash" },
+          { providerID: "opencode-go", id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+        ],
+      }),
+    },
     session: {
       create: createSession,
       prompt: async (input: { sessionID: string; text: string }) => {
@@ -108,6 +121,10 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
         const found = sessionListRaw.find((s) => s.id === input.sessionID);
         if (!found) throw new Error("session not found");
         return found;
+      },
+      switchModel: async (input: { sessionID: string; model: { id: string; providerID: string } }) => {
+        h.switchCalls.push(input);
+        if (h.switchImpl) await h.switchImpl(input);
       },
     },
     permission: {
@@ -165,6 +182,8 @@ describe("index 话题路由（集成）", () => {
     promptCalls.length = 0;
     interruptCalls.length = 0;
     sessionListRaw = [];
+    h.switchCalls.length = 0;
+    h.switchImpl = undefined;
     createSession.mockClear();
   });
 
@@ -302,5 +321,79 @@ describe("index 话题路由（集成）", () => {
     await deliver(msg("/resume", { messageId: "om_resume" }));
     await vi.waitFor(() => expect(storage.raw("feishu:v2:thread:omt_new")).toBeDefined());
     expect((storage.raw("feishu:v2:thread:omt_new") as { sessionID: string }).sessionID).toBe("ses_r1");
+  });
+
+  // ── 任务 B：/model 切换后读回校验（集成） ─────────────────────────────
+
+  async function bindThreadSession(): Promise<void> {
+    await deliver(msg("干活", { messageId: "om_sw1", threadId: "omt_sw", rootId: "omr_sw" }));
+  }
+
+  function readStoredModel(sessionID: string): string | undefined {
+    const link = storage.raw(`feishu:v2:session:${sessionID}`) as { model?: { id?: string } } | undefined;
+    return link?.model?.id;
+  }
+
+  test("话题内 /model 切换成功：SessionMap 记录与回执同步为读回值", async () => {
+    cleanup = await setup();
+    await bindThreadSession();
+    sessionListRaw = [
+      {
+        id: "ses_0",
+        title: "话题会话",
+        time: { updated: 1 },
+        location: { directory: "/home/ubuntu" },
+        model: { providerID: "opencode-go", id: "glm-5.3-flash" },
+      },
+    ];
+    await deliver(msg("/model glm", { messageId: "om_sw2", threadId: "omt_sw", rootId: "omr_sw" }));
+    expect(h.switchCalls.at(-1)).toMatchObject({
+      sessionID: "ses_0",
+      model: { id: "glm-5.3-flash", providerID: "opencode-go" },
+    });
+    expect(readStoredModel("ses_0")).toBe("glm-5.3-flash");
+    expect(JSON.stringify(h.replied.at(-1))).toContain("已切换模型");
+  });
+
+  test("话题内 /model 切换：读回与请求不一致时记录读回值且回执告警", async () => {
+    cleanup = await setup();
+    await bindThreadSession();
+    // 请求 glm，但服务端读回 deepseek（模拟切换未生效 / 被覆盖）。
+    sessionListRaw = [
+      {
+        id: "ses_0",
+        title: "话题会话",
+        time: { updated: 1 },
+        location: { directory: "/home/ubuntu" },
+        model: { providerID: "opencode-go", id: "deepseek-v4.1-flash" },
+      },
+    ];
+    await deliver(msg("/model glm", { messageId: "om_sw2", threadId: "omt_sw", rootId: "omr_sw" }));
+    expect(readStoredModel("ses_0")).toBe("deepseek-v4.1-flash"); // 记录读回的真实值
+    const text = JSON.stringify(h.replied.at(-1));
+    expect(text).toContain("可能未生效");
+    expect(text).not.toContain("✅ 已切换模型");
+  });
+
+  test("话题内 /model 切换失败：回执错误、不写入、不误报成功", async () => {
+    cleanup = await setup();
+    await bindThreadSession();
+    h.switchImpl = async () => {
+      throw new Error("permission denied");
+    };
+    await deliver(msg("/model glm", { messageId: "om_sw2", threadId: "omt_sw", rootId: "omr_sw" }));
+    expect(readStoredModel("ses_0")).toBeUndefined();
+    const text = JSON.stringify(h.replied.at(-1));
+    expect(text).toContain("切换模型失败");
+    expect(text).not.toContain("已切换模型");
+  });
+
+  test("话题内 /model 读回失败：降级写入请求值并提示未校验", async () => {
+    cleanup = await setup();
+    await bindThreadSession();
+    // sessionListRaw 为空 → ctx.session.get 抛错 → 读回失败。
+    await deliver(msg("/model glm", { messageId: "om_sw2", threadId: "omt_sw", rootId: "omr_sw" }));
+    expect(readStoredModel("ses_0")).toBe("glm-5.3-flash");
+    expect(JSON.stringify(h.replied.at(-1))).toContain("未能读回");
   });
 });

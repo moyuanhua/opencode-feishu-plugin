@@ -116,6 +116,13 @@ describe("resolveConfig", () => {
     expect(resolve({ appId: "a", appSecret: "s", threadRouting: "true" }, {}).threadRouting).toBe(true);
   });
 
+  test("P5.3：topicGuidance 默认 true，显式 false / 字符串 'false' 可关闭", () => {
+    expect(resolve({ appId: "a", appSecret: "s" }, {}).topicGuidance).toBe(true);
+    expect(resolve({ appId: "a", appSecret: "s", topicGuidance: false }, {}).topicGuidance).toBe(false);
+    expect(resolve({ appId: "a", appSecret: "s", topicGuidance: "false" }, {}).topicGuidance).toBe(false);
+    expect(resolve({ appId: "a", appSecret: "s", topicGuidance: "true" }, {}).topicGuidance).toBe(true);
+  });
+
   test("节流下限被夹到 400ms", () => {
     const cfg = resolve({ appId: "a", appSecret: "s", streamThrottleMs: 50 }, {});
     expect(cfg.streamThrottleMs).toBe(400);

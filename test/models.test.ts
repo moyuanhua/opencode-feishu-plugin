@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  extractSessionModel,
   matchModel,
   modelLabel,
   modelMatchErrorText,
@@ -78,5 +79,25 @@ describe("modelLabel / sameModel / 错误文案", () => {
     expect(modelMatchErrorText("empty", [])).toContain("/model");
     expect(modelMatchErrorText("not_found", [])).toContain("没有匹配");
     expect(modelMatchErrorText("ambiguous", [models[0]!])).toContain("多个");
+  });
+});
+
+describe("extractSessionModel（读回校验）", () => {
+  test("Session.Info（{model:{providerID,id}}）", () => {
+    expect(extractSessionModel({ id: "ses_1", model: { providerID: "opencode-go", id: "glm-5.3-flash" } })).toEqual({
+      providerID: "opencode-go",
+      id: "glm-5.3-flash",
+    });
+  });
+
+  test("直接 Model.Ref 也可解析", () => {
+    expect(extractSessionModel({ providerID: "p", id: "m" })).toEqual({ providerID: "p", id: "m" });
+  });
+
+  test("缺失/非法返回 undefined", () => {
+    expect(extractSessionModel(undefined)).toBeUndefined();
+    expect(extractSessionModel({ id: "ses_1" })).toBeUndefined();
+    expect(extractSessionModel({ model: { providerID: "p" } })).toBeUndefined();
+    expect(extractSessionModel({ model: null })).toBeUndefined();
   });
 });

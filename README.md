@@ -160,6 +160,23 @@ opencode mcp list        # 顺带确认服务健康
 | `/now` | 把本会话已排队的未执行消息改为立即插队执行 |
 | `/current` `/stop` `/help` | 同主聊天流，作用于本话题会话 |
 
+### 模型切换的真实语义（`/model`）
+
+`/model` 切换只影响**后续**的模型调用，**不会**改写历史消息：
+
+- opencode 的 `switchModel` 语义就是「切换后续 provider turn」，并在会话里追加一条 `model-switched` 标记；此前的 assistant 消息仍带着它们**当时实际使用**的模型。
+- 因此「`Session.Info.model` 已经是新模型，但更早那批消息仍是旧模型」是**预期行为**，不是没切成功。
+- 为稳妥起见，插件切换后会**读回** `ctx.session.get` 校验真实模型：一致才显示「✅ 已切换模型」；读回不一致会明确提示「⚠️ 模型可能未生效」；读回失败会降级为请求值并提示未校验。**运行卡页脚与 `/current` 显示的模型同样以读回的真实值为准**。
+- 切换失败（无权限 / 会话不存在等）时回执会给出错误原因，而不是假装成功。
+
+### 主题软引导（话题内不硬拦截离题）
+
+从飞书 `/new <标题>` 或表单建会话时，标题就是该话题的「主题」。插件**不会**拦截话题内离题的消息，只在 system 里注入一句轻量说明，让 AI 在用户明显转向无关任务时**简短提醒**「可用 `/new` 开新会话」，但不会因此拒答、也不会长篇说教：
+
+- 仅对**从飞书发起的会话**注入；本地 TUI 等会话**绝不注入**（不污染你自己的会话）。
+- 取不到会话标题时跳过注入；注入失败只记 `log.warn`，不影响正常执行。
+- 可用 `topicGuidance: false` 完全关闭。
+
 ### 建会话（`/new` 与 `/form` 完全等价）
 
 ```
@@ -313,6 +330,7 @@ agent 主动调用 `question` 工具（或其它 form 类交互）时，opencode
 | `stream` | boolean | `true` | 是否用流式卡片回填回复 |
 | `streamThrottleMs` | number | `400` | 卡片更新最小间隔（下限 400ms，飞书限 5 QPS） |
 | `threadRouting` | boolean | `true` | 话题路由总开关；`false` 时主聊天流普通文本进当前会话（回退用） |
+| `topicGuidance` | boolean | `true` | 主题软引导：对飞书会话注入一句「离题可 `/new` 开新会话」的 system 说明（不拦截消息）；非飞书会话绝不注入 |
 | `recentDirsLimit` | number | `5` | 「最近使用目录」条数（1–20） |
 | `recentModelsLimit` | number | `5` | 「最近使用模型」条数（1–20） |
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | 日志级别（只记 secret 存在性，绝不含明文） |
@@ -369,6 +387,7 @@ permission.evaluate (插件 hook)                 permission.asked (事件流)
 | 看不到插件日志 | 服务模式下插件 stderr 会被丢弃；设 `logFile: true`，然后看 `<configDir>/plugins/feishu.log` |
 | 主聊天流发消息只回提示卡 | 预期行为：主聊天流只做管理。用 `/new` 进话题；想恢复旧行为设 `threadRouting: false` |
 | 会话像卡死、发消息只排队 | 看门狗会在 `staleExecutionMs`（默认 5 分钟）后自动中断该会话并取消排队，同时发提示卡；也可直接点卡片上的「⏹ 强制停止」或发 `/stop` |
+| 切了 `/model` 但历史消息还是旧模型 | 预期行为：切换只影响**后续**回复，历史消息保留各自当时的模型；回执 / 运行卡页脚 / `/current` 均以读回的真实值为准 |
 
 ---
 
