@@ -422,6 +422,9 @@ This plugin targets **OpenCode V2 only** (`@opencode/plugin`, `Plugin.define`). 
 
 > Publishing tip: `npm publish` triggers `prepublishOnly` (typecheck + build + test). If `node_modules` is missing it **runs `npm ci` first**, so a fresh clone can be published directly without a manual install.
 
+
+> Publishing note: provenance can only be generated in CI (GitHub Actions), so `package.json` deliberately does **not** set `publishConfig.provenance`; our workflows pass `npm publish --provenance` explicitly. Publishing locally is just `npm publish --access public`.
+
 ## License
 
 MIT

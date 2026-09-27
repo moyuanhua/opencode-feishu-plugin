@@ -429,6 +429,9 @@ npm run dev         # tsup --watch
 
 > 本地发布小贴士：`npm publish` 会触发 `prepublishOnly`（typecheck + build + test）。若 `node_modules` 不存在会**自动先跑 `npm ci`**，所以新克隆的仓库可以直接 `npm publish`，无需手动安装依赖。
 
+
+> 本地发布注意：provenance 只能在 CI（GitHub Actions）里生成，因此 `package.json` 里**没有**设 `publishConfig.provenance`；CI 工作流用 `npm publish --provenance` 显式开启。本地发布直接 `npm publish --access public` 即可。
+
 ## 许可证
 
 MIT
