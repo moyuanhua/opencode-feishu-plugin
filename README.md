@@ -401,7 +401,7 @@ npm test            # vitest（纯逻辑单测，不连真飞书）
 npm run dev         # tsup --watch
 ```
 
-**架构**：`src/index.ts` 装配所有部件；飞书交互层在 `src/feishu/`（事件解析、卡片构建、话题路由、向导状态机、流式卡片 reducer 等，**以纯函数为主便于单测**）；安全层在 `src/security/`（token 签名、白名单）。
+**架构**：`src/index.ts` 只做装配（配置、gateway、watchdog、hook 注册与 cleanup）；`src/runtime/` 放可单测的事件分发（`event-router.ts`）与卡片回调分流（`card-action-router.ts`）；会话命令编排拆在 `src/session/`（`session-commands.ts` 为薄门面，实现分在 `session-list.ts` / `setup-wizard.ts` / `session-ops.ts` / `model-perm.ts` / `context.ts`）；飞书交互层在 `src/feishu/`（事件解析、卡片构建、话题路由、向导状态机、流式卡片 reducer 等，**以纯函数为主便于单测**）；安全层在 `src/security/`（token 签名、白名单）。
 
 **设计要点**：
 - 卡片一律 **JSON 2.0**（按钮直接放 `body.elements`，回调用 `behaviors`；1.0 的 `tag:"action"` 在 2.0 会 400）。表单卡额外约束：`form` 必须在 `body.elements` 根节点、交互组件 `name` 全局唯一、至少一个 `form_action_type:"submit"` 按钮。
@@ -421,7 +421,7 @@ npm run dev         # tsup --watch
 - 只接管**从飞书发起的会话**的审批；本地 TUI 会话不受影响（安全设计）。
 - 消息去重为 `get-then-set`，非原子：极端并发下理论上可能双处理（正常情况下单实例顺序处理）。
 - 话题被删除后映射不主动清理（惰性忽略）。
-- 建会话只有一条主路径：**`/new` 与 `/form` 等价的表单卡**；`/dir` `/model` `/perm` 仅用于给表单预填字段。旧的目录/模型/权限/确认分步卡已从 `/new` 下线（相关构建函数与兼容回调保留，标注 deprecated）。
+- 建会话只有一条主路径：**`/new` 与 `/form` 等价的表单卡**；`/dir` `/model` `/perm` 仅用于给表单预填字段。旧的目录/模型/权限/确认分步卡已从 `/new` 下线（目录卡的构建函数已彻底移除；模型/权限/确认卡的构建函数与兼容回调保留，标注 deprecated，供仍持有旧卡片的用户点击时继续可用）。
 - 表单为 JSON 2.0（`form` 置于 `body.elements` 根节点，交互组件 `name` 全局唯一，提交按钮带 `form_action_type:"submit"`）；部分老客户端对 `select_static` 有最低版本要求（≥ V3.7.0）。
 
 - **话题首条消息可能不带 `thread_id`**：飞书有时在事件里省略 `thread_id`（随后才归属到话题）。若此时你敲了 `/new` 这类仅限主聊天流的命令，它会被当作主聊天流命令执行（例如表单卡发到主聊天流）。遇到这种情况，直接进话题重新发普通消息即可。

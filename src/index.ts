@@ -28,17 +28,14 @@ import { MessageDedup } from "./feishu/dedup.js";
 import { decideDelivery, ExecutionTracker, type Delivery } from "./feishu/delivery.js";
 import { createRunController } from "./feishu/run-controller.js";
 import { createSessionRecovery, type CancelQueuedResult } from "./feishu/session-recovery.js";
-import { StopController, parseStopActionValue } from "./feishu/run-stop.js";
+import { StopController } from "./feishu/run-stop.js";
 import { startWatchdog } from "./feishu/watchdog.js";
 import { FormRelay, type FormReplyInput } from "./feishu/form-relay.js";
 import { replyFormOverHttp } from "./feishu/form-reply.js";
-import type { RunEvent } from "./feishu/run-state.js";
 import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js";
 import { decideRoute } from "./feishu/routing.js";
 import { buildConsoleHintCard, buildStopNoticeCard } from "./feishu/cards.js";
-import { parseSessionCardValue } from "./feishu/session-cards.js";
-import { isSetupFormAction, parseSetupCardValue } from "./feishu/setup-cards.js";
 import { validateDirectory } from "./feishu/dirs.js";
 import { WizardStore } from "./feishu/wizard.js";
 import { RecentStore } from "./feishu/recent.js";
@@ -54,11 +51,11 @@ import { injectTopicGuidance } from "./feishu/topic-guidance.js";
 import { presetAskActions, presetGateMode, presetToRuleset } from "./feishu/perm-presets.js";
 import { ApprovalManager, decideEffectForSession, type ReplyInput } from "./permission.js";
 import { SessionCommands } from "./session-commands.js";
+import { routeEvent, extractErrorText, type EventRouterDeps } from "./runtime/event-router.js";
+import { routeCardAction } from "./runtime/card-action-router.js";
 import type {
   IncomingMessage,
   ModelRef,
-  PermissionRepliedLike,
-  PermissionRequestLike,
   PermissionPreset,
   SessionLink,
   StorageLike,
@@ -627,36 +624,14 @@ async function start(
     log,
     logLevel: config.logLevel,
     onMessage: (message) => handleMessage(message),
-    onCardAction: async (action) => {
-      // opencode 表单卡（含 question 工具）优先：value 形如 `{f,k,...}`。
-      const formResponse = formRelay.handleCardAction(action);
-      if (formResponse) return formResponse;
-
-      // 会话卡 / 向导卡 / 表单提交优先；其余交给审批卡（value 里带 `cmd` / `wizard` 的才是管理操作）。
-      const value = action.rawValue;
-
-      // 运行卡「强制停止」按钮（与审批卡/会话卡并列，独立校验路径）。
-      if (parseStopActionValue(value)) {
-        return stop.handleCardAction(action);
-      }
-
-      const hasForm = action.formValue !== undefined;
-      const routed =
-        hasForm ||
-        isSetupFormAction(value) ||
-        Boolean(parseSessionCardValue(value)) ||
-        Boolean(parseSetupCardValue(value));
-      log.debug("卡片回调路由", {
-        hasForm,
-        hasValue: value !== undefined,
-        valueKeys: value && typeof value === "object" ? Object.keys(value as Record<string, unknown>) : [],
-        routedTo: routed ? "commands" : "approvals",
-      });
-      if (routed) {
-        return commands.handleCardAction(action);
-      }
-      return approvals.handleCardAction(action);
-    },
+    onCardAction: (action) =>
+      routeCardAction(action, {
+        log,
+        handleForm: (a) => formRelay.handleCardAction(a),
+        handleStop: (a) => stop.handleCardAction(a),
+        handleCommands: (a) => commands.handleCardAction(a),
+        handleApprovals: (a) => approvals.handleCardAction(a),
+      }),
   });
 
   // ── 服务器事件订阅 ────────────────────────────────────────────────────
@@ -671,141 +646,22 @@ async function start(
     }
   })();
 
-  async function handleEvent(event: { type: string; data: unknown }): Promise<void> {
-    // 任意 session 事件都刷新活动时间，避免看门狗误杀仍在产出的事件流。
-    const touched = (event.data as { sessionID?: unknown } | undefined)?.sessionID;
-    if (typeof touched === "string") executions.touch(touched);
+  const eventDeps: EventRouterDeps = {
+    log,
+    touch: (sessionID) => executions.touch(sessionID),
+    markStarted: (sessionID) => executions.markStarted(sessionID),
+    markEnded: (sessionID) => executions.markEnded(sessionID),
+    applyRun: (sessionID, event) => runs.apply(sessionID, event),
+    onPermissionAsked: (data) => approvals.onAsked(data),
+    onPermissionReplied: (data) => approvals.onReplied(data),
+    onFormCreated: (data) => formRelay.onCreated(data),
+    onFormReplied: (data) => formRelay.onReplied(data),
+    onFormCancelled: (data) => formRelay.onCancelled(data),
+    notifyFailure: (sessionID, error) => notifyFailure(sessionID, error),
+  };
 
-    switch (event.type) {
-      case "permission.asked":
-        // 发卡是网络 IO，不能阻塞事件流（否则会拖慢后续 text.delta）。
-        void approvals
-          .onAsked(event.data as PermissionRequestLike)
-          .catch((err) => log.warn("处理 permission.asked 失败", { error: errorMessage(err) }));
-        break;
-      case "permission.replied":
-        approvals.onReplied(event.data as PermissionRepliedLike);
-        break;
-      case "form.created":
-        // 发卡是网络 IO，不能阻塞事件流（否则会拖慢后续 text.delta）。
-        void formRelay
-          .onCreated(event.data)
-          .catch((err) => log.warn("处理 form.created 失败", { error: errorMessage(err) }));
-        break;
-      case "form.replied":
-        formRelay.onReplied(event.data);
-        break;
-      case "form.cancelled":
-        formRelay.onCancelled(event.data);
-        break;
-      case "session.text.started": {
-        const data = event.data as { sessionID: string; assistantMessageID?: string };
-        runs.apply(data.sessionID, {
-          type: "text.started",
-          ...(data.assistantMessageID ? { assistantMessageID: data.assistantMessageID } : {}),
-        });
-        break;
-      }
-      case "session.text.delta": {
-        const data = event.data as { sessionID: string; delta: string; assistantMessageID?: string };
-        runs.apply(data.sessionID, {
-          type: "text.delta",
-          delta: data.delta,
-          ...(data.assistantMessageID ? { assistantMessageID: data.assistantMessageID } : {}),
-        });
-        break;
-      }
-      case "session.text.ended": {
-        const data = event.data as { sessionID: string; text?: string; assistantMessageID?: string };
-        runs.apply(data.sessionID, {
-          type: "text.ended",
-          ...(data.text ? { text: data.text } : {}),
-          ...(data.assistantMessageID ? { assistantMessageID: data.assistantMessageID } : {}),
-        });
-        break;
-      }
-      case "session.tool.input.started": {
-        const data = event.data as { sessionID: string; id: string; name: string; assistantMessageID?: string };
-        runs.apply(data.sessionID, {
-          type: "tool.input.started",
-          id: data.id,
-          name: data.name,
-          ...(data.assistantMessageID ? { assistantMessageID: data.assistantMessageID } : {}),
-        });
-        break;
-      }
-      case "session.tool.input.ended": {
-        const data = event.data as { sessionID: string; id: string; input?: unknown };
-        runs.apply(data.sessionID, { type: "tool.input.ended", id: data.id, input: data.input });
-        break;
-      }
-      case "session.tool.success": {
-        const data = event.data as { sessionID: string; id: string; content?: unknown };
-        runs.apply(data.sessionID, {
-          type: "tool.success",
-          id: data.id,
-          output: contentToText(data.content),
-        });
-        break;
-      }
-      case "session.tool.error": {
-        const data = event.data as { sessionID: string; id: string; content?: unknown; error?: unknown };
-        runs.apply(data.sessionID, {
-          type: "tool.error",
-          id: data.id,
-          output: extractErrorText(data.error ?? data.content),
-        });
-        break;
-      }
-      case "session.execution.started": {
-        const data = event.data as { sessionID: string };
-        executions.markStarted(data.sessionID);
-        runs.apply(data.sessionID, { type: "execution.started" });
-        break;
-      }
-      case "session.execution.succeeded": {
-        const data = event.data as { sessionID: string };
-        executions.markEnded(data.sessionID);
-        runs.apply(data.sessionID, { type: "execution.succeeded" });
-        break;
-      }
-      case "session.execution.failed": {
-        const data = event.data as { sessionID: string; error: unknown };
-        executions.markEnded(data.sessionID);
-        runs.apply(data.sessionID, { type: "execution.failed", error: extractErrorText(data.error) });
-        void notifyFailure(data.sessionID, data.error);
-        break;
-      }
-      case "session.execution.interrupted": {
-        // /stop、shutdown、被 steer 取代等都会走这里；漏处理会让执行态永远卡在 running，
-        // 之后每条飞书消息都被判为 queue → 永久排队（历史 bug）。
-        const data = event.data as { sessionID: string; reason?: string };
-        executions.markEnded(data.sessionID);
-        runs.apply(data.sessionID, { type: "execution.failed", error: `已中断（${data.reason ?? "unknown"}）` });
-        break;
-      }
-      case "session.status": {
-        // 执行态权威信号（busy/retry/idle）。execution.* 事件可能丢失或错配，用状态事件兜底。
-        const data = event.data as { sessionID: string; status?: { type?: string } };
-        const statusType = data.status?.type;
-        if (statusType === "idle") {
-          executions.markEnded(data.sessionID);
-          runs.apply(data.sessionID, { type: "execution.succeeded" });
-        } else if (statusType === "busy" || statusType === "retry") {
-          executions.markStarted(data.sessionID);
-        }
-        break;
-      }
-      case "session.idle": {
-        // 兜底收尾：某些路径可能没有 execution.succeeded，避免页脚悬挂。
-        const data = event.data as { sessionID: string };
-        executions.markEnded(data.sessionID);
-        runs.apply(data.sessionID, { type: "execution.succeeded" });
-        break;
-      }
-      default:
-        break;
-    }
+  async function handleEvent(event: { type: string; data: unknown }): Promise<void> {
+    await routeEvent(event, eventDeps);
   }
 
   async function notifyFailure(sessionID: string, error: unknown): Promise<void> {
@@ -1044,39 +900,6 @@ async function replyPermission(ctx: Plugin.Context, input: ReplyInput): Promise<
     }
     throw err;
   }
-}
-
-function extractErrorText(error: unknown): string {
-  if (!error) return "unknown";
-  if (typeof error === "string") return error.slice(0, 300);
-  if (Array.isArray(error)) return contentToText(error).slice(0, 300) || "unknown";
-  if (typeof error === "object") {
-    const record = error as Record<string, unknown>;
-    if (typeof record.message === "string") return record.message.slice(0, 300);
-    if (typeof record.type === "string") return record.type;
-  }
-  return "unknown";
-}
-
-/** 工具事件里的 `content` 可能是字符串 / 对象 / `[{type:"text",text}]` 数组。 */
-function contentToText(content: unknown): string {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) {
-    return content
-      .map((item) => {
-        if (typeof item === "string") return item;
-        if (item && typeof item === "object" && typeof (item as { text?: unknown }).text === "string") {
-          return (item as { text: string }).text;
-        }
-        return "";
-      })
-      .filter(Boolean)
-      .join("\n");
-  }
-  if (content && typeof content === "object" && typeof (content as { text?: unknown }).text === "string") {
-    return (content as { text: string }).text;
-  }
-  return "";
 }
 
 /**

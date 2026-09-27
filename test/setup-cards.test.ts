@@ -1,7 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
   buildConfirmCard,
-  buildDirCard,
   buildModelCard,
   buildPermCard,
   buildSetupDoneCard,
@@ -28,22 +27,6 @@ const MODELS: ModelRef[] = Array.from({ length: 18 }, (_, i) => ({
   id: `model-${i}`,
   name: `模型 ${i}`,
 }));
-
-describe("buildDirCard", () => {
-  test("最近目录按钮 + 手动输入提示 + allowedRoots + 表单入口", () => {
-    const card = buildDirCard({ recent: ["/home/ubuntu/work/a", "/home/ubuntu/work/b"], allowedRoots: ["/home/ubuntu"] });
-    expect(json(card)).toContain("手动输入");
-    expect(json(card)).toContain("/dir");
-    expect(json(card)).toContain("/home/ubuntu/work/a");
-    expect(json(card)).toContain("允许的根目录");
-    const buttons = bodyElements(card).filter((e) => e.tag === "button");
-    // 「一次填完（表单）」+ 2 个最近目录
-    expect(buttons.length).toBe(3);
-    expect(json(card)).toContain("一次填完");
-    expect(json(card)).toContain('"wizard":"form"');
-    expect((card as { schema: string }).schema).toBe("2.0");
-  });
-});
 
 describe("buildModelCard", () => {
   test("最近/当前视图：当前高亮 + 「更多」分页", () => {

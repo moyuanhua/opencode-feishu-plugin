@@ -395,7 +395,7 @@ npm test            # vitest (pure logic, no live Feishu)
 npm run dev         # tsup --watch
 ```
 
-**Architecture**: `src/index.ts` wires everything; the Feishu interaction layer lives in `src/feishu/` (event parsing, card builders, topic routing, wizard state machine, streaming-card reducer — mostly **pure functions** for testability); `src/security/` holds token signing and the allowlist.
+**Architecture**: `src/index.ts` is assembly only (config, gateway, watchdog, hook registration and cleanup); `src/runtime/` holds the unit-testable event dispatch (`event-router.ts`) and card-callback routing (`card-action-router.ts`); the session command orchestration is split under `src/session/` (`session-commands.ts` is a thin facade; implementations live in `session-list.ts` / `setup-wizard.ts` / `session-ops.ts` / `model-perm.ts` / `context.ts`); the Feishu interaction layer lives in `src/feishu/` (event parsing, card builders, topic routing, wizard state machine, streaming-card reducer — mostly **pure functions** for testability); `src/security/` holds token signing and the allowlist.
 
 **Implementation notes**
 - Cards are **JSON 2.0** (buttons directly in `body.elements`, callbacks via `behaviors`; the 1.0 `tag:"action"` container returns HTTP 400 on 2.0). Form cards add: `form` must sit at the root of `body.elements`, interactive `name`s must be globally unique, and at least one button must carry `form_action_type:"submit"`.

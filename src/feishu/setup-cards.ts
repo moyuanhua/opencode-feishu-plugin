@@ -113,32 +113,6 @@ function dedupeRefs(refs: readonly ModelRef[]): ModelRef[] {
 }
 
 /**
- * 目录选择卡：最近目录按钮 + 手动输入提示。
- *
- * @deprecated `/new` 已改为直接发建会话表单卡（与 `/form` 等价），本分步卡不再从 `/new` 路径发出。
- * 仅保留给旧版卡片回调的兼容处理与单测参考，后续版本可移除。
- */
-export function buildDirCard(input: { readonly recent: readonly string[]; readonly allowedRoots?: readonly string[] }): object {
-  const recent = input.recent.slice(0, 10);
-  const lines = ["请选择 OpenCode 会话的工作目录。", ""];
-  if (input.allowedRoots && input.allowedRoots.length > 0) {
-    lines.push(`允许的根目录：${input.allowedRoots.map((r) => `\`${r}\``).join("、")}`);
-    lines.push("");
-  }
-  lines.push("✍️ **手动输入**：发送 `/dir <绝对路径>`（例如 `/dir /home/you/work/my-app`）。");
-  if (recent.length > 0) {
-    lines.push("", "**最近使用：**");
-    recent.forEach((dir, i) => lines.push(`${i + 1}. \`${dir}\``));
-  }
-  const elements: object[] = [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }];
-  elements.push(button("📝 一次填完（表单）", "default", { wizard: "form" }));
-  for (const dir of recent) {
-    elements.push(button(`📁 ${shorten(dir, 40)}`, "default", { wizard: "dir", d: dir }));
-  }
-  return headerCard("📁 选择工作目录", "blue", elements);
-}
-
-/**
  * 模型选择卡：当前/最近按钮 + 「更多」分页 + 手动输入提示。
  *
  * @deprecated `/new` 已改为直接发建会话表单卡（与 `/form` 等价），本分步卡不再从 `/new` 路径发出；
