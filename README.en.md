@@ -421,7 +421,7 @@ The plugin ships two built-in layers (both on by default, **no external script r
    - if the gateway instance was evicted, it is revived automatically as long as **any other Location** still has a loaded instance (e.g. you have a TUI/Web open in another project);
    - after a **service restart**, the first use of any Location starts the watchdog, which fires an immediate probe after ~3s and brings the gateway back up.
 
-> Still recommended (optional, not required): a cron / systemd timer doing one session-scoped GET every 15–30 minutes, covering the extreme case where the opencode process is down and nothing is used for a long time. See `scripts/keepalive-feishu.sh`. Set `keepalive: false` to disable all keep-alive.
+> **No external script / cron / systemd setup is required**: both layers run inside the plugin process. The only case neither can cover is "the opencode process is fully down and nothing is used for a long time" — no plugin can run then; the watchdog restores the gateway as soon as opencode is used again. Set `keepalive: false` to disable all keep-alive.
 
 ---
 
@@ -473,7 +473,7 @@ otherwise (per session preset) → ask ─────────────�
 | No plugin logs | Plugin stderr is discarded in service mode; set `logFile: true` and read `<configDir>/plugins/feishu.log` |
 | Main chat replies with a hint card | Expected: the main chat is management-only. Use `/new` and work inside a topic; set `threadRouting: false` to revert |
 | Session looks stuck and messages only queue | The watchdog auto-interrupts it after `staleExecutionMs` (default 5 min) and cancels the queue, then sends a notice card; you can also tap the card's "⏹ force stop" or send `/stop` |
-| **Bot goes completely silent after ~1 hour idle** (no "long connection started" in the log) | OpenCode evicted the idle Location (hardcoded 60-min TTL). The built-in keep-alive is on by default; if it still happens (service restart / long sleep / keep-alive disabled), one session-scoped request re-creates it: `opencode api get /api/session/{id}`, or set up the external cron described under "Location keep-alive" |
+| **Bot goes completely silent after ~1 hour idle** (no "long connection started" in the log) | OpenCode evicted the idle Location (hardcoded 60-min TTL). The built-in keep-alive + process-wide watchdog are on by default and restore it automatically; you can also force it manually with one session-scoped request: `opencode api get /api/session/{id}`. If it never recovers, check that `keepalive` is not set to `false` |
 | Switched `/model` but older messages still show the old model | Expected: a switch only affects **subsequent** replies; history keeps each message's model. The receipt / run-card footer / `/current` all show the read-back truth |
 
 ---
