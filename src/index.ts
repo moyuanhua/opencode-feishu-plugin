@@ -18,7 +18,13 @@ import { dirname } from "node:path";
 import { Plugin } from "@opencode/plugin";
 import { hasSecret, resolveConfig } from "./config.js";
 import { createLogger, errorMessage, maskId } from "./logger.js";
-import { acquireProcessGuard, releaseProcessGuard, trackGatewayLocationSeen } from "./lifecycle.js";
+import {
+  acquireProcessGuard,
+  markExactGateway,
+  releaseProcessGuard,
+  trackGatewayLocationSeen,
+  waitForExactGateway,
+} from "./lifecycle.js";
 import { OwnerPolicy } from "./security/allowlist.js";
 import { ReplayGuard, signApproval, signAllowSession, signStop, verifyApproval, verifyAllowSession, verifyStop } from "./security/token.js";
 import { startGateway } from "./feishu/gateway.js";
@@ -129,7 +135,12 @@ export default Plugin.define({
     // 网关门控：只让指定 location 的实例启动（跨 location 是独立 VM context，无法用进程内单例收敛）。
     // 匹配语义：here 等于 gatewayLocation **或位于其下**（填仓库根目录即可覆盖子目录）。
     if (config.gatewayLocation) {
-      const matched = Boolean(here) && isUnder(here!, config.gatewayLocation);
+      // 精确匹配优先：`here === gatewayLocation` 立即就任；
+      // 子目录（`isUnder`）仅作兜底，先等一个宽限窗口（`gatewayMatchGraceMs`），
+      // 窗口内出现精确匹配就让位——避免 `~/.config/opencode` 之类的子目录抢跑。
+      const exact = Boolean(here) && here === config.gatewayLocation;
+      const sub = Boolean(here) && !exact && isUnder(here!, config.gatewayLocation);
+      const matched = exact || sub;
       // 本实例启动了进程级看门狗 → 保留日志流，让看门狗后续日志仍能落盘。
       const keepSink = matched || startedWatchdog;
       // 兜底告警：配了 gatewayLocation 但已加载的 location 均未命中时，延迟 warn（仅一次）。
@@ -149,6 +160,24 @@ export default Plugin.define({
         log.debug("跳过非网关 location", { here, expected: config.gatewayLocation });
         if (!keepSink) logSink?.close();
         return async () => {};
+      }
+      if (exact) {
+        markExactGateway();
+      } else {
+        // 子目录兜底：先给精确匹配一个宽限窗口。
+        const exactSeen = await waitForExactGateway(config.gatewayMatchGraceMs);
+        if (exactSeen) {
+          log.debug("精确匹配 location 已就绪，子目录候选让位", {
+            here,
+            expected: config.gatewayLocation,
+          });
+          if (!keepSink) logSink?.close();
+          return async () => {};
+        }
+        log.info("精确匹配 location 未出现，子目录候选接管网关", {
+          here,
+          expected: config.gatewayLocation,
+        });
       }
     }
 

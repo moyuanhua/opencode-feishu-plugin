@@ -415,3 +415,15 @@ describe("keepalive", () => {
     expect(resolveConfig({ ...base, keepaliveIntervalMs: 30 * 60 * 1000 }, {}, noFile()).keepaliveIntervalMs).toBe(30 * 60 * 1000);
   });
 });
+
+describe("gatewayMatchGraceMs（精确匹配宽限）", () => {
+  const base = { appId: "a", appSecret: "b", logFile: false };
+  test("默认 3000ms", () => {
+    expect(resolveConfig(base, {}, noFile()).gatewayMatchGraceMs).toBe(3000);
+  });
+  test("可设为 0（子目录立即兜底）并夹取到 0–10000", () => {
+    expect(resolveConfig({ ...base, gatewayMatchGraceMs: 0 }, {}, noFile()).gatewayMatchGraceMs).toBe(0);
+    expect(resolveConfig({ ...base, gatewayMatchGraceMs: -5 }, {}, noFile()).gatewayMatchGraceMs).toBe(0);
+    expect(resolveConfig({ ...base, gatewayMatchGraceMs: 999999 }, {}, noFile()).gatewayMatchGraceMs).toBe(10_000);
+  });
+});

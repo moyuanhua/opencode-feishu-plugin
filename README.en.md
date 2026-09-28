@@ -389,6 +389,7 @@ Without this relay, any clarifying question would stall the Feishu session forev
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | Log level (secrets are never logged, only their presence) |
 | `logFile` | string \| boolean | — | `true` writes `<configDir>/plugins/feishu.log`. **Plugin stderr is discarded in service mode — enable this when debugging** |
 | `gatewayLocation` | string | — | Only start the gateway in this location **or any of its subdirectories**. `~` is expanded and relative paths / trailing slashes are normalized. **Set this to your usual working directory** to avoid multiple long connections; leave empty to run in every location |
+| `gatewayMatchGraceMs` | number | `3000` | Grace window for **exact-match priority**: a subdirectory candidate waits this long and yields if a location equal to `gatewayLocation` shows up (`0` = no wait, subdirectory takes over immediately) |
 | `approvalTtlMs` | number | `600000` | Approval token / card TTL |
 | `staleExecutionMs` | number | `300000` | Watchdog threshold: an execution with no event for this long is treated as stuck and auto-interrupted; a queue stuck this long without `execution.started` also triggers a notice. Clamped to 1–60 minutes |
 | `maxResourcesShown` | number | `8` | Max resource lines shown on an approval card |

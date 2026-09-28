@@ -61,6 +61,14 @@ export interface ResolvedConfig {
    * 指定本机工作目录（如 `/home/you/projects`）即可收敛为唯一实例。
    */
   readonly gatewayLocation: string | undefined;
+  /**
+   * 网关「精确匹配」宽限窗口（毫秒，默认 3000，夹取 0–10000）。
+   *
+   * `gatewayLocation` 允许子目录兜底（修「填父目录不生效」），但精确匹配应优先：
+   * 子目录候选先等该窗口，窗口内出现 `here === gatewayLocation` 的实例就让位。
+   * 设为 0 = 不等待（子目录立即兜底，等价旧行为）。
+   */
+  readonly gatewayMatchGraceMs: number;
   /** 审批 token / 卡片有效期。 */
   readonly approvalTtlMs: number;
   /**
@@ -227,6 +235,7 @@ export function resolveConfig(
   const domain = merged.domain === "lark" ? "lark" : "feishu";
   const logFile = resolveLogFile(merged.logFile, env, deps);
   const gatewayLocation = normalizeGatewayLocation(asString(merged.gatewayLocation));
+  const gatewayMatchGraceMs = clamp(asNumber(merged.gatewayMatchGraceMs, 3000), 0, 10_000);
 
   const signSecretRaw = expandEnv(asString(merged.signSecret), env);
   const signSecret =
@@ -260,6 +269,7 @@ export function resolveConfig(
     logLevel,
     logFile,
     gatewayLocation,
+    gatewayMatchGraceMs,
     approvalTtlMs,
     staleExecutionMs,
     signSecret,

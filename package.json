@@ -1,6 +1,6 @@
 {
   "name": "opencode-feishu-plugin",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "description": "Feishu/Lark plugin for OpenCode V2 — single-user topics as sessions, in-card permission approvals, streaming cards. Minimal permissions, no public endpoint.",
   "type": "module",
   "main": "index.js",

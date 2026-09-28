@@ -1,5 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { trackGatewayLocationSeen } from "../src/lifecycle.js";
+import {
+  markExactGateway,
+  releaseProcessGuard,
+  resetExactGateway,
+  trackGatewayLocationSeen,
+  waitForExactGateway,
+} from "../src/lifecycle.js";
 
 /**
  * gatewayLocation 兜底告警（issue：配置匹配失败时静默禁用整个网关）。
@@ -97,5 +103,43 @@ describe("trackGatewayLocationSeen", () => {
     const message = warn.mock.calls[0]![0] as string;
     expect(message).toContain("/a");
     expect(message).toContain("/b");
+  });
+});
+
+describe("网关精确匹配选举（子目录仅兜底）", () => {
+  afterEach(() => {
+    resetExactGateway();
+    vi.useRealTimers();
+  });
+
+  test("精确匹配就任 → 等待中的子目录候选立即让位", async () => {
+    const pending = waitForExactGateway(5000);
+    markExactGateway();
+    expect(await pending).toBe(true);
+  });
+
+  test("宽限窗口内无精确匹配 → 子目录兜底", async () => {
+    vi.useFakeTimers();
+    const pending = waitForExactGateway(1000);
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(await pending).toBe(false);
+  });
+
+  test("精确匹配已就任 → 后续候选立即让位", async () => {
+    markExactGateway();
+    expect(await waitForExactGateway(1000)).toBe(true);
+  });
+
+  test("graceMs=0 → 不等待，直接兜底", async () => {
+    expect(await waitForExactGateway(0)).toBe(false);
+  });
+
+  test("releaseProcessGuard 重置选举（网关停止后子目录可再接管）", async () => {
+    vi.useFakeTimers();
+    markExactGateway();
+    releaseProcessGuard();
+    const pending = waitForExactGateway(1000);
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(await pending).toBe(false);
   });
 });

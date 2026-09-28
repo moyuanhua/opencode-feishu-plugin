@@ -249,7 +249,8 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `recentDirsLimit` / `recentModelsLimit` | number | `5` | 表单「最近使用」条数（1–20） |
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | 日志级别 |
 | `logFile` | string \| boolean | — | `true` = 写 `<configDir>/plugins/feishu.log`；服务模式建议开启 |
-| `gatewayLocation` | string | — | 只在该 location（或其**子目录**）启动网关；`~` 自动展开、相对路径/尾斜杠会归一化。留空 = 任意 location 生效 |
+| `gatewayLocation` | string | — | 只在该 location（或其**子目录**兜底）启动网关；`~` 自动展开、相对路径/尾斜杠会归一化。留空 = 任意 location 生效 |
+| `gatewayMatchGraceMs` | number | `3000` | **精确匹配优先**的宽限窗口：子目录候选先等这么久，出现 `here === gatewayLocation` 就让位（0 = 不等待，子目录立即兜底） |
 | `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
 | `staleExecutionMs` | number | `300000` | 看门狗阈值（夹取 1–60 分钟） |
 | `maxResourcesShown` | number | `8` | 审批卡最多展示的资源行数 |

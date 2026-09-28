@@ -66,6 +66,74 @@ export function releaseProcessGuard(): void {
   const g = globalThis as unknown as Record<symbol, GuardSlot | undefined>;
   const slot = g[GUARD_SLOT];
   if (slot) slot.active = false;
+  // 网关停止 → 允许重新选举（子目录兜底随时可再接管）。
+  resetExactGateway();
+}
+
+/**
+ * 网关「精确匹配优先」选举（P8.2）。
+ *
+ * 背景：`gatewayLocation` 兼容子目录（修「填父目录不生效」），但子目录 location
+ * （如 `~/.config/opencode` 之于 `/home/ubuntu`）可能抢先启动网关，导致网关落在
+ * 非预期 location。这里让**精确匹配**的实例立即就任；子目录候选先等一个宽限窗口，
+ * 窗口内出现精确匹配就让位，否则作为兜底接管。
+ */
+const GATEWAY_EXACT_SLOT = Symbol.for("opencode-feishu-v2/gateway-exact");
+
+interface GatewayElectionSlot {
+  /** 精确匹配实例是否已就任。 */
+  exact: boolean;
+  /** 等待中的子目录候选。 */
+  readonly resolvers: Array<(exactSeen: boolean) => void>;
+  /** 宽限窗口定时器（全局仅一个）。 */
+  timer?: ReturnType<typeof setTimeout>;
+}
+
+function electionSlot(): GatewayElectionSlot {
+  const g = globalThis as unknown as Record<symbol, GatewayElectionSlot | undefined>;
+  let slot = g[GATEWAY_EXACT_SLOT];
+  if (!slot) {
+    slot = { exact: false, resolvers: [] };
+    g[GATEWAY_EXACT_SLOT] = slot;
+  }
+  return slot;
+}
+
+/** 精确匹配实例就任（负责网关）。 */
+export function markExactGateway(): void {
+  const slot = electionSlot();
+  slot.exact = true;
+  if (slot.timer) {
+    clearTimeout(slot.timer);
+    slot.timer = undefined;
+  }
+  for (const resolve of slot.resolvers.splice(0)) resolve(true);
+}
+
+/** 网关停止时重置（由 `releaseProcessGuard` 调用）。 */
+export function resetExactGateway(): void {
+  const g = globalThis as unknown as Record<symbol, GatewayElectionSlot | undefined>;
+  const slot = g[GATEWAY_EXACT_SLOT];
+  if (slot) slot.exact = false;
+}
+
+/**
+ * 子目录候选等待「精确匹配出现」或宽限窗口结束。
+ * 返回 `true` = 精确匹配已就任（本实例应跳过）；`false` = 轮到自己兜底。
+ */
+export function waitForExactGateway(graceMs: number): Promise<boolean> {
+  const slot = electionSlot();
+  if (slot.exact) return Promise.resolve(true);
+  if (!(graceMs > 0)) return Promise.resolve(false);
+  return new Promise<boolean>((resolve) => {
+    slot.resolvers.push(resolve);
+    if (!slot.timer) {
+      slot.timer = setTimeout(() => {
+        slot.timer = undefined;
+        for (const r of slot.resolvers.splice(0)) r(false);
+      }, graceMs);
+    }
+  });
 }
 
 /** 仅供诊断日志：当前 realm 是否已被占用。 */

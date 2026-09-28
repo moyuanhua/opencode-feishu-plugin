@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from "vitest";
+import { markExactGateway, resetExactGateway } from "../src/lifecycle.js";
 
 const h = vi.hoisted(() => ({
   startGateway: vi.fn(() => ({ stop: vi.fn() })),
@@ -19,7 +20,9 @@ async function loadPlugin() {
 }
 
 /** 假 ctx：长连接/事件订阅全部可控，不触碰任何网络或生产文件。 */
-function makeCtx(overrides: { directory?: string; gatewayLocation?: string; logLevel?: string } = {}) {
+function makeCtx(
+  overrides: { directory?: string; gatewayLocation?: string; logLevel?: string; gatewayMatchGraceMs?: number } = {},
+) {
   return {
     location: { directory: overrides.directory ?? "/home/ubuntu" },
     options: {
@@ -30,6 +33,7 @@ function makeCtx(overrides: { directory?: string; gatewayLocation?: string; logL
       logFile: false,
       logLevel: overrides.logLevel ?? "error",
       ...(overrides.gatewayLocation ? { gatewayLocation: overrides.gatewayLocation } : {}),
+      ...(overrides.gatewayMatchGraceMs !== undefined ? { gatewayMatchGraceMs: overrides.gatewayMatchGraceMs } : {}),
     },
     storage: {
       get: async () => undefined,
@@ -121,6 +125,7 @@ describe("进程级 setup 幂等", () => {
 describe("gatewayLocation 门控", () => {
   beforeEach(() => {
     h.startGateway.mockClear();
+    resetExactGateway();
     process.env.OPENCODE_CONFIG_DIR = "/tmp/opencode/__feishu_v2_nonexistent__";
   });
 
@@ -136,10 +141,33 @@ describe("gatewayLocation 门控", () => {
   test("here 位于 gatewayLocation 之下（子目录）→ 启动", async () => {
     const plugin = await loadPlugin();
     const cleanup = (await plugin.setup(
-      makeCtx({ directory: "/home/ubuntu/work/repo-b", gatewayLocation: "/home/ubuntu/work" }) as never,
+      makeCtx({
+        directory: "/home/ubuntu/work/repo-b",
+        gatewayLocation: "/home/ubuntu/work",
+        gatewayMatchGraceMs: 0,
+      }) as never,
     )) as () => Promise<void>;
     expect(h.startGateway).toHaveBeenCalledTimes(1);
     await cleanup();
+  });
+
+  test("精确匹配已就任 → 子目录实例让位（不启动网关）", async () => {
+    markExactGateway();
+    const plugin = await loadPlugin();
+    const cleanup = (await plugin.setup(
+      makeCtx({ directory: "/home/ubuntu/work", gatewayLocation: "/home/ubuntu", gatewayMatchGraceMs: 50 }) as never,
+    )) as () => Promise<void>;
+    expect(h.startGateway).not.toHaveBeenCalled();
+    await cleanup!();
+  });
+
+  test("宽限期结束仍无精确匹配 → 子目录兜底启动", async () => {
+    const plugin = await loadPlugin();
+    const cleanup = (await plugin.setup(
+      makeCtx({ directory: "/home/ubuntu/work", gatewayLocation: "/home/ubuntu", gatewayMatchGraceMs: 0 }) as never,
+    )) as () => Promise<void>;
+    expect(h.startGateway).toHaveBeenCalledTimes(1);
+    await cleanup!();
   });
 
   test("here 不在 gatewayLocation 之下 → 不启动", async () => {
