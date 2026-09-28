@@ -49,7 +49,7 @@ class FakeSender implements FeishuSender {
     return undefined;
   }
 
-  async deleteMessage(): Promise<void> {}
+  async deleteMessage(): Promise<{ ok: boolean }> { return { ok: true }; }
 }
 
 const cardText = (card: object): string => JSON.stringify(card);

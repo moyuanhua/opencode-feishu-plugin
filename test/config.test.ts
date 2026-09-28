@@ -397,3 +397,21 @@ describe("gatewayLocation", () => {
     expect(cfg.gatewayLocation).toBe("/tmp/opencode-feishu-v2/__definitely_missing__");
   });
 });
+
+describe("keepalive", () => {
+  const base = { appId: "a", appSecret: "b", logFile: false };
+  test("默认开启、间隔 20 分钟", () => {
+    const cfg = resolveConfig(base, {}, noFile());
+    expect(cfg.keepalive).toBe(true);
+    expect(cfg.keepaliveIntervalMs).toBe(20 * 60 * 1000);
+  });
+  test("可关闭", () => {
+    const cfg = resolveConfig({ ...base, keepalive: false }, {}, noFile());
+    expect(cfg.keepalive).toBe(false);
+  });
+  test("间隔夹取到 5–45 分钟", () => {
+    expect(resolveConfig({ ...base, keepaliveIntervalMs: 1000 }, {}, noFile()).keepaliveIntervalMs).toBe(5 * 60 * 1000);
+    expect(resolveConfig({ ...base, keepaliveIntervalMs: 99 * 60 * 1000 }, {}, noFile()).keepaliveIntervalMs).toBe(45 * 60 * 1000);
+    expect(resolveConfig({ ...base, keepaliveIntervalMs: 30 * 60 * 1000 }, {}, noFile()).keepaliveIntervalMs).toBe(30 * 60 * 1000);
+  });
+});

@@ -256,6 +256,29 @@ export class SessionMap {
     await this.safeSet(`${SESSION_KEY_PREFIX}${sessionID}`, serializeSession(link));
   }
 
+  /**
+   * 为**外部来源**的会话（TUI/Web，无飞书映射）补一条会话索引（P7.5）。
+   *
+   * `/ls` 列出 opencode 全量会话后，用户「进入话题」的会话需要审批投递、
+   * 跨 location 路由（`dir`）与失败通知的目标。已存在则只补缺失字段，
+   * **不覆盖** perm/gateMode/model 等既有元数据。
+   */
+  async ensureSessionLink(
+    sessionID: string,
+    input: { readonly chatId: string; readonly openId: string; readonly directory?: string },
+  ): Promise<void> {
+    if (!sessionID || !input.chatId) return;
+    const existing = await this.resolveBySession(sessionID);
+    const link: SessionLink = {
+      ...existing,
+      chatId: input.chatId,
+      openId: input.openId,
+      ...(input.directory ? { dir: input.directory } : {}),
+    };
+    this.remember(sessionID, link);
+    await this.safeSet(`${SESSION_KEY_PREFIX}${sessionID}`, serializeSession(link));
+  }
+
   /** 切换当前会话；会话不属于该 chat 时返回 false。 */
   async setActive(chatId: string, sessionID: string): Promise<boolean> {
     const record = await this.loadChat(chatId);

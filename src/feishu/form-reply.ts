@@ -74,7 +74,8 @@ export async function discoverLocalService(
   };
 }
 
-function authHeaders(service: LocalService): Record<string, string> {
+/** 构造本机服务的 Basic 认证头（无口令时返回空）。供其它本机 HTTP 兜底模块复用。 */
+export function authHeaders(service: LocalService): Record<string, string> {
   if (!service.password) return {};
   const token = Buffer.from(`opencode:${service.password}`, "utf8").toString("base64");
   return { authorization: `Basic ${token}` };

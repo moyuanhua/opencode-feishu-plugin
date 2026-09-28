@@ -20,7 +20,9 @@ import {
   isComplete,
   parseFormAction,
   normalizeForm,
+  type FormField,
   type FormLike,
+  type FormOutcome,
   type FormValue,
 } from "./forms.js";
 
@@ -181,7 +183,8 @@ export class FormRelay {
     }
 
     const field = pending.form.fields.find((f) => f.key === fieldKey);
-    pending.answers[fieldKey] = coerceText(field?.type, text);
+    // 直接回复=手动作答：能对上选项就用选项值，否则用原文（服务端校验）。
+    pending.answers[fieldKey] = coerceAnswer(field, text);
     pending.awaitingField = undefined;
     this.awaiting.delete(sessionID);
 
@@ -211,7 +214,7 @@ export class FormRelay {
     }
     this.awaiting.delete(sessionID ?? pending.sessionID);
     this.forms.delete(id);
-    void this.patch(pending, buildFormResolvedCard(pending.form, pending.answers, "answered"));
+    void this.finish(pending, "answered");
   }
 
   /** 处理 `form.cancelled`。 */
@@ -222,7 +225,7 @@ export class FormRelay {
     if (!pending) return;
     this.awaiting.delete(sessionID ?? pending.sessionID);
     this.forms.delete(id);
-    void this.patch(pending, buildFormResolvedCard(pending.form, pending.answers, "cancelled"));
+    void this.finish(pending, "cancelled");
   }
 
   dispose(): void {
@@ -244,7 +247,15 @@ export class FormRelay {
         formID: pending.form.id,
         error: errorMessage(err),
       });
+      // 失败：保留卡片 + 重新进入「等待文字回答」状态，允许用户直接重答。
       pending.settled = false;
+      const missing = pending.form.fields.find(
+        (f) => f.hidden !== true && pending.answers[f.key] === undefined,
+      );
+      if (missing) {
+        pending.awaitingField = missing.key;
+        this.awaiting.set(pending.sessionID, pending.form.id);
+      }
       this.forms.set(pending.form.id, pending);
       await this.patch(
         pending,
@@ -252,9 +263,23 @@ export class FormRelay {
       );
       return;
     }
-    // 成功：form.replied 事件会做最终收敛；这里先乐观更新，避免卡片停在待填态。
+    // 成功：优先撤回表单卡（用户要求作答后不再残留待填卡）；撤回失败降级为结果卡。
     this.forms.delete(pending.form.id);
-    await this.patch(pending, buildFormResolvedCard(pending.form, pending.answers, "answered"));
+    await this.finish(pending, "answered");
+  }
+
+  /**
+   * 表单收敛：**优先撤回卡片**（作答/取消后不再残留待填卡），撤回失败（超时限/无权限）
+   * 才降级 patch 成结果卡，避免卡片永久停在待填态。
+   */
+  private async finish(pending: PendingForm, outcome: FormOutcome): Promise<void> {
+    if (this.disposed) return;
+    const res = await this.deps.sender.deleteMessage(pending.messageId);
+    if (res.ok) {
+      this.deps.log.debug("表单卡已撤回", { formID: pending.form.id, outcome });
+      return;
+    }
+    await this.patch(pending, buildFormResolvedCard(pending.form, pending.answers, outcome));
   }
 
   private async patch(pending: PendingForm, card: object): Promise<void> {
@@ -271,16 +296,60 @@ function isFormValue(value: unknown): value is FormValue {
   return Array.isArray(value) && value.every((x) => typeof x === "string");
 }
 
-/** number/integer 字段的自由文本答案做数值转换（非法则保留原文，交由服务端校验）。 */
-function coerceText(type: string | undefined, text: string): FormValue {
+/**
+ * 文本作答归一化（直接回复 = 手动作答）：
+ * - 能对上既有选项（value 或 label）→ 用选项 value；
+ * - boolean 支持中英文常见说法（是/否/yes/no/1/0…）；
+ * - number/integer 做数值转换（非法则保留原文，交由服务端校验）；
+ * - multiselect 按顿号/逗号/分号拆分为数组；
+ * - 其余原样作为**手动输入的选项**（服务端校验）。
+ */
+function coerceAnswer(field: FormField | undefined, text: string): FormValue {
   const trimmed = text.trim();
-  if (type === "number") {
-    const n = Number(trimmed);
-    return Number.isFinite(n) ? n : text;
+  if (!field) return trimmed;
+  switch (field.type) {
+    case "number": {
+      const n = Number(trimmed);
+      return trimmed !== "" && Number.isFinite(n) ? n : trimmed;
+    }
+    case "integer": {
+      const n = Number.parseInt(trimmed, 10);
+      return Number.isFinite(n) && String(n) === trimmed ? n : trimmed;
+    }
+    case "boolean": {
+      const parsed = parseBooleanText(trimmed);
+      return parsed === undefined ? trimmed : parsed;
+    }
+    case "multiselect": {
+      const parts = trimmed
+        .split(/[、,，;；\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      if (parts.length === 0) return trimmed;
+      return parts.map((p) => matchOption(field, p) ?? p);
+    }
+    default:
+      return matchOption(field, trimmed) ?? trimmed;
   }
-  if (type === "integer") {
-    const n = Number.parseInt(trimmed, 10);
-    return Number.isFinite(n) && String(n) === trimmed ? n : text;
-  }
-  return text;
+}
+
+/** 文本命中选项（value 或 label，忽略大小写）→ 返回选项 value。 */
+function matchOption(field: FormField, text: string): string | undefined {
+  if (!field.options?.length) return undefined;
+  const trimmed = text.trim();
+  const lower = trimmed.toLowerCase();
+  const hit = field.options.find(
+    (o) => o.value === trimmed || o.label.trim() === trimmed || o.label.trim().toLowerCase() === lower,
+  );
+  return hit?.value;
+}
+
+const TRUE_WORDS = new Set(["是", "对", "好", "可以", "允许", "确认", "同意", "yes", "y", "true", "1"]);
+const FALSE_WORDS = new Set(["否", "不", "不行", "拒绝", "取消", "不要", "no", "n", "false", "0"]);
+
+function parseBooleanText(text: string): boolean | undefined {
+  const lower = text.trim().toLowerCase();
+  if (TRUE_WORDS.has(lower)) return true;
+  if (FALSE_WORDS.has(lower)) return false;
+  return undefined;
 }

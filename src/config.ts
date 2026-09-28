@@ -139,6 +139,14 @@ export interface ResolvedConfig {
    * 超过本额度（按**整卡累计**）的表格会被**降级为围栏代码块**（内容不丢），默认留 1 个余量。
    */
   readonly cardMaxTables: number;
+  /**
+   * 位置保活（P8，默认 true）：周期性发一次带 location 的活动事件，
+   * 阻止 opencode 在 60 分钟空闲后回收 location 服务（会卸载插件、关闭飞书长连接）。
+   * 关闭后长时间空闲会导致机器人沉默，需外部保活兜底。
+   */
+  readonly keepalive: boolean;
+  /** 保活心跳间隔（默认 20 分钟，夹取 5–45 分钟；必须显著小于 opencode 的 60 分钟 TTL）。 */
+  readonly keepaliveIntervalMs: number;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -210,6 +218,12 @@ export function resolveConfig(
   const topicStatusInTitle = asBoolean(merged.topicStatusInTitle, false);
   const topicStatusThrottleMs = clamp(asNumber(merged.topicStatusThrottleMs, 1_000), 500, 10_000);
   const cardMaxTables = clamp(asNumber(merged.cardMaxTables, 4), 1, 5);
+  const keepalive = asBoolean(merged.keepalive, true);
+  const keepaliveIntervalMs = clamp(
+    asNumber(merged.keepaliveIntervalMs, 20 * 60 * 1000),
+    5 * 60 * 1000,
+    45 * 60 * 1000,
+  );
   const domain = merged.domain === "lark" ? "lark" : "feishu";
   const logFile = resolveLogFile(merged.logFile, env, deps);
   const gatewayLocation = normalizeGatewayLocation(asString(merged.gatewayLocation));
@@ -262,6 +276,8 @@ export function resolveConfig(
     topicStatusInTitle,
     topicStatusThrottleMs,
     cardMaxTables,
+    keepalive,
+    keepaliveIntervalMs,
   };
 }
 

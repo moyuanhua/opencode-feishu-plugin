@@ -32,6 +32,8 @@ import { StopController } from "./feishu/run-stop.js";
 import { startWatchdog } from "./feishu/watchdog.js";
 import { FormRelay, type FormReplyInput } from "./feishu/form-relay.js";
 import { replyFormOverHttp } from "./feishu/form-reply.js";
+import { listSessionsOverHttp } from "./session/session-list-http.js";
+import { startKeepalive } from "./session/keepalive.js";
 import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js";
 import { decideRoute } from "./feishu/routing.js";
@@ -592,6 +594,9 @@ async function start(
     sessionPageSize: config.sessionPageSize,
     threadRouting: config.threadRouting,
     listAllSessions: listAllSessionsRaw,
+    // `ctx.session.list` 在 V2 运行时未暴露 → 本机 HTTP `GET /api/session`
+    // 兜底列出全量会话（含 TUI/Web 来源）。
+    listAllSessionsHttp: () => listSessionsOverHttp({}, { log }),
     getSessionInfo: getSessionInfoRaw,
     resumeSummary: config.resumeSummary,
     resumeSummaryTimeoutMs: config.resumeSummaryTimeoutMs,
@@ -912,6 +917,22 @@ async function start(
     if (!res.ok) log.warn("卡死提示卡发送失败", { sessionID, error: res.error ?? "unknown" });
   }
 
+  /**
+   * 位置保活（P8）：opencode 的 `LocationActivity` 对每个 location 有 60 分钟
+   * 空闲 TTL，到期会回收 location 服务（卸载插件 → 飞书长连接被关闭），且此后
+   * 若无请求就不再恢复 → 机器人永久沉默。周期性发一次带 location 的事件即可保活。
+   */
+  const here = (ctx.location as { directory?: string } | undefined)?.directory;
+  const keepaliveDirectory = here ?? config.gatewayLocation;
+  const stopKeepalive =
+    config.keepalive && keepaliveDirectory
+      ? startKeepalive({
+          log,
+          directory: keepaliveDirectory,
+          intervalMs: config.keepaliveIntervalMs,
+        })
+      : undefined;
+
   log.info("飞书插件已就绪");
 
   let cleanedUp = false;
@@ -921,6 +942,7 @@ async function start(
     log.info("飞书插件卸载中");
     abort.abort();
     stopWatchdog();
+    stopKeepalive?.();
     await subscription.catch(() => undefined);
     runs.dispose();
     executions.clear();

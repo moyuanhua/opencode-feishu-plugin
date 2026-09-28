@@ -66,7 +66,8 @@ export interface FeishuSender {
   replyText(messageId: string, text: string, opts?: ReplyOptions): Promise<SendCardResult>;
   /** 读回消息的 thread/root/parent（reply 响应未直接给 thread_id 时的可靠兜底）。 */
   getMessageMeta(messageId: string): Promise<MessageMeta | undefined>;
-  deleteMessage(messageId: string): Promise<void>;
+  /** 撤回消息（表单卡收敛后清理）。失败返回错误，调用方可降级为 patch。 */
+  deleteMessage(messageId: string): Promise<{ ok: boolean; error?: string }>;
 }
 
 type LarkClient = InstanceType<typeof Lark.Client>;
@@ -235,11 +236,19 @@ export function createFeishuSender(client: LarkClient, log: Logger, options: Sen
     },
 
     async deleteMessage(messageId) {
-      if (!messageId) return;
+      if (!messageId) return { ok: false, error: "missing messageId" };
       try {
-        await client.im.message.delete({ path: { message_id: messageId } });
-      } catch {
-        // 尽力清理，失败无妨。
+        const res = await client.im.message.delete({ path: { message_id: messageId } });
+        if (res?.code && res.code !== 0) {
+          // 撤回有企业级时限：超时/无权限时降级处理，不打 warn 噪音。
+          log.debug("撤回消息失败", { messageId, code: res.code, msg: res.msg });
+          return { ok: false, error: `code=${res.code} msg=${res.msg ?? ""}` };
+        }
+        return { ok: true };
+      } catch (err) {
+        const error = describeLarkError(err);
+        log.debug("撤回消息异常", { messageId, error });
+        return { ok: false, error };
       }
     },
   };

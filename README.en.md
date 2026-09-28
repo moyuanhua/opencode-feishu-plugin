@@ -242,7 +242,7 @@ Besides sessions created from Feishu, you can **load any past OpenCode session v
   [▶️ Enter topic] [▶️ New topic] [⬅️ Prev] [➡️ Next] [➕ New session]
 ```
 
-- Data source is `ctx.session.list()` (**all** OpenCode sessions, sorted by `time.updated` desc), not just the plugin's mapping table; if unavailable it falls back to the mapping list and logs a `warn`.
+- Data source, in order: `ctx.session.list()` (usually **not exposed** in the V2 plugin runtime) → **local HTTP `GET /api/session`** (same machine, returns **all** sessions including ones created in the TUI/Web) → the plugin's mapping table. Entering an external session also binds a mapping for it so approvals/notifications keep working.
 - Each row shows: title (truncated), short id, relative time, `💬 topic-bound` (this session already has a topic mapping), `📍 <directory tail>`.
 - **Paging**: 8 per page by default (`sessionPageSize`, clamped 5–20); the bottom buttons flip pages (`{cmd:"list", page:N}`).
 - **"➕ New session"** opens the setup form card (same as `/new` `/form`) instead of creating a session directly.
@@ -358,9 +358,9 @@ The threshold is `staleExecutionMs` (default 5 minutes, clamped to 1–60 minute
 
 When the agent calls the `question` tool (or any form interaction), OpenCode creates a pending form that blocks execution. The plugin relays it as a Feishu card:
 
-- tap an option for single-choice fields; multi-field forms submit automatically once every field is filled;
-- for free-text fields, tap "✍️ reply directly" and send the answer as a message in the **same topic**;
-- the card resolves after submit/cancel.
+- **Two equivalent ways to answer**: tap an option button, or just **send text in the topic** (no need to tap "✍️ reply directly" first). Text is matched intelligently — option label/value are matched to their value, booleans accept 是/否 & yes/no & 1/0, numbers are parsed, multiselect splits on commas, anything else counts as a **manual answer**;
+- multi-field forms can be answered with a mix of taps and a text reply; they submit automatically once every field is filled;
+- **the card is recalled once answered/cancelled**; if it is past Feishu's recall window, it degrades to a "submitted/cancelled" result card instead.
 
 Without this relay, any clarifying question would stall the Feishu session forever and every later message would queue behind it — a common cause of "stuck sessions".
 
@@ -400,6 +400,26 @@ Without this relay, any clarifying question would stall the Feishu session forev
 | `topicStatusInTitle` | boolean | `false` | Add a status emoji prefix to the root card title (e.g. `🟡 session name`). Off by default: the topic name shows in the sidebar, and flipping it would be noisy |
 | `topicStatusThrottleMs` | number | `1000` | Min root-card status refresh interval (clamped 500–10000); patched only when the kind changes |
 | `cardMaxTables` | number | `4` | Max markdown tables kept per card (clamped 1–5); tables beyond it are degraded **cumulatively per card** into fenced code blocks (no content lost) to avoid Feishu 400 `code=230099` |
+| `keepalive` | boolean | `true` | **Location keep-alive**: periodically emits activity so OpenCode does not evict the idle Location after 60 minutes (which unloads the plugin and closes the Feishu long connection) |
+| `keepaliveIntervalMs` | number | `1200000` | Keep-alive interval (default 20 min, clamped 5–45); must stay well below OpenCode's hardcoded 60-minute TTL |
+
+### Location keep-alive (on by default)
+
+OpenCode **evicts idle Locations**, which unloads plugins and closes the Feishu long connection:
+
+| Mechanism | Where | Trigger | Effect |
+|---|---|---|---|
+| LayerMap `idleTimeToLive` | `packages/core/src/location-services.ts` (hardcoded `60 minutes`) | no **session-scoped request** for 60 min | Location services destroyed (silently) |
+| `@opencode/LocationActivity` | hardcoded 60 min as well | no **durable event carrying the location** for 60 min | interrupts active sessions, then `invalidate(location)`; logs `location services evicted` |
+
+Both dispose the plugin (closing the Feishu WS). **After that, no request means no recovery — the bot stays silent permanently** (see issues [#51343](https://github.com/anomalyco/opencode/issues/51343), [#48691](https://github.com/anomalyco/opencode/issues/48691), [#51828](https://github.com/anomalyco/opencode/issues/51828); the TTL has no config knob).
+
+The plugin ships a two-channel keep-alive (default every 20 min):
+
+1. **session-scoped `GET /api/session/{id}`** → `locations.get()` renews the LayerMap entry; if it was already evicted, this request **re-creates the Location** (plugin reloaded, WS reconnected);
+2. **create + immediately delete a probe session** → the `session.created` event renews `LocationActivity`.
+
+> **External safety net**: a plugin cannot revive itself once evicted (its timer dies with it), and it is not loaded after a **service restart** either. Add a cron / systemd timer that performs one session-scoped GET every 15–30 minutes (see `scripts/keepalive-feishu.sh`) to also cover restarts and long sleeps.
 
 ---
 
@@ -451,6 +471,7 @@ otherwise (per session preset) → ask ─────────────�
 | No plugin logs | Plugin stderr is discarded in service mode; set `logFile: true` and read `<configDir>/plugins/feishu.log` |
 | Main chat replies with a hint card | Expected: the main chat is management-only. Use `/new` and work inside a topic; set `threadRouting: false` to revert |
 | Session looks stuck and messages only queue | The watchdog auto-interrupts it after `staleExecutionMs` (default 5 min) and cancels the queue, then sends a notice card; you can also tap the card's "⏹ force stop" or send `/stop` |
+| **Bot goes completely silent after ~1 hour idle** (no "long connection started" in the log) | OpenCode evicted the idle Location (hardcoded 60-min TTL). The built-in keep-alive is on by default; if it still happens (service restart / long sleep / keep-alive disabled), one session-scoped request re-creates it: `opencode api get /api/session/{id}`, or set up the external cron described under "Location keep-alive" |
 | Switched `/model` but older messages still show the old model | Expected: a switch only affects **subsequent** replies; history keeps each message's model. The receipt / run-card footer / `/current` all show the read-back truth |
 
 ---

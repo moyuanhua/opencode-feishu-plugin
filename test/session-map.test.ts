@@ -342,3 +342,47 @@ describe("SessionMap 会话元数据（P6）", () => {
     expect(await map.setRootCard("ses_x", base)).toBe(false);
   });
 });
+
+describe("SessionMap.ensureSessionLink（P7.5 外部会话）", () => {
+  test("无映射的外部会话 → 补建索引（含 dir），且可被权限路由解析", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.ensureSessionLink("ses_ext", {
+      chatId: "oc_1",
+      openId: "ou_1",
+      directory: "/home/ubuntu/ai-lib-site",
+    });
+
+    expect(map.hasSession("ses_ext")).toBe(true);
+    expect(await map.resolveBySession("ses_ext")).toEqual({
+      chatId: "oc_1",
+      openId: "ou_1",
+      dir: "/home/ubuntu/ai-lib-site",
+    });
+    expect(storage.raw(`${SESSION_KEY_PREFIX}ses_ext`)).toEqual({
+      chatId: "oc_1",
+      openId: "ou_1",
+      dir: "/home/ubuntu/ai-lib-site",
+    });
+  });
+
+  test("已有映射 → 保留 perm/model 等元数据，只补缺失字段", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.addSession("oc_1", "ses_1", "一", "ou_1");
+    await map.setSessionMeta("ses_1", { perm: "edit", dir: "/old" });
+
+    await map.ensureSessionLink("ses_1", { chatId: "oc_1", openId: "ou_1", directory: "/new" });
+
+    const link = await map.resolveBySession("ses_1");
+    expect(link?.perm).toBe("edit");
+    expect(link?.dir).toBe("/new");
+  });
+
+  test("缺少 chatId/openId → 不创建", async () => {
+    const storage = new FakeStorage();
+    const map = new SessionMap(storage, log, { now: () => NOW });
+    await map.ensureSessionLink("ses_x", { chatId: "", openId: "ou_1" });
+    expect(map.hasSession("ses_x")).toBe(false);
+  });
+});

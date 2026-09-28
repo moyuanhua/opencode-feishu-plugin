@@ -161,6 +161,7 @@ opencode mcp list        # 顺带确认服务健康
 
 ![/sessions 会话列表卡：翻页、进入/再开、新建会话](image/sessions.png)
 
+- **数据源**：优先插件原生 `ctx.session.list()`（V2 运行时通常未暴露）→ **本机 HTTP `GET /api/session`**（与 opencode 同机，列出**全量**会话，含 TUI / Web 里开的）→ `SessionMap` 回退（仅机器人自己的会话）。进入外部会话时会补一条映射，审批 / 失败通知照常。
 - 每条显示标题 / 短 id / 相对时间 / 是否已绑话题 / 目录，当前会话标「← 当前」；已绑话题的按钮显示「▶️ 再开」，其余为「▶️ 进入」；底部可翻页 + 「➕ 新建会话」。
 - **「▶️ 进入话题」**：在主聊天流发一张恢复卡（含会话摘要），**直接回复这张卡**即续聊该历史会话。
 - `/resume [序号]` 跳过列表直达，同一套「发恢复卡 → 回复即续聊」流程。
@@ -210,7 +211,12 @@ opencode mcp list        # 顺带确认服务健康
 
 ### 表单 / 提问（`question` 工具）
 
-agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：单选题直接点选项，多字段逐项点选，自由文本点「✍️ 直接回复答案」后在话题里发一条消息。**没有这层转发，agent 一反问飞书会话就会永久卡住**——这也是会话卡死的常见原因。
+agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
+
+- **两种作答方式等价**：直接点选项按钮，或**直接在话题里发文字**（无需先点「✍️ 直接回复答案」）。文本会智能匹配——命中选项 label/value 用选项值，`boolean` 认「是/否、yes/no、1/0」，`number`/`integer` 转数值，多选按顿号/逗号拆分，其余视为**手动输入**。
+- 多字段表单可以混合作答：点几个按钮 + 补一条文字，填满即自动提交。
+- **作答 / 取消后卡片会被撤回**（不再残留待填卡）；若超出飞书撤回时限，降级为「已提交 / 已取消」结果卡。
+- **没有这层转发，agent 一反问飞书会话就会永久卡住**——这也是会话卡死的常见原因。
 
 ### 卡片内容守卫（表格超限降级）
 
@@ -255,6 +261,8 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：�
 | `topicStatusInTitle` | boolean | `false` | 是否在根卡标题加状态 emoji 前缀 |
 | `topicStatusThrottleMs` | number | `1000` | 根卡状态刷新最小间隔（500–10000） |
 | `cardMaxTables` | number | `4` | 单卡最多保留的 markdown 表格数（1–5）；超出按整卡累计降级为围栏代码块，避免飞书 400 `code=230099` |
+| `keepalive` | boolean | `true` | **位置保活**：周期性向 opencode 发一次活动，阻止 60 分钟空闲回收 location（会关掉飞书长连接、机器人失联） |
+| `keepaliveIntervalMs` | number | `1200000` | 保活间隔（默认 20 分钟，夹取 5–45）；必须显著小于 opencode 硬编码的 60 分钟 TTL |
 
 ---
 
@@ -274,6 +282,24 @@ permission.evaluate (插件 hook)               permission.asked (事件流)
 - **三重单人边界**：可用范围「仅本人」+ 不申请群权限 + 代码层 open_id 白名单。
 - **`always` 语义**：仅当请求带 `save[]` 时才持久化，否则等价于「允许一次」。
 
+### 位置保活（防空闲失联，默认开启）
+
+opencode 会**回收空闲的 location**，这会连带卸载插件、关闭飞书长连接：
+
+| 机制 | 位置 | 触发条件 | 表现 |
+|---|---|---|---|
+| LayerMap `idleTimeToLive` | `packages/core/src/location-services.ts`（硬编码 `60 minutes`） | 60 分钟内无**会话级请求** | location 服务被销毁（静默） |
+| `@opencode/LocationActivity` | 同为硬编码 60 分钟 | 60 分钟内无**带 location 的 durable 事件** | 先 interrupt 活动会话，再 `invalidate(location)`，日志 `location services evicted` |
+
+两者都会让插件被 dispose（飞书长连接关闭）。**此后若该 location 再无请求，插件不会自行恢复 → 机器人永久沉默**（官方 issue：[#51343](https://github.com/anomalyco/opencode/issues/51343)、[#51891→#48691](https://github.com/anomalyco/opencode/issues/48691)、[#51828](https://github.com/anomalyco/opencode/issues/51828)；TTL 无配置项）。
+
+插件内置双通道保活（默认每 20 分钟）：
+
+1. **会话级 `GET /api/session/{id}`** → `locations.get()` 续期 LayerMap；若已被回收，**该请求会重建 location**（插件重新加载、长连接重连）；
+2. **创建 + 立即删除探针会话** → `session.created` 事件续期 `LocationActivity`。
+
+> **外部兜底建议**：插件自身被回收后无法自救（定时器随插件销毁），且**服务重启后**也不会自动加载。可再加一条 cron / systemd timer 每 15–30 分钟做一次「会话级 GET」作为唤起器（`keepalive-feishu.sh` 示例见仓库 `scripts/`），覆盖重启 / 长时间休眠场景。
+
 ---
 
 ## 六、故障排查
@@ -291,6 +317,7 @@ permission.evaluate (插件 hook)               permission.asked (事件流)
 | 卡片内容被截断 | 飞书卡片上限约 30KB，超长会话丢弃卡片上最旧块（完整内容仍在会话里） |
 | 建会话后没看到话题 | 表单卡会改写为「✅ 已创建 · …」并附手动创建话题指引 |
 | 会话像卡死、发消息只排队 | 看门狗默认 5 分钟后自动中断；也可点「⏹ 强制停止」或发 `/stop` |
+| **空闲约 1 小时后机器人完全失联**（日志无「长连接已启动」） | opencode 回收了空闲 location（60 分钟硬编码 TTL）。内置保活默认开启；若仍发生（服务重启 / 长休眠 / 保活被关），用 `opencode api get /api/session/{id}` 任一本地会话即可唤起，或按上方「位置保活」配置外部 cron |
 | 看不到插件日志 | 服务模式下 stderr 被丢弃，设 `logFile: true` |
 | 切了 `/model` 但历史还是旧模型 | 预期行为：切换只影响后续回复，历史消息保留各自当时的模型 |
 

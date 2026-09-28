@@ -28,7 +28,14 @@ class FakeSender implements FeishuSender {
   async getMessageMeta(): Promise<undefined> {
     return undefined;
   }
-  async deleteMessage(): Promise<void> {}
+  readonly deleted: string[] = [];
+  /** 设为 true 模拟撤回失败（超时限/无权限）。 */
+  failDelete = false;
+  async deleteMessage(messageId: string): Promise<{ ok: boolean; error?: string }> {
+    if (this.failDelete) return { ok: false, error: "recall denied" };
+    this.deleted.push(messageId);
+    return { ok: true };
+  }
 }
 
 const FORM = {
@@ -98,7 +105,8 @@ describe("FormRelay.handleCardAction / consumeText", () => {
     expect(replies).toEqual([
       { sessionID: "ses_1", formID: "frm_1", answer: { q0: "a" }, directory: "/home/ubuntu/.config/opencode" },
     ]);
-    expect(sender.patched.length).toBeGreaterThanOrEqual(1);
+    // 作答完成 → 撤回表单卡（不再残留待填卡）。
+    expect(sender.deleted).toContain("om_card");
   });
 
   test("自由文本按钮 → 下一条话题文本作为答案", async () => {
@@ -139,20 +147,63 @@ describe("FormRelay.handleCardAction / consumeText", () => {
 });
 
 describe("FormRelay 事件收敛", () => {
-  test("form.replied → 卡片 patch 为已提交", async () => {
+  test("form.replied → 撤回表单卡", async () => {
     const { relay, sender } = setup();
+    await relay.onCreated({ form: FORM });
+    relay.onReplied({ id: "frm_1", sessionID: "ses_1", answer: { q0: "b" } });
+    await tick();
+    expect(sender.deleted).toContain("om_card");
+  });
+
+  test("form.cancelled → 撤回表单卡", async () => {
+    const { relay, sender } = setup();
+    await relay.onCreated({ form: FORM });
+    relay.onCancelled({ id: "frm_1", sessionID: "ses_1" });
+    await tick();
+    expect(sender.deleted).toContain("om_card");
+  });
+
+  test("撤回失败（超时限）→ 降级 patch 结果卡", async () => {
+    const { relay, sender } = setup();
+    sender.failDelete = true;
     await relay.onCreated({ form: FORM });
     relay.onReplied({ id: "frm_1", sessionID: "ses_1", answer: { q0: "b" } });
     await tick();
     const last = sender.patched.at(-1)!;
     expect((last.card as { header: { template: string } }).header.template).toBe("green");
   });
+});
 
-  test("form.cancelled → 卡片 patch 为已取消", async () => {
-    const { relay, sender } = setup();
+describe("FormRelay 文本作答归一化", () => {
+  test("直接回复文本命中选项 label → 用选项 value（无需先点按钮）", async () => {
+    const { relay, replies } = setup();
     await relay.onCreated({ form: FORM });
-    relay.onCancelled({ id: "frm_1", sessionID: "ses_1" });
+    // 不点任何按钮，直接发文字。
+    expect(relay.consumeText("ses_1", "深挖 Top5")).toBe(true);
     await tick();
-    expect((sender.patched.at(-1)!.card as { header: { template: string } }).header.template).toBe("grey");
+    expect(replies[0]!.answer).toEqual({ q0: "b" });
+  });
+
+  test("直接回复未命中选项 → 视为手动输入原文", async () => {
+    const { relay, replies } = setup();
+    await relay.onCreated({ form: FORM });
+    expect(relay.consumeText("ses_1", "聚焦可落地的小项目")).toBe(true);
+    await tick();
+    expect(replies[0]!.answer).toEqual({ q0: "聚焦可落地的小项目" });
+  });
+
+  test("boolean 字段文本（是/否）→ 布尔值", async () => {
+    const boolForm = {
+      id: "frm_b",
+      sessionID: "ses_b",
+      title: "确认",
+      metadata: { kind: "question" },
+      fields: [{ key: "ok", type: "boolean", title: "是否继续" }],
+    };
+    const { relay, replies } = setup();
+    await relay.onCreated({ form: boolForm });
+    expect(relay.consumeText("ses_b", "是")).toBe(true);
+    await tick();
+    expect(replies[0]!.answer).toEqual({ ok: true });
   });
 });

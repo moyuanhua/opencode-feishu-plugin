@@ -43,34 +43,74 @@ export async function cmdSessions(
 }
 
 /**
- * 加载全量会话列表：优先 `ctx.session.list()`（归一化），失败/形状不识别回退 SessionMap。
+ * 加载全量会话列表，三级数据源：
+ * 1. `ctx.session.list()`（插件原生域；V2 运行时通常未暴露）；
+ * 2. **本机 HTTP `GET /api/session`**（与 opencode 同机时可用，能拿到 TUI/Web 会话）；
+ * 3. `SessionMap` 映射表（只含机器人自己登记过的会话）。
  * 关键诊断日志：`列出全部会话` / `会话列表回退到 SessionMap`。
  */
 export async function loadSessionEntries(
   ctx: SessionPrimitives,
   chatId: string,
 ): Promise<SessionListEntry[]> {
-  if (ctx.deps.listAllSessions) {
-    try {
-      const raw = await ctx.deps.listAllSessions();
-      const normalized = normalizeSessionList(raw);
-      if (normalized) {
-        ctx.deps.log.info("列出全部会话", { count: normalized.length, source: "session.list" });
-        return normalized;
-      }
-      ctx.deps.log.warn("session.list 返回形状无法识别，回退 SessionMap 列表", { chatId });
-    } catch (err) {
-      ctx.deps.log.warn("session.list 调用失败，回退 SessionMap 列表", {
-        chatId,
-        error: errorMessage(err),
-      });
-    }
-  } else {
-    ctx.deps.log.warn("运行时未暴露 session.list，回退 SessionMap 列表", { chatId });
-  }
+  const viaApi = await loadViaSessionListApi(ctx, chatId);
+  if (viaApi) return viaApi;
+
+  const viaHttp = await loadViaHttp(ctx, chatId);
+  if (viaHttp) return viaHttp;
+
   const fallback = fallbackEntries(await ctx.deps.sessionMap.listSessions(chatId));
   ctx.deps.log.warn("会话列表回退到 SessionMap", { chatId, count: fallback.length });
   return fallback;
+}
+
+/** 数据源 1：`ctx.session.list()`。形状不识别/缺失/异常返回 undefined。 */
+async function loadViaSessionListApi(
+  ctx: SessionPrimitives,
+  chatId: string,
+): Promise<SessionListEntry[] | undefined> {
+  if (!ctx.deps.listAllSessions) {
+    ctx.deps.log.warn("运行时未暴露 session.list，尝试 HTTP 兜底", { chatId });
+    return undefined;
+  }
+  try {
+    const raw = await ctx.deps.listAllSessions();
+    const normalized = normalizeSessionList(raw);
+    if (normalized) {
+      ctx.deps.log.info("列出全部会话", { count: normalized.length, source: "session.list" });
+      return normalized;
+    }
+    ctx.deps.log.warn("session.list 返回形状无法识别，尝试 HTTP 兜底", { chatId });
+  } catch (err) {
+    ctx.deps.log.warn("session.list 调用失败，尝试 HTTP 兜底", {
+      chatId,
+      error: errorMessage(err),
+    });
+  }
+  return undefined;
+}
+
+/** 数据源 2：本机 HTTP `GET /api/session`（全量会话，含 TUI/Web 来源）。 */
+async function loadViaHttp(
+  ctx: SessionPrimitives,
+  chatId: string,
+): Promise<SessionListEntry[] | undefined> {
+  if (!ctx.deps.listAllSessionsHttp) return undefined;
+  try {
+    const raw = await ctx.deps.listAllSessionsHttp();
+    const normalized = normalizeSessionList(raw);
+    if (normalized) {
+      ctx.deps.log.info("列出全部会话", { count: normalized.length, source: "http" });
+      return normalized;
+    }
+    ctx.deps.log.warn("HTTP 会话列表形状无法识别，回退 SessionMap 列表", { chatId });
+  } catch (err) {
+    ctx.deps.log.warn("HTTP 会话列表调用失败，回退 SessionMap 列表", {
+      chatId,
+      error: errorMessage(err),
+    });
+  }
+  return undefined;
 }
 
 /** 把全量列表切成当前页并构建列表卡（含「已绑话题」标记）。 */
@@ -138,6 +178,15 @@ export async function enterSessionThread(
   const info = input.info;
   const link = await ctx.deps.sessionMap.resolveBySession(sessionID);
   const dir = info?.directory ?? link?.dir;
+  // 外部来源会话（TUI/Web 无映射）→ 补一条索引：审批投递 / 跨 location 路由 /
+  // 失败通知都需要它。已有映射（含用户建会话）保持不变。
+  if (!link) {
+    await ctx.deps.sessionMap.ensureSessionLink(sessionID, {
+      chatId,
+      openId: operatorOpenId,
+      ...(dir ? { directory: dir } : {}),
+    });
+  }
   const showSummary = (ctx.deps.resumeSummary ?? true) && Boolean(ctx.deps.summarizeSession);
   const onLimit = (report: CardLimitReport): void => {
     ctx.deps.log.warn("会话恢复卡内容超限，已降级", { sessionID, ...report });

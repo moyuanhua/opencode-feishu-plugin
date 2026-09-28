@@ -105,6 +105,11 @@ export interface SessionCommandsDeps {
    */
   readonly listAllSessions?: () => Promise<unknown>;
   /**
+   * 本机 HTTP `GET /api/session` 兜底（P7.5，`ctx.session.list` 未暴露时用）。
+   * 能拿到 **TUI/Web 等其它来源**的会话；返回原始 JSON 交给 `normalizeSessionList`。
+   */
+  readonly listAllSessionsHttp?: () => Promise<unknown>;
+  /**
    * 按 id 查询会话是否存在（P7，`ctx.session.get({sessionID})` 原始返回）。
    * 「进入话题」动作据此校验；缺失时视为无法校验（乐观放行）。
    */

@@ -43,7 +43,7 @@ class FakeSender implements FeishuSender {
   async getMessageMeta(): Promise<undefined> {
     return undefined;
   }
-  async deleteMessage(): Promise<void> {}
+  async deleteMessage(): Promise<{ ok: boolean }> { return { ok: true }; }
 }
 
 function setup(
