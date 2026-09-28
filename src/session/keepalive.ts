@@ -212,7 +212,13 @@ export interface GatewayWatchdogInput {
 /** 登记进程级看门狗。返回 true = 本次调用真正启动了定时器。 */
 export function ensureGatewayWatchdog(input: GatewayWatchdogInput): boolean {
   const g = globalThis as unknown as Record<symbol, WatchdogSlot | undefined>;
-  const existing = g[WATCHDOG_SLOT];
+  let existing = g[WATCHDOG_SLOT];
+  // 兼容旧版本（≤ v0.2.2）遗留的槽位：结构不同（无 state），直接清掉重建，
+  // 既避免 TypeError，也确保新行为生效。
+  if (existing && !existing.state) {
+    clearWatchdogSlot(existing);
+    existing = undefined;
+  }
   if (existing) {
     if (input.authoritative && existing.target !== input.directory) {
       existing.target = input.directory;
@@ -257,14 +263,19 @@ export function ensureGatewayWatchdog(input: GatewayWatchdogInput): boolean {
   return true;
 }
 
+/** 清掉进程级看门狗槽位（对旧版本结构也能安全处理）。 */
+function clearWatchdogSlot(slot: unknown): void {
+  const s = (slot ?? {}) as { timer?: unknown; initial?: unknown };
+  if (s.timer) clearInterval(s.timer as ReturnType<typeof setInterval>);
+  if (s.initial) clearTimeout(s.initial as ReturnType<typeof setTimeout>);
+  const g = globalThis as unknown as Record<symbol, WatchdogSlot | undefined>;
+  if (g[WATCHDOG_SLOT] === slot) delete g[WATCHDOG_SLOT];
+}
+
 /** 仅供测试：清空进程级看门狗状态。 */
 export function resetGatewayWatchdogForTest(): void {
   const g = globalThis as unknown as Record<symbol, WatchdogSlot | undefined>;
-  const slot = g[WATCHDOG_SLOT];
-  if (!slot) return;
-  clearInterval(slot.timer);
-  if (slot.initial) clearTimeout(slot.initial);
-  delete g[WATCHDOG_SLOT];
+  clearWatchdogSlot(g[WATCHDOG_SLOT]);
 }
 
 /**

@@ -195,3 +195,26 @@ describe("ensureGatewayWatchdog（进程级）", () => {
     expect(probe).toHaveBeenCalled();
   });
 });
+
+describe("ensureGatewayWatchdog 向后兼容", () => {
+  afterEach(() => {
+    resetGatewayWatchdogForTest();
+    vi.useRealTimers();
+  });
+
+  test("旧版本遗留槽位（无 state）→ 清理重建，不抛错", async () => {
+    vi.useFakeTimers();
+    // 模拟 v0.2.1/0.2.2 遗留的槽位结构（只有 target/timer/initial）。
+    const legacyTimer = setInterval(() => undefined, 1000);
+    (globalThis as unknown as Record<symbol, unknown>)[Symbol.for("opencode-feishu-v2/gateway-watchdog")] = {
+      target: "/old",
+      timer: legacyTimer,
+    };
+    const probe = vi.fn(async () => true);
+    expect(() =>
+      ensureGatewayWatchdog({ log, directory: "/gw", intervalMs: 1000, immediateDelayMs: 0, probe }),
+    ).not.toThrow();
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(probe).toHaveBeenCalledWith("/gw");
+  });
+});

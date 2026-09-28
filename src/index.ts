@@ -113,11 +113,16 @@ export default Plugin.define({
     if (config.keepalive) {
       const watchdogTarget = config.gatewayLocation ?? here;
       if (watchdogTarget) {
-        startedWatchdog = ensureGatewayWatchdog({
-          log,
-          directory: watchdogTarget,
-          intervalMs: config.keepaliveIntervalMs,
-        });
+        try {
+          startedWatchdog = ensureGatewayWatchdog({
+            log,
+            directory: watchdogTarget,
+            intervalMs: config.keepaliveIntervalMs,
+          });
+        } catch (err) {
+          // 保活是**辅助能力**：任何异常都绝不能影响插件加载（飞书长连接）。
+          log.warn("网关看门狗启动失败（已忽略）", { error: errorMessage(err) });
+        }
       }
     }
 
@@ -129,13 +134,17 @@ export default Plugin.define({
       const keepSink = matched || startedWatchdog;
       // 兜底告警：配了 gatewayLocation 但已加载的 location 均未命中时，延迟 warn（仅一次）。
       // 未命中的实例把日志流保留到判定结束，保证告警能写进日志文件。
-      trackGatewayLocationSeen({
-        here: here ?? "(unknown)",
-        expected: config.gatewayLocation,
-        matched,
-        warn: (message) => log.warn(message),
-        ...(keepSink ? {} : { onSettled: () => logSink?.close() }),
-      });
+      try {
+        trackGatewayLocationSeen({
+          here: here ?? "(unknown)",
+          expected: config.gatewayLocation,
+          matched,
+          warn: (message) => log.warn(message),
+          ...(keepSink ? {} : { onSettled: () => logSink?.close() }),
+        });
+      } catch (err) {
+        log.warn("网关位置跟踪失败（已忽略）", { error: errorMessage(err) });
+      }
       if (!matched) {
         log.debug("跳过非网关 location", { here, expected: config.gatewayLocation });
         if (!keepSink) logSink?.close();
@@ -946,13 +955,17 @@ async function start(
   const keepaliveDirectory = here ?? config.gatewayLocation;
   // 网关实例「权威」更新看门狗目标为自身实际目录（会话按该目录检索最准）。
   if (config.keepalive && keepaliveDirectory) {
-    ensureGatewayWatchdog({
-      log,
-      directory: keepaliveDirectory,
-      intervalMs: config.keepaliveIntervalMs,
-      authoritative: true,
-      immediateDelayMs: 0,
-    });
+    try {
+      ensureGatewayWatchdog({
+        log,
+        directory: keepaliveDirectory,
+        intervalMs: config.keepaliveIntervalMs,
+        authoritative: true,
+        immediateDelayMs: 0,
+      });
+    } catch (err) {
+      log.warn("网关看门狗登记失败（已忽略）", { error: errorMessage(err) });
+    }
   }
   const stopKeepalive =
     config.keepalive && keepaliveDirectory
