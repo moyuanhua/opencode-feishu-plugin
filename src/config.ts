@@ -6,9 +6,9 @@
  * - 只记录 secret 的「存在性」，绝不记录值。
  */
 import { createHash } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import type { LogLevel, PermissionGate, RawOptions } from "./types.js";
 
 /** 默认日志文件（相对 configDir）：`<configDir>/plugins/feishu.log`。 */
@@ -212,7 +212,7 @@ export function resolveConfig(
   const cardMaxTables = clamp(asNumber(merged.cardMaxTables, 4), 1, 5);
   const domain = merged.domain === "lark" ? "lark" : "feishu";
   const logFile = resolveLogFile(merged.logFile, env, deps);
-  const gatewayLocation = asString(merged.gatewayLocation).trim() || undefined;
+  const gatewayLocation = normalizeGatewayLocation(asString(merged.gatewayLocation));
 
   const signSecretRaw = expandEnv(asString(merged.signSecret), env);
   const signSecret =
@@ -320,6 +320,32 @@ function resolveConfigDir(env: NodeJS.ProcessEnv, explicit: string | undefined):
   const fromEnv = asString(env.OPENCODE_CONFIG_DIR).trim();
   if (fromEnv) return fromEnv;
   return join(homedir(), ".config", "opencode");
+}
+
+/**
+ * 归一化 `gatewayLocation`：展开 `~`、转绝对路径、去尾斜杠，并尽力解析软链。
+ *
+ * 根因（issue：gatewayLocation 静默失败）：运行时 `here` 是解析后的**绝对真实路径**
+ * （macOS 上 `/tmp` → `/private/tmp`），而配置侧原先只 `trim`，导致 `~/work`、相对路径、
+ * 尾斜杠、软链路径都无法命中 → 网关静默不启动、机器人无响应。这里与 `allowedRoots`
+ * 对齐口径（同样用 `resolve`，并额外 realpath）。
+ */
+export function normalizeGatewayLocation(raw: string): string | undefined {
+  const trimmed = raw.trim();
+  if (!trimmed) return undefined;
+  const expanded =
+    trimmed === "~"
+      ? homedir()
+      : trimmed.startsWith("~/")
+        ? join(homedir(), trimmed.slice(2))
+        : trimmed;
+  const resolved = resolve(expanded);
+  // 目录可能尚不存在：realpath 失败就退回 resolve 结果（仍比原值可用）。
+  try {
+    return realpathSync(resolved);
+  } catch {
+    return resolved;
+  }
 }
 
 /**

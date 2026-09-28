@@ -18,7 +18,7 @@ import { dirname } from "node:path";
 import { Plugin } from "@opencode/plugin";
 import { hasSecret, resolveConfig } from "./config.js";
 import { createLogger, errorMessage, maskId } from "./logger.js";
-import { acquireProcessGuard, releaseProcessGuard } from "./lifecycle.js";
+import { acquireProcessGuard, releaseProcessGuard, trackGatewayLocationSeen } from "./lifecycle.js";
 import { OwnerPolicy } from "./security/allowlist.js";
 import { ReplayGuard, signApproval, signAllowSession, signStop, verifyApproval, verifyAllowSession, verifyStop } from "./security/token.js";
 import { startGateway } from "./feishu/gateway.js";
@@ -37,7 +37,7 @@ import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js
 import { decideRoute } from "./feishu/routing.js";
 import { buildConsoleHintCard, buildStopNoticeCard } from "./feishu/cards.js";
 import { buildSessionOpenedCard, buildResumeCompactPendingCard } from "./feishu/session-cards.js";
-import { validateDirectory } from "./feishu/dirs.js";
+import { isUnder, validateDirectory } from "./feishu/dirs.js";
 import { WizardStore } from "./feishu/wizard.js";
 import { RecentStore } from "./feishu/recent.js";
 import {
@@ -103,11 +103,23 @@ export default Plugin.define({
     });
 
     // 网关门控：只让指定 location 的实例启动（跨 location 是独立 VM context，无法用进程内单例收敛）。
+    // 匹配语义：here 等于 gatewayLocation **或位于其下**（填仓库根目录即可覆盖子目录）。
     const here = (ctx.location as { directory?: string } | undefined)?.directory;
-    if (config.gatewayLocation && here !== config.gatewayLocation) {
-      log.debug("跳过非网关 location", { here, expected: config.gatewayLocation });
-      logSink?.close();
-      return async () => {};
+    if (config.gatewayLocation) {
+      const matched = Boolean(here) && isUnder(here!, config.gatewayLocation);
+      // 兜底告警：配了 gatewayLocation 但已加载的 location 均未命中时，延迟 warn（仅一次）。
+      // 未命中的实例把日志流保留到判定结束，保证告警能写进日志文件。
+      trackGatewayLocationSeen({
+        here: here ?? "(unknown)",
+        expected: config.gatewayLocation,
+        matched,
+        warn: (message) => log.warn(message),
+        ...(matched ? {} : { onSettled: () => logSink?.close() }),
+      });
+      if (!matched) {
+        log.debug("跳过非网关 location", { here, expected: config.gatewayLocation });
+        return async () => {};
+      }
     }
 
     if (!acquireProcessGuard()) {

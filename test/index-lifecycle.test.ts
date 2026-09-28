@@ -19,15 +19,17 @@ async function loadPlugin() {
 }
 
 /** 假 ctx：长连接/事件订阅全部可控，不触碰任何网络或生产文件。 */
-function makeCtx() {
+function makeCtx(overrides: { directory?: string; gatewayLocation?: string; logLevel?: string } = {}) {
   return {
+    location: { directory: overrides.directory ?? "/home/ubuntu" },
     options: {
       appId: "cli_test",
       appSecret: "secret_test",
       permissionGate: "off",
       stream: false,
       logFile: false,
-      logLevel: "error",
+      logLevel: overrides.logLevel ?? "error",
+      ...(overrides.gatewayLocation ? { gatewayLocation: overrides.gatewayLocation } : {}),
     },
     storage: {
       get: async () => undefined,
@@ -109,5 +111,43 @@ describe("进程级 setup 幂等", () => {
     await cleanup();
     await cleanup();
     expect(gatewayStop(0)).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * gatewayLocation 门控语义（issue：匹配失败时静默禁用整个网关）。
+ * 匹配放宽为「等于该目录或位于其下」，且未命中时延迟 warn。
+ */
+describe("gatewayLocation 门控", () => {
+  beforeEach(() => {
+    h.startGateway.mockClear();
+    process.env.OPENCODE_CONFIG_DIR = "/tmp/opencode/__feishu_v2_nonexistent__";
+  });
+
+  test("here 等于 gatewayLocation → 启动", async () => {
+    const plugin = await loadPlugin();
+    const cleanup = (await plugin.setup(
+      makeCtx({ directory: "/home/ubuntu/work", gatewayLocation: "/home/ubuntu/work" }) as never,
+    )) as () => Promise<void>;
+    expect(h.startGateway).toHaveBeenCalledTimes(1);
+    await cleanup();
+  });
+
+  test("here 位于 gatewayLocation 之下（子目录）→ 启动", async () => {
+    const plugin = await loadPlugin();
+    const cleanup = (await plugin.setup(
+      makeCtx({ directory: "/home/ubuntu/work/repo-b", gatewayLocation: "/home/ubuntu/work" }) as never,
+    )) as () => Promise<void>;
+    expect(h.startGateway).toHaveBeenCalledTimes(1);
+    await cleanup();
+  });
+
+  test("here 不在 gatewayLocation 之下 → 不启动", async () => {
+    const plugin = await loadPlugin();
+    const cleanup = (await plugin.setup(
+      makeCtx({ directory: "/private/tmp", gatewayLocation: "/home/ubuntu/work" }) as never,
+    )) as () => Promise<void>;
+    expect(h.startGateway).not.toHaveBeenCalled();
+    await cleanup!();
   });
 });

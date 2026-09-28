@@ -388,7 +388,7 @@ Without this relay, any clarifying question would stall the Feishu session forev
 | `recentModelsLimit` | number | `5` | Number of recent models (1–20) |
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | Log level (secrets are never logged, only their presence) |
 | `logFile` | string \| boolean | — | `true` writes `<configDir>/plugins/feishu.log`. **Plugin stderr is discarded in service mode — enable this when debugging** |
-| `gatewayLocation` | string | — | Only start the gateway in this location. OpenCode loads global plugins per location (separate VM contexts, so an in-process singleton cannot dedupe). **Set this to your usual working directory**, otherwise you get multiple long connections |
+| `gatewayLocation` | string | — | Only start the gateway in this location **or any of its subdirectories**. `~` is expanded and relative paths / trailing slashes are normalized. **Set this to your usual working directory** to avoid multiple long connections; leave empty to run in every location |
 | `approvalTtlMs` | number | `600000` | Approval token / card TTL |
 | `staleExecutionMs` | number | `300000` | Watchdog threshold: an execution with no event for this long is treated as stuck and auto-interrupted; a queue stuck this long without `execution.started` also triggers a notice. Clamped to 1–60 minutes |
 | `maxResourcesShown` | number | `8` | Max resource lines shown on an approval card |
@@ -440,7 +440,8 @@ otherwise (per session preset) → ask ─────────────�
 | `feishu.json` changes ignored | Confirm the path is `<configDir>/plugins/feishu.json`, then `opencode reload` |
 | Plugin never loads (no logs, no error) | npm path: make sure the package name is in the config `plugins` array (`opencode plugin list` shows it). Directory path: make sure `plugins/<name>/index.js` exists (OpenCode ignores `package.json#main`) |
 | Plugin code changes ignored | `opencode reload` only re-runs `setup`; it does **not** re-import the module from the same path. Upgrade with `opencode plugin update opencode-feishu-plugin`, or restart the service |
-| Multiple long connections / duplicate replies | Set `gatewayLocation` to your usual working directory |
+| Multiple long connections / duplicate replies | Set `gatewayLocation` to your usual working directory (subdirectories also match) |
+| **No response at all**, and no "long connection started" / "plugin ready" in the log | Almost always `gatewayLocation` does not match the directory where you actually opened opencode. The plugin emits a `warn` about "no loaded location matched" after ~2s; you can also set `logLevel: "debug"` to see `skipping non-gateway location`. If still stuck, leave `gatewayLocation` empty to rule it out |
 | No approval cards | The session did not originate from Feishu (no mapping); by design the plugin does not take it over |
 | "Invalid credentials" on button tap | Token expired (default 10 min) or the tapper is not allow-listed |
 | Card content truncated | Feishu card limit is ~30KB; the plugin truncates and marks it. Very long sessions drop the oldest blocks from the card (full content stays in the session) |

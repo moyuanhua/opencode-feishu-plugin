@@ -369,13 +369,31 @@ describe("gate helpers", () => {
 });
 
 describe("gatewayLocation", () => {
-  const base = { appId: "a", appSecret: "b" };
+  const base = { appId: "a", appSecret: "b", logFile: false };
   test("缺省为 undefined（所有 location 启动）", () => {
     const cfg = resolveConfig(base, {}, { configDir: "/nonexistent", readFile: () => "" });
     expect(cfg.gatewayLocation).toBeUndefined();
   });
-  test("显式配置时保留并 trim", () => {
-    const cfg = resolveConfig({ ...base, gatewayLocation: "  /home/ubuntu  " }, {}, { configDir: "/nonexistent", readFile: () => "" });
-    expect(cfg.gatewayLocation).toBe("/home/ubuntu");
+  test("空白配置视为未设置", () => {
+    const cfg = resolveConfig({ ...base, gatewayLocation: "   " }, {}, noFile());
+    expect(cfg.gatewayLocation).toBeUndefined();
+  });
+  test("归一化为绝对路径（去尾斜杠 / 相对路径）", () => {
+    // 使用必然存在的 homedir，保证 realpath 成功且结果稳定。
+    const home = homedir();
+    const cfg = resolveConfig({ ...base, gatewayLocation: `  ${home}/  ` }, {}, noFile());
+    expect(cfg.gatewayLocation).toBe(home);
+  });
+  test("展开 ~ 前缀", () => {
+    const cfg = resolveConfig({ ...base, gatewayLocation: "~" }, {}, noFile());
+    expect(cfg.gatewayLocation).toBe(homedir());
+  });
+  test("不存在的目录退回 resolve 结果（不抛错）", () => {
+    const cfg = resolveConfig(
+      { ...base, gatewayLocation: "/tmp/opencode-feishu-v2/__definitely_missing__" },
+      {},
+      noFile(),
+    );
+    expect(cfg.gatewayLocation).toBe("/tmp/opencode-feishu-v2/__definitely_missing__");
   });
 });

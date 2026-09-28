@@ -243,7 +243,7 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：�
 | `recentDirsLimit` / `recentModelsLimit` | number | `5` | 表单「最近使用」条数（1–20） |
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | 日志级别 |
 | `logFile` | string \| boolean | — | `true` = 写 `<configDir>/plugins/feishu.log`；服务模式建议开启 |
-| `gatewayLocation` | string | — | 只在该 location 启动网关（OpenCode 按 location 多次加载全局插件，建议设为常用工作目录） |
+| `gatewayLocation` | string | — | 只在该 location（或其**子目录**）启动网关；`~` 自动展开、相对路径/尾斜杠会归一化。留空 = 任意 location 生效 |
 | `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
 | `staleExecutionMs` | number | `300000` | 看门狗阈值（夹取 1–60 分钟） |
 | `maxResourcesShown` | number | `8` | 审批卡最多展示的资源行数 |
@@ -284,7 +284,8 @@ permission.evaluate (插件 hook)               permission.asked (事件流)
 | 改了 `feishu.json` 不生效 | 确认路径，然后 `opencode reload` |
 | 插件完全没被加载 | npm 方式确认包名在 `plugins` 数组；目录方式确认 `plugins/<名>/index.js` 存在 |
 | 改了插件代码不生效 | `opencode reload` 不会重新 import 同路径模块；用 `opencode plugin update` 或重启服务 |
-| 出现多个长连接 / 重复回复 | 设置 `gatewayLocation` 为常用工作目录 |
+| 出现多个长连接 / 重复回复 | 设置 `gatewayLocation` 为常用工作目录（其子目录也会命中） |
+| **完全无响应**，且日志中没有任何「长连接已启动」/「飞书插件已就绪」 | 多半是 `gatewayLocation` 与实际打开 opencode 的目录不匹配。插件会在延迟约 2 秒后用 `warn` 打出「已加载的 location 均未命中」；也可临时设 `logLevel: "debug"` 查看 `跳过非网关 location`。确认无误仍无响应就先**留空** `gatewayLocation` 排除该项 |
 | 审批卡收不到 | 该会话不是从飞书发起的（无映射），插件按设计不接管 |
 | 点按钮提示凭证无效 | token 过期（默认 10 分钟）或点击者不在白名单 |
 | 卡片内容被截断 | 飞书卡片上限约 30KB，超长会话丢弃卡片上最旧块（完整内容仍在会话里） |
