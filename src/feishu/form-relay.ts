@@ -88,7 +88,8 @@ export class FormRelay {
       return;
     }
 
-    this.forms.set(form.id, {
+    const firstVisible = form.fields.find((f) => f.hidden !== true);
+    const pending: PendingForm = {
       form,
       sessionID: form.sessionID,
       chatId: link.chatId,
@@ -96,12 +97,21 @@ export class FormRelay {
       ...(link.dir ? { directory: link.dir } : {}),
       answers: {},
       settled: false,
-    });
+      // 自动进入「等待文字回答」状态：用户直接发文字即可作为答案，
+      // 无需先点「直接回复答案」按钮。第一个可见字段作为默认答案字段。
+      ...(firstVisible ? { awaitingField: firstVisible.key } : {}),
+    };
+    this.forms.set(form.id, pending);
+    // 自动设置 awaiting，让 consumeText 能捕获用户直接发送的文字。
+    if (firstVisible) {
+      this.awaiting.set(form.sessionID, form.id);
+    }
     this.deps.log.info("表单卡已发送", {
       formID: form.id,
       sessionID: form.sessionID,
       fieldCount: form.fields.length,
       isQuestion: form.metadata?.kind === "question",
+      awaitingField: firstVisible?.key,
     });
   }
 
@@ -138,8 +148,14 @@ export class FormRelay {
     const value: FormValue =
       field?.type === "multiselect" && !Array.isArray(parsed.v) ? [String(parsed.v)] : parsed.v;
     pending.answers[parsed.k] = value;
-    pending.awaitingField = undefined;
-    this.awaiting.delete(pending.sessionID);
+    // 自动更新 awaitingField 为下一个未填字段，让用户可以继续用文字回答。
+    const nextField = pending.form.fields.find((f) => f.hidden !== true && pending.answers[f.key] === undefined);
+    pending.awaitingField = nextField?.key;
+    if (pending.awaitingField) {
+      this.awaiting.set(pending.sessionID, pending.form.id);
+    } else {
+      this.awaiting.delete(pending.sessionID);
+    }
 
     if (isComplete(pending.form, pending.answers)) {
       pending.settled = true;

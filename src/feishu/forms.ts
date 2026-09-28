@@ -216,8 +216,8 @@ export function buildFormCard(
   });
   const hints: string[] = [];
   if (opts.notice) hints.push(opts.notice);
-  if (missing.length > 0 && visible.length > 1) hints.push(`还需回答：${missing.join("、")}`);
-  else if (missing.length > 0) hints.push("请点击上面的选项，或点「直接回复答案」后发言。");
+  if (missing.length > 0 && visible.length > 1) hints.push(`还需回答：${missing.join("、")}（可直接发文字回答）`);
+  else if (missing.length > 0) hints.push("可直接发文字回答，或点上方选项。");
   if (hints.length > 0) elements.push({ tag: "markdown", content: truncateCardContent(hints.join("\n\n")) });
 
   const header = headerFor(form);
