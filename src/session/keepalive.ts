@@ -182,6 +182,11 @@ const WATCHDOG_SLOT = Symbol.for("opencode-feishu-v2/gateway-watchdog");
 interface WatchdogSlot {
   /** 目标 location（网关实例可权威更新）。 */
   target: string;
+  /** 可变状态：热重载后刷新为最新实例的探测实现与日志，避免持有已关闭的日志流。 */
+  readonly state: {
+    probe: (directory: string) => Promise<boolean>;
+    log: Logger;
+  };
   timer: ReturnType<typeof setInterval>;
   /** 首次立即探测（服务重启后尽快唤起）。 */
   initial?: ReturnType<typeof setTimeout>;
@@ -213,6 +218,9 @@ export function ensureGatewayWatchdog(input: GatewayWatchdogInput): boolean {
       existing.target = input.directory;
       input.log.debug("网关看门狗目标更新为网关 location", { directory: input.directory });
     }
+    // 热重载：刷新探测实现与日志，避免定时器一直持有旧实例（日志流可能已关闭）。
+    existing.state.probe = input.probe ?? ((dir: string) => touchLocationOverHttp(dir, { log: input.log }));
+    existing.state.log = input.log;
     return false;
   }
 
@@ -220,16 +228,19 @@ export function ensureGatewayWatchdog(input: GatewayWatchdogInput): boolean {
   const clearIntervalImpl = input.clearIntervalImpl ?? clearInterval;
   const setTimeoutImpl = input.setTimeoutImpl ?? setTimeout;
   const clearTimeoutImpl = input.clearTimeoutImpl ?? clearTimeout;
-  const probe = input.probe ?? ((dir: string) => touchLocationOverHttp(dir, { log: input.log }));
 
   const slot: WatchdogSlot = {
     target: input.directory,
+    state: {
+      probe: input.probe ?? ((dir: string) => touchLocationOverHttp(dir, { log: input.log })),
+      log: input.log,
+    },
     timer: undefined as unknown as ReturnType<typeof setInterval>,
     initial: undefined,
   };
   const run = (): void => {
-    void probe(slot.target).catch((err) => {
-      input.log.debug("网关看门狗探测异常", { error: errorMessage(err) });
+    void slot.state.probe(slot.target).catch((err) => {
+      slot.state.log.debug("网关看门狗探测异常", { error: errorMessage(err) });
     });
   };
   const delay = input.immediateDelayMs ?? 3000;

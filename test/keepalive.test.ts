@@ -174,6 +174,17 @@ describe("ensureGatewayWatchdog（进程级）", () => {
     expect(probe).toHaveBeenCalledTimes(1);
   });
 
+  test("热重载：重复登记刷新探测实现（不再持有旧实例闭包）", async () => {
+    vi.useFakeTimers();
+    const oldProbe = vi.fn(async () => true);
+    ensureGatewayWatchdog({ log, directory: "/gw", intervalMs: 1000, immediateDelayMs: 0, probe: oldProbe });
+    const newProbe = vi.fn(async () => true);
+    ensureGatewayWatchdog({ log, directory: "/gw", intervalMs: 1000, immediateDelayMs: 0, probe: newProbe });
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(newProbe).toHaveBeenCalled();
+    expect(oldProbe).not.toHaveBeenCalled();
+  });
+
   test("探测失败不抛错", async () => {
     vi.useFakeTimers();
     const probe = vi.fn(async () => {
