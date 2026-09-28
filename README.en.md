@@ -360,6 +360,7 @@ When the agent calls the `question` tool (or any form interaction), OpenCode cre
 
 - **Two equivalent ways to answer**: tap an option button, or just **send text in the topic** (no need to tap "✍️ reply directly" first). Text is matched intelligently — option label/value are matched to their value, booleans accept 是/否 & yes/no & 1/0, numbers are parsed, multiselect splits on commas, anything else counts as a **manual answer**;
 - multi-field forms can be answered with a mix of taps and a text reply; they submit automatically once every field is filled;
+- **Option-only questions** (options present, custom input not allowed): you may reply with the **option number/letter** (e.g. `1`, `B`) or the option label. Any **other** text is treated as "you meant something else": the plugin **skips that form** and passes your message to the AI as a **normal message** instead of a bogus answer.
 - **the card is recalled once answered/cancelled**; if it is past Feishu's recall window, it degrades to a "submitted/cancelled" result card instead.
 
 Without this relay, any clarifying question would stall the Feishu session forever and every later message would queue behind it — a common cause of "stuck sessions".

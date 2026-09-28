@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   discoverLocalService,
+  cancelFormOverHttp,
   replyFormOverHttp,
   serviceStatePath,
 } from "../src/feishu/form-reply.js";
@@ -104,5 +105,42 @@ describe("replyFormOverHttp", () => {
         { log, fetchImpl: failing, discover: async () => ({ url: "http://127.0.0.1:3000" }) },
       ),
     ).rejects.toThrow(/HTTP 409/);
+  });
+});
+
+describe("cancelFormOverHttp", () => {
+  test("DELETE /form/{id} 并带目录头", async () => {
+    let seenUrl = "";
+    let seenMethod = "";
+    let seenDir = "";
+    await cancelFormOverHttp(
+      { sessionID: "ses_1", formID: "frm_1", directory: "/home/ubuntu" },
+      {
+        log: createLogger({ level: "error", sink: () => undefined }),
+        discover: async () => ({ url: "http://127.0.0.1:3000", password: "pw" }),
+        fetchImpl: (async (url: string, init?: RequestInit) => {
+          seenUrl = url;
+          seenMethod = init?.method ?? "";
+          seenDir = (init?.headers as Record<string, string>)?.["x-opencode-directory"] ?? "";
+          return new Response(null, { status: 204 });
+        }) as unknown as typeof fetch,
+      },
+    );
+    expect(seenMethod).toBe("DELETE");
+    expect(seenUrl).toContain("/api/session/ses_1/form/frm_1");
+    expect(seenDir).toBe("%2Fhome%2Fubuntu"); // 与 replyFormOverHttp 一致：目录头 URL 编码
+  });
+
+  test("失败时抛错", async () => {
+    await expect(
+      cancelFormOverHttp(
+        { sessionID: "ses_1", formID: "frm_1" },
+        {
+          log: createLogger({ level: "error", sink: () => undefined }),
+          discover: async () => ({ url: "http://127.0.0.1:3000" }),
+          fetchImpl: (async () => new Response("nope", { status: 500 })) as unknown as typeof fetch,
+        },
+      ),
+    ).rejects.toThrow(/表单取消失败/);
   });
 });

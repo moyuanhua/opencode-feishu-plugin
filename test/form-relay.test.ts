@@ -62,6 +62,7 @@ const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
 function setup(over: { link?: SessionLink | null; allowed?: boolean } = {}) {
   const sender = new FakeSender();
   const replies: FormReplyInput[] = [];
+  const cancels: Array<{ sessionID: string; formID: string; directory?: string }> = [];
   const relay = new FormRelay({
     sender,
     log: createLogger({ level: "error", sink: () => undefined }),
@@ -70,8 +71,11 @@ function setup(over: { link?: SessionLink | null; allowed?: boolean } = {}) {
     reply: async (input) => {
       replies.push(input);
     },
+    cancel: async (input) => {
+      cancels.push(input);
+    },
   });
-  return { relay, sender, replies };
+  return { relay, sender, replies, cancels };
 }
 
 describe("FormRelay.onCreated", () => {
@@ -205,5 +209,65 @@ describe("FormRelay 文本作答归一化", () => {
     expect(relay.consumeText("ses_b", "是")).toBe(true);
     await tick();
     expect(replies[0]!.answer).toEqual({ ok: true });
+  });
+});
+
+describe("FormRelay 纯选项题：非选项文本按普通消息处理", () => {
+  const OPTION_ONLY = {
+    id: "frm_opt",
+    sessionID: "ses_opt",
+    title: "选一个",
+    metadata: { kind: "question" },
+    fields: [
+      {
+        key: "q0",
+        type: "string",
+        title: "怎么访问服务器",
+        options: [
+          { value: "ssh", label: "生成 SSH 公钥给你加（推荐）" },
+          { value: "paste", label: "你代为执行并贴回输出" },
+        ],
+      },
+    ],
+  };
+
+  test("非选项文本 → 不作为答案，取消表单并返回 false（交由上层当 prompt）", async () => {
+    const { relay, replies, cancels, sender } = setup();
+    await relay.onCreated({ form: OPTION_ONLY });
+    expect(relay.consumeText("ses_opt", "我担心你会误删数据，怎么办？")).toBe(false);
+    await tick();
+    expect(replies).toHaveLength(0);
+    expect(cancels).toEqual([{ sessionID: "ses_opt", formID: "frm_opt", directory: "/home/ubuntu/.config/opencode" }]);
+    expect(sender.deleted).toContain("om_card");
+  });
+
+  test("回复序号（1）→ 命中第一个选项", async () => {
+    const { relay, replies } = setup();
+    await relay.onCreated({ form: OPTION_ONLY });
+    expect(relay.consumeText("ses_opt", "1")).toBe(true);
+    await tick();
+    expect(replies[0]!.answer).toEqual({ q0: "ssh" });
+  });
+
+  test("回复 label 原文 → 命中该选项", async () => {
+    const { relay, replies } = setup();
+    await relay.onCreated({ form: OPTION_ONLY });
+    expect(relay.consumeText("ses_opt", "你代为执行并贴回输出")).toBe(true);
+    await tick();
+    expect(replies[0]!.answer).toEqual({ q0: "paste" });
+  });
+
+  test("允许自填（custom=true）→ 任意文本仍是答案", async () => {
+    const custom = {
+      ...OPTION_ONLY,
+      id: "frm_custom",
+      sessionID: "ses_custom",
+      fields: [{ ...OPTION_ONLY.fields[0]!, custom: true }],
+    };
+    const { relay, replies } = setup();
+    await relay.onCreated({ form: custom });
+    expect(relay.consumeText("ses_custom", "我自定义的答案")).toBe(true);
+    await tick();
+    expect(replies[0]!.answer).toEqual({ q0: "我自定义的答案" });
   });
 });

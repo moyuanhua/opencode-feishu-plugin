@@ -85,6 +85,37 @@ export function authHeaders(service: LocalService): Record<string, string> {
  * 经本机 HTTP API 提交表单答复。
  * 与 TUI 行为对齐：`x-opencode-directory` 用 URL 编码（跨 location 会话必需）。
  */
+/**
+ * 取消（跳过）一个 pending form：用户用普通消息回复了选项题时，
+ * 需要先解除阻塞，再让这条消息作为普通 prompt 进入会话。
+ */
+export async function cancelFormOverHttp(
+  input: { readonly sessionID: string; readonly formID: string; readonly directory?: string },
+  deps: FormReplyDeps,
+): Promise<void> {
+  const discover = deps.discover ?? (() => discoverLocalService());
+  const doFetch = deps.fetchImpl ?? fetch;
+  const service = await discover();
+  if (!service) throw new Error("未发现本机 opencode 服务注册（service.json 缺失或损坏）");
+
+  const path = `/api/session/${encodeURIComponent(input.sessionID)}/form/${encodeURIComponent(input.formID)}`;
+  const headers: Record<string, string> = { ...authHeaders(service) };
+  if (input.directory) headers["x-opencode-directory"] = encodeURIComponent(input.directory);
+
+  const response = await doFetch(`${service.url}${path}`, {
+    method: "DELETE",
+    headers,
+    signal: AbortSignal.timeout(deps.timeoutMs ?? 8000),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    deps.log.debug("表单 HTTP 取消失败", { status: response.status, formID: input.formID });
+    throw new Error(
+      `表单取消失败 HTTP ${response.status}${detail ? `: ${detail.slice(0, 200)}` : ""}`,
+    );
+  }
+}
+
 export async function replyFormOverHttp(
   input: HttpFormReplyInput,
   deps: FormReplyDeps,

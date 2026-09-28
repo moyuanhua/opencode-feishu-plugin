@@ -37,7 +37,7 @@ import { createSessionRecovery, type CancelQueuedResult } from "./feishu/session
 import { StopController } from "./feishu/run-stop.js";
 import { startWatchdog } from "./feishu/watchdog.js";
 import { FormRelay, type FormReplyInput } from "./feishu/form-relay.js";
-import { replyFormOverHttp } from "./feishu/form-reply.js";
+import { cancelFormOverHttp, replyFormOverHttp } from "./feishu/form-reply.js";
 import { listSessionsOverHttp } from "./session/session-list-http.js";
 import { ensureGatewayWatchdog, startKeepalive } from "./session/keepalive.js";
 import { isP2PChat } from "./feishu/events.js";
@@ -303,6 +303,8 @@ async function start(
     getLink: (sessionID) => sessionMap.resolveBySession(sessionID),
     isAllowed: (openId) => owner.isAllowed(openId),
     reply: (input) => replyForm(ctx, input, log),
+    // 选项题收到非选项文本 → 取消表单（解除阻塞），让该消息按普通 prompt 处理。
+    cancel: (input) => cancelFormOverHttp(input, { log }),
   });
 
   // ── 会话管理 / 建会话向导（P6） ───────────────────────────────────────

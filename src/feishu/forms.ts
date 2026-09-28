@@ -210,14 +210,29 @@ export function buildFormCard(
     }
   }
 
-  const missing = missingFields(form, answers).map((k) => {
+  const missingKeys = missingFields(form, answers);
+  const missing = missingKeys.map((k) => {
     const f = form.fields.find((x) => x.key === k);
     return f ? fieldTitle(f) : k;
   });
+  // 剩余字段是否全是「纯选项题」（有选项且不允许自填）→ 提示要点选项/序号。
+  const optionOnly =
+    missingKeys.length > 0 &&
+    missingKeys.every((k) => {
+      const f = form.fields.find((x) => x.key === k);
+      return (f?.options?.length ?? 0) > 0 && f?.custom !== true;
+    });
   const hints: string[] = [];
   if (opts.notice) hints.push(opts.notice);
-  if (missing.length > 0 && visible.length > 1) hints.push(`还需回答：${missing.join("、")}（可直接发文字回答）`);
-  else if (missing.length > 0) hints.push("可直接发文字回答，或点上方选项。");
+  if (missing.length > 0 && visible.length > 1) {
+    hints.push(`还需回答：${missing.join("、")}${optionOnly ? "（点选项或回复序号）" : "（可直接发文字回答）"}`);
+  } else if (missing.length > 0) {
+    hints.push(
+      optionOnly
+        ? "请点击上方选项（或回复序号，如 1）；发送其它内容会作为普通消息处理。"
+        : "可直接发文字回答，或点上方选项。",
+    );
+  }
   if (hints.length > 0) elements.push({ tag: "markdown", content: truncateCardContent(hints.join("\n\n")) });
 
   const header = headerFor(form);

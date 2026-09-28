@@ -33,12 +33,23 @@ export interface FormReplyInput {
   readonly directory?: string;
 }
 
+export interface FormReplyCancelInput {
+  readonly sessionID: string;
+  readonly formID: string;
+  readonly directory?: string;
+}
+
 export interface FormRelayDeps {
   readonly sender: FeishuSender;
   readonly log: Logger;
   readonly getLink: (sessionID: string) => Promise<SessionLink | undefined>;
   readonly isAllowed: (openId: string) => boolean;
   readonly reply: (input: FormReplyInput) => Promise<void>;
+  /**
+   * 取消 pending form（选项题收到非选项文本时，先解除阻塞再把消息当普通 prompt）。
+   * 缺省时退化为「仍按答案提交」以保持旧行为。
+   */
+  readonly cancel?: (input: FormReplyCancelInput) => Promise<void>;
   readonly now?: () => number;
 }
 
@@ -183,6 +194,20 @@ export class FormRelay {
     }
 
     const field = pending.form.fields.find((f) => f.key === fieldKey);
+    // 选项题（有选项且不允许自填）收到「不是选项」的文本 → 用户其实是在说别的：
+    // 取消该表单（解除 agent 阻塞）并把这条文本当普通消息交给 agent 处理。
+    if (!fieldAcceptsText(field, text)) {
+      this.deps.log.info("选项题收到非选项文本，跳过表单并按普通消息处理", {
+        sessionID,
+        formID: pending.form.id,
+        fieldKey,
+      });
+      this.awaiting.delete(sessionID);
+      this.forms.delete(pending.form.id);
+      void this.cancelPending(pending);
+      return false;
+    }
+
     // 直接回复=手动作答：能对上选项就用选项值，否则用原文（服务端校验）。
     pending.answers[fieldKey] = coerceAnswer(field, text);
     pending.awaitingField = undefined;
@@ -268,6 +293,25 @@ export class FormRelay {
     await this.finish(pending, "answered");
   }
 
+  /** 取消 pending form（best-effort），随后撤回卡片。 */
+  private async cancelPending(pending: PendingForm): Promise<void> {
+    if (this.deps.cancel) {
+      try {
+        await this.deps.cancel({
+          sessionID: pending.sessionID,
+          formID: pending.form.id,
+          ...(pending.directory ? { directory: pending.directory } : {}),
+        });
+      } catch (err) {
+        this.deps.log.warn("form.cancel 失败（该消息可能仍排队）", {
+          formID: pending.form.id,
+          error: errorMessage(err),
+        });
+      }
+    }
+    await this.finish(pending, "cancelled");
+  }
+
   /**
    * 表单收敛：**优先撤回卡片**（作答/取消后不再残留待填卡），撤回失败（超时限/无权限）
    * 才降级 patch 成结果卡，避免卡片永久停在待填态。
@@ -333,10 +377,37 @@ function coerceAnswer(field: FormField | undefined, text: string): FormValue {
   }
 }
 
-/** 文本命中选项（value 或 label，忽略大小写）→ 返回选项 value。 */
+/**
+ * 该字段能否接受这条文本？
+ * - 无选项 → 可以（自由文本）；
+ * - 允许自填（`custom`）→ 可以；
+ * - 纯选项题 → 仅当文本命中某个选项（含序号/字母）才算作答，否则视为「用户在说别的」。
+ */
+function fieldAcceptsText(field: FormField | undefined, text: string): boolean {
+  if (!field) return true;
+  const hasOptions = (field.options?.length ?? 0) > 0;
+  if (!hasOptions) return true;
+  if (field.custom === true) return true;
+  return matchOption(field, text) !== undefined;
+}
+
+/** 文本命中选项（value / label / 序号 / 字母，忽略大小写）→ 返回选项 value。 */
 function matchOption(field: FormField, text: string): string | undefined {
   if (!field.options?.length) return undefined;
   const trimmed = text.trim();
+  // 序号（1 / 1. / 1、/ 1)）与字母（A / a / B.）
+  const byNumber = /^(\d{1,2})[.、)）]?$/.exec(trimmed);
+  if (byNumber) {
+    const index = Number(byNumber[1]) - 1;
+    const option = field.options[index];
+    if (option) return option.value;
+  }
+  const byLetter = /^([A-Za-z])[.、)）]?$/.exec(trimmed);
+  if (byLetter) {
+    const index = byLetter[1]!.toUpperCase().charCodeAt(0) - 65;
+    const option = field.options[index];
+    if (option) return option.value;
+  }
   const lower = trimmed.toLowerCase();
   const hit = field.options.find(
     (o) => o.value === trimmed || o.label.trim() === trimmed || o.label.trim().toLowerCase() === lower,
