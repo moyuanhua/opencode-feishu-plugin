@@ -126,8 +126,19 @@ export async function touchLocationOverHttp(
     deps.log.debug("保活探针创建异常", { directory, error: errorMessage(err) });
   }
 
-  // 立即删除探针会话（尽力而为：删除失败也只留一条空会话，不影响保活）。
+  // 探针本身也走一次会话级 GET（会话级 middleware 必调 locations.get()，
+  // 是「location 被回收后重建」的可靠触发点），再删除。
   if (sessionID) {
+    try {
+      const getRes = await doFetch(`${service.url}/api/session/${encodeURIComponent(sessionID)}`, {
+        method: "GET",
+        headers,
+        signal: signal(),
+      });
+      touched = touched || getRes.ok;
+    } catch {
+      /* best-effort */
+    }
     try {
       await doFetch(`${service.url}/api/session/${encodeURIComponent(sessionID)}`, {
         method: "DELETE",
@@ -135,7 +146,7 @@ export async function touchLocationOverHttp(
         signal: signal(),
       });
     } catch {
-      /* best-effort */
+      /* best-effort：删除失败也只留一条空会话，不影响保活 */
     }
   }
 
@@ -153,6 +164,96 @@ export interface KeepaliveDeps {
   readonly touch?: (directory: string) => Promise<boolean>;
   readonly setIntervalImpl?: typeof setInterval;
   readonly clearIntervalImpl?: typeof clearInterval;
+}
+
+/**
+ * 进程级网关看门狗（P8.1）：**任何** location 的插件实例都会登记，
+ * 但整个进程只保留一个定时器，周期性对「网关 location」做一次**会话级 GET**：
+ *
+ * - 网关仍存活 → `locations.get()` 续期（LayerMap TTL），零副作用；
+ * - 网关已被回收 → 该请求**重建 location** → 网关插件重新加载、飞书长连接重连。
+ *
+ * 这样即使网关实例已随 location 被销毁，只要进程里还有**任何** location 的插件
+ * 实例（例如用户在别的项目里开了 TUI/Web），网关就会被自动救活；
+ * 服务重启后用户第一次使用任意 location 也会触发（无需外部 cron）。
+ */
+const WATCHDOG_SLOT = Symbol.for("opencode-feishu-v2/gateway-watchdog");
+
+interface WatchdogSlot {
+  /** 目标 location（网关实例可权威更新）。 */
+  target: string;
+  timer: ReturnType<typeof setInterval>;
+  /** 首次立即探测（服务重启后尽快唤起）。 */
+  initial?: ReturnType<typeof setTimeout>;
+}
+
+export interface GatewayWatchdogInput {
+  readonly log: Logger;
+  /** 目标 location：配了 gatewayLocation 用配置值，否则用当前实例目录。 */
+  readonly directory: string;
+  readonly intervalMs: number;
+  /** 网关实例：允许把 target 更新为自己的实际目录。 */
+  readonly authoritative?: boolean;
+  /** 首次探测延迟（默认 3000ms；0 = 不立即探测）。 */
+  readonly immediateDelayMs?: number;
+  /** 覆盖探测实现（测试用）。 */
+  readonly probe?: (directory: string) => Promise<boolean>;
+  readonly setIntervalImpl?: typeof setInterval;
+  readonly clearIntervalImpl?: typeof clearInterval;
+  readonly setTimeoutImpl?: typeof setTimeout;
+  readonly clearTimeoutImpl?: typeof clearTimeout;
+}
+
+/** 登记进程级看门狗。返回 true = 本次调用真正启动了定时器。 */
+export function ensureGatewayWatchdog(input: GatewayWatchdogInput): boolean {
+  const g = globalThis as unknown as Record<symbol, WatchdogSlot | undefined>;
+  const existing = g[WATCHDOG_SLOT];
+  if (existing) {
+    if (input.authoritative && existing.target !== input.directory) {
+      existing.target = input.directory;
+      input.log.debug("网关看门狗目标更新为网关 location", { directory: input.directory });
+    }
+    return false;
+  }
+
+  const setIntervalImpl = input.setIntervalImpl ?? setInterval;
+  const clearIntervalImpl = input.clearIntervalImpl ?? clearInterval;
+  const setTimeoutImpl = input.setTimeoutImpl ?? setTimeout;
+  const clearTimeoutImpl = input.clearTimeoutImpl ?? clearTimeout;
+  const probe = input.probe ?? ((dir: string) => touchLocationOverHttp(dir, { log: input.log }));
+
+  const slot: WatchdogSlot = {
+    target: input.directory,
+    timer: undefined as unknown as ReturnType<typeof setInterval>,
+    initial: undefined,
+  };
+  const run = (): void => {
+    void probe(slot.target).catch((err) => {
+      input.log.debug("网关看门狗探测异常", { error: errorMessage(err) });
+    });
+  };
+  const delay = input.immediateDelayMs ?? 3000;
+  if (delay > 0) slot.initial = setTimeoutImpl(run, delay);
+  slot.timer = setIntervalImpl(run, input.intervalMs);
+  (slot.timer as unknown as { unref?: () => void }).unref?.();
+  (slot.initial as unknown as { unref?: () => void } | undefined)?.unref?.();
+  g[WATCHDOG_SLOT] = slot;
+
+  input.log.info("网关看门狗已启动（进程级）", {
+    directory: input.directory,
+    intervalMs: input.intervalMs,
+  });
+  return true;
+}
+
+/** 仅供测试：清空进程级看门狗状态。 */
+export function resetGatewayWatchdogForTest(): void {
+  const g = globalThis as unknown as Record<symbol, WatchdogSlot | undefined>;
+  const slot = g[WATCHDOG_SLOT];
+  if (!slot) return;
+  clearInterval(slot.timer);
+  if (slot.initial) clearTimeout(slot.initial);
+  delete g[WATCHDOG_SLOT];
 }
 
 /**

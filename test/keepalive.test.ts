@@ -1,5 +1,10 @@
-import { describe, expect, test, vi } from "vitest";
-import { startKeepalive, touchLocationOverHttp } from "../src/session/keepalive.js";
+import { afterEach, describe, expect, test, vi } from "vitest";
+import {
+  ensureGatewayWatchdog,
+  resetGatewayWatchdogForTest,
+  startKeepalive,
+  touchLocationOverHttp,
+} from "../src/session/keepalive.js";
 import { createLogger } from "../src/logger.js";
 
 const log = createLogger({ level: "error", sink: () => undefined });
@@ -42,9 +47,11 @@ describe("touchLocationOverHttp", () => {
     expect(calls[2]!.method).toBe("POST");
     expect(calls[2]!.url).toBe("http://127.0.0.1:3000/api/session");
     expect(calls[2]!.body).toMatchObject({ location: { directory: "/home/ubuntu" } });
-    // ④ 立即删除探针
-    expect(calls[3]!.method).toBe("DELETE");
+    // ④ 探针也走一次会话级 GET（location 重建触发点），再删除
+    expect(calls[3]!.method).toBe("GET");
     expect(calls[3]!.url).toContain("/api/session/ses_probe");
+    expect(calls[4]!.method).toBe("DELETE");
+    expect(calls[4]!.url).toContain("/api/session/ses_probe");
   });
 
   test("无可选会话时仍走探针事件通道", async () => {
@@ -119,5 +126,61 @@ describe("startKeepalive", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("ensureGatewayWatchdog（进程级）", () => {
+  afterEach(() => {
+    resetGatewayWatchdogForTest();
+    vi.useRealTimers();
+  });
+
+  test("每进程只启一个定时器；重复登记返回 false 且不重复探测", async () => {
+    vi.useFakeTimers();
+    const probe = vi.fn(async () => true);
+    const first = ensureGatewayWatchdog({ log, directory: "/gw", intervalMs: 1000, immediateDelayMs: 100, probe });
+    const second = ensureGatewayWatchdog({ log, directory: "/gw", intervalMs: 1000, immediateDelayMs: 100, probe });
+    expect(first).toBe(true);
+    expect(second).toBe(false);
+    await vi.advanceTimersByTimeAsync(1200);
+    // 立即探测 + 1 个周期刻度，且只来自同一个定时器。
+    expect(probe.mock.calls.length).toBeLessThanOrEqual(2);
+    expect(probe).toHaveBeenCalledWith("/gw");
+  });
+
+  test("网关实例 authoritative → 更新目标目录", async () => {
+    vi.useFakeTimers();
+    const probe = vi.fn(async () => true);
+    ensureGatewayWatchdog({ log, directory: "/gw-parent", intervalMs: 1000, immediateDelayMs: 0, probe });
+    const started = ensureGatewayWatchdog({
+      log,
+      directory: "/gw-parent/exact",
+      intervalMs: 1000,
+      immediateDelayMs: 0,
+      authoritative: true,
+      probe,
+    });
+    expect(started).toBe(false);
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(probe).toHaveBeenCalledWith("/gw-parent/exact");
+  });
+
+  test("立即探测在短延迟后触发（服务重启后尽快唤起）", async () => {
+    vi.useFakeTimers();
+    const probe = vi.fn(async () => true);
+    ensureGatewayWatchdog({ log, directory: "/gw", intervalMs: 60_000, immediateDelayMs: 50, probe });
+    expect(probe).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(80);
+    expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  test("探测失败不抛错", async () => {
+    vi.useFakeTimers();
+    const probe = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    ensureGatewayWatchdog({ log, directory: "/gw", intervalMs: 1000, immediateDelayMs: 10, probe });
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(probe).toHaveBeenCalled();
   });
 });

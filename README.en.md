@@ -414,12 +414,14 @@ OpenCode **evicts idle Locations**, which unloads plugins and closes the Feishu 
 
 Both dispose the plugin (closing the Feishu WS). **After that, no request means no recovery — the bot stays silent permanently** (see issues [#51343](https://github.com/anomalyco/opencode/issues/51343), [#48691](https://github.com/anomalyco/opencode/issues/48691), [#51828](https://github.com/anomalyco/opencode/issues/51828); the TTL has no config knob).
 
-The plugin ships a two-channel keep-alive (default every 20 min):
+The plugin ships two built-in layers (both on by default, **no external script required**):
 
-1. **session-scoped `GET /api/session/{id}`** → `locations.get()` renews the LayerMap entry; if it was already evicted, this request **re-creates the Location** (plugin reloaded, WS reconnected);
-2. **create + immediately delete a probe session** → the `session.created` event renews `LocationActivity`.
+1. **Gateway keep-alive** (every 20 min, `keepaliveIntervalMs`): ① a session-scoped `GET /api/session/{id}` → `locations.get()` renews the LayerMap entry, and **re-creates the Location** if it was evicted; ② create + GET + delete a probe session → renews `LocationActivity` (via the `session.created` event).
+2. **Process-wide gateway watchdog** (same interval, exactly one timer per process): every Location's plugin instance registers it, and it performs a session-scoped GET against the gateway Location. Result:
+   - if the gateway instance was evicted, it is revived automatically as long as **any other Location** still has a loaded instance (e.g. you have a TUI/Web open in another project);
+   - after a **service restart**, the first use of any Location starts the watchdog, which fires an immediate probe after ~3s and brings the gateway back up.
 
-> **External safety net**: a plugin cannot revive itself once evicted (its timer dies with it), and it is not loaded after a **service restart** either. Add a cron / systemd timer that performs one session-scoped GET every 15–30 minutes (see `scripts/keepalive-feishu.sh`) to also cover restarts and long sleeps.
+> Still recommended (optional, not required): a cron / systemd timer doing one session-scoped GET every 15–30 minutes, covering the extreme case where the opencode process is down and nothing is used for a long time. See `scripts/keepalive-feishu.sh`. Set `keepalive: false` to disable all keep-alive.
 
 ---
 

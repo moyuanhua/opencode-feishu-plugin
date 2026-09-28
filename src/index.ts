@@ -33,7 +33,7 @@ import { startWatchdog } from "./feishu/watchdog.js";
 import { FormRelay, type FormReplyInput } from "./feishu/form-relay.js";
 import { replyFormOverHttp } from "./feishu/form-reply.js";
 import { listSessionsOverHttp } from "./session/session-list-http.js";
-import { startKeepalive } from "./session/keepalive.js";
+import { ensureGatewayWatchdog, startKeepalive } from "./session/keepalive.js";
 import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js";
 import { decideRoute } from "./feishu/routing.js";
@@ -104,11 +104,29 @@ export default Plugin.define({
       hasAppSecret: hasSecret(config.appSecret),
     });
 
+    // 进程级网关看门狗（P8.1）：**每个** location 的实例都登记，但整个进程只跑一个定时器，
+    // 周期性对网关 location 做一次会话级 GET（续期 LayerMap；若已被回收则重建 location）。
+    // 这样即便网关实例已随之销毁，只要还有任意 location 存活（或服务重启后首次使用
+    // 任意 location），网关就会被自动救活——无需外部 cron。
+    const here = (ctx.location as { directory?: string } | undefined)?.directory;
+    let startedWatchdog = false;
+    if (config.keepalive) {
+      const watchdogTarget = config.gatewayLocation ?? here;
+      if (watchdogTarget) {
+        startedWatchdog = ensureGatewayWatchdog({
+          log,
+          directory: watchdogTarget,
+          intervalMs: config.keepaliveIntervalMs,
+        });
+      }
+    }
+
     // 网关门控：只让指定 location 的实例启动（跨 location 是独立 VM context，无法用进程内单例收敛）。
     // 匹配语义：here 等于 gatewayLocation **或位于其下**（填仓库根目录即可覆盖子目录）。
-    const here = (ctx.location as { directory?: string } | undefined)?.directory;
     if (config.gatewayLocation) {
       const matched = Boolean(here) && isUnder(here!, config.gatewayLocation);
+      // 本实例启动了进程级看门狗 → 保留日志流，让看门狗后续日志仍能落盘。
+      const keepSink = matched || startedWatchdog;
       // 兜底告警：配了 gatewayLocation 但已加载的 location 均未命中时，延迟 warn（仅一次）。
       // 未命中的实例把日志流保留到判定结束，保证告警能写进日志文件。
       trackGatewayLocationSeen({
@@ -116,18 +134,20 @@ export default Plugin.define({
         expected: config.gatewayLocation,
         matched,
         warn: (message) => log.warn(message),
-        ...(matched ? {} : { onSettled: () => logSink?.close() }),
+        ...(keepSink ? {} : { onSettled: () => logSink?.close() }),
       });
       if (!matched) {
         log.debug("跳过非网关 location", { here, expected: config.gatewayLocation });
+        if (!keepSink) logSink?.close();
         return async () => {};
       }
     }
 
     if (!acquireProcessGuard()) {
       // 同进程重复 setup（opencode 按 location 加载全局插件）：只跳过，绝不能碰第一份的资源。
+      // 注意：看门狗若由本实例启动，日志流要保留。
       log.debug("检测到同进程重复 setup，跳过启动（仅首个实例生效）");
-      logSink?.close();
+      if (!startedWatchdog) logSink?.close();
       return async () => {};
     }
 
@@ -924,6 +944,16 @@ async function start(
    */
   const here = (ctx.location as { directory?: string } | undefined)?.directory;
   const keepaliveDirectory = here ?? config.gatewayLocation;
+  // 网关实例「权威」更新看门狗目标为自身实际目录（会话按该目录检索最准）。
+  if (config.keepalive && keepaliveDirectory) {
+    ensureGatewayWatchdog({
+      log,
+      directory: keepaliveDirectory,
+      intervalMs: config.keepaliveIntervalMs,
+      authoritative: true,
+      immediateDelayMs: 0,
+    });
+  }
   const stopKeepalive =
     config.keepalive && keepaliveDirectory
       ? startKeepalive({

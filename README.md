@@ -293,12 +293,15 @@ opencode 会**回收空闲的 location**，这会连带卸载插件、关闭飞�
 
 两者都会让插件被 dispose（飞书长连接关闭）。**此后若该 location 再无请求，插件不会自行恢复 → 机器人永久沉默**（官方 issue：[#51343](https://github.com/anomalyco/opencode/issues/51343)、[#51891→#48691](https://github.com/anomalyco/opencode/issues/48691)、[#51828](https://github.com/anomalyco/opencode/issues/51828)；TTL 无配置项）。
 
-插件内置双通道保活（默认每 20 分钟）：
+插件内置两道防线（都是默认开启，**无需任何外部脚本**）：
 
-1. **会话级 `GET /api/session/{id}`** → `locations.get()` 续期 LayerMap；若已被回收，**该请求会重建 location**（插件重新加载、长连接重连）；
-2. **创建 + 立即删除探针会话** → `session.created` 事件续期 `LocationActivity`。
+1. **网关保活**（每 20 分钟，`keepaliveIntervalMs`）：① 会话级 `GET /api/session/{id}` → `locations.get()` 续期 LayerMap，若已被回收则**重建 location**；② 创建 + GET + 删除一个探针会话 → 续期 `LocationActivity`（`session.created` 事件）。
+2. **进程级网关看门狗**（同样每 20 分钟，每进程仅一个定时器）：**任意** location 的插件实例都会登记，周期性对网关 location 做会话级 GET。效果：
+   - 网关实例即使已被回收，只要进程里还有**别的** location 存活（例如你在别的项目里开了 TUI/Web），网关会被自动救活；
+   - **服务重启后**，你第一次使用任意 location 时看门狗即启动（并在约 3 秒后立即探测一次），网关随之上线；
+   - 首次探测带 3 秒延迟，重启后恢复很快。
 
-> **外部兜底建议**：插件自身被回收后无法自救（定时器随插件销毁），且**服务重启后**也不会自动加载。可再加一条 cron / systemd timer 每 15–30 分钟做一次「会话级 GET」作为唤起器（`keepalive-feishu.sh` 示例见仓库 `scripts/`），覆盖重启 / 长时间休眠场景。
+> 仍建议（可选，非必需）：用 cron / systemd timer 每 15–30 分钟做一次「会话级 GET」，覆盖「opencode 进程整个挂掉且长时间无人使用」的极端场景。仓库提供 `scripts/keepalive-feishu.sh` 一键脚本；`keepalive: false` 可关闭全部保活。
 
 ---
 
