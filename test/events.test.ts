@@ -4,6 +4,7 @@ import {
   extractMessageText,
   isP2PChat,
   parseCardAction,
+  parseIncomingAttachment,
   parseIncomingMessage,
   stripMentionPlaceholders,
 } from "../src/feishu/events.js";
@@ -86,6 +87,56 @@ describe("parseIncomingMessage", () => {
     expect(isP2PChat("p2p")).toBe(true);
     expect(isP2PChat("group")).toBe(false);
     expect(isP2PChat(undefined)).toBe(false);
+  });
+});
+
+describe("附件解析（图片/文件）", () => {
+  test("image 消息解析出 image_key 附件", () => {
+    const msg = parseIncomingMessage({
+      event_id: "evt_img",
+      sender: { sender_id: { open_id: "ou_1" } },
+      message: {
+        message_id: "om_img",
+        chat_id: "oc_1",
+        chat_type: "p2p",
+        message_type: "image",
+        content: JSON.stringify({ image_key: "img_v2_abc" }),
+      },
+    });
+    expect(msg?.text).toBe("[图片]");
+    expect(msg?.attachment).toEqual({ kind: "image", fileKey: "img_v2_abc" });
+  });
+
+  test("file 消息解析出 file_key + file_name", () => {
+    const msg = parseIncomingMessage({
+      event_id: "evt_file",
+      sender: { sender_id: { open_id: "ou_1" } },
+      message: {
+        message_id: "om_file",
+        chat_id: "oc_1",
+        chat_type: "p2p",
+        message_type: "file",
+        content: JSON.stringify({ file_key: "file_v2_xyz", file_name: "报告.pdf" }),
+      },
+    });
+    expect(msg?.text).toBe("[文件]");
+    expect(msg?.attachment).toEqual({ kind: "file", fileKey: "file_v2_xyz", fileName: "报告.pdf" });
+  });
+
+  test("无 key / 非法 JSON / 其它类型不产生附件", () => {
+    expect(parseIncomingAttachment("image", JSON.stringify({}))).toBeUndefined();
+    expect(parseIncomingAttachment("file", JSON.stringify({ file_name: "x" }))).toBeUndefined();
+    expect(parseIncomingAttachment("image", "{not json")).toBeUndefined();
+    expect(parseIncomingAttachment("audio", JSON.stringify({ file_key: "k" }))).toBeUndefined();
+    const msg = parseIncomingMessage({
+      message: {
+        message_id: "om_audio",
+        chat_id: "oc_1",
+        message_type: "audio",
+        content: JSON.stringify({ file_key: "file_1" }),
+      },
+    });
+    expect(msg?.attachment).toBeUndefined();
   });
 });
 

@@ -58,6 +58,13 @@ A long turn (dozens of tool calls) can push a single run card to its limits (28K
 2. **The final answer is sent separately**: when a turn ends and the trailing text is at least `finalAnswerMinChars` (default 600 chars), it is sent as its own "✅ 完整回答" card; the run card keeps only a short notice.
 3. **Very long answers become files**: at least `finalAnswerFileMinBytes` (default 20KB) → delivered as a `.md` file (preview/download), never truncated.
 
+## Receiving images / files
+
+- **Permission**: the app must enable `im:message:readonly` (the message-resource API accepts one of `im:message` / `im:message:readonly` / `im:message.history:readonly`). Without it downloads fail and degrade gracefully; text messages are unaffected.
+- **Flow**: an image/file message → download via `im.messageResource.get` using `image_key` / `file_key` → save to `<attachmentsDir>/<messageId>-<name>` (image extension inferred from the response `Content-Type`) → attach as a `file://` URI on `session.prompt` (the trailing text notes the saved path).
+- **Limits**: max 20MB per attachment by default (`attachmentMaxBytes`, clamped 1–100MB); 30s timeout (`attachmentTimeoutMs`); on failure the message is still delivered, with a "download failed: reason" note.
+- **Boundaries**: audio / video / stickers are not downloaded (placeholders remain); merged-forward and in-card resources cannot be downloaded via the API. Feishu's own per-resource cap is 100MB.
+
 ## `/sessions` data source & resume card
 
 `/sessions` lists **all local opencode sessions** (newest first, 8 per page, configurable):
@@ -141,6 +148,10 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `runnerCardTextMax` | number | `2048` | Per-text-block character cap on the run card (512–8192) |
 | `finalAnswerMinChars` | number | `600` | Final answers at least this long are sent **as their own card/file** (`0` disables splitting) |
 | `finalAnswerFileMinBytes` | number | `20480` | Final answers at least this many bytes are delivered as a `.md` file (8192–102400) |
+| `acceptAttachments` | boolean | `true` | Accept images/files: download into `attachmentsDir` and attach to the session; failures degrade to placeholder text |
+| `attachmentMaxBytes` | number | `20971520` | Max size per attachment (1–100MB); larger ones are rejected with a notice |
+| `attachmentTimeoutMs` | number | `30000` | Attachment download timeout (5–120s) |
+| `attachmentsDir` | string | `<configDir>/plugins/feishu-files` | Where downloaded attachments are stored |
 | `keepalive` | boolean | `true` | **Location keep-alive**: periodically sends activity to opencode to prevent the 60-min idle recycling (which would close the Feishu connection and silence the bot) |
 | `keepaliveIntervalMs` | number | `1200000` | Keep-alive interval (default 20 min, clamped 5–45); must stay well below opencode's hardcoded 60-min TTL |
 

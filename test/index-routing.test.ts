@@ -32,6 +32,7 @@ const h = vi.hoisted(() => ({
   generateCalls: [] as Array<{ sessionID: string; prompt: string }>,
   compactCalls: [] as Array<{ sessionID: string }>,
   generateTextCalls: [] as string[],
+  resourceGets: [] as unknown[],
 }));
 
 vi.mock("../src/feishu/gateway.js", () => ({
@@ -63,13 +64,25 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
         }),
         delete: async () => ({ code: 0, data: {} }),
       },
+      messageResource: {
+        get: async (payload: unknown) => {
+          h.resourceGets.push(payload);
+          return {
+            headers: { "content-type": "image/png" },
+            writeFile: async (filePath: string) => {
+              const { writeFile } = await import("node:fs/promises");
+              await writeFile(filePath, "png-bytes");
+            },
+          };
+        },
+      },
     };
   },
   Domain: { Feishu: "feishu", Lark: "lark" },
 }));
 
 const storage = new FakeStorage();
-const promptCalls: Array<{ sessionID: string; text: string }> = [];
+const promptCalls: Array<{ sessionID: string; text: string; files?: Array<{ uri: string }> }> = [];
 const interruptCalls: string[] = [];
 /** 假的全量会话列表（`ctx.session.list` 数据源）。 */
 let sessionListRaw: Array<{
@@ -123,8 +136,12 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
     },
     session: {
       create: createSession,
-      prompt: async (input: { sessionID: string; text: string }) => {
-        promptCalls.push({ sessionID: input.sessionID, text: input.text });
+      prompt: async (input: { sessionID: string; text: string; files?: Array<{ uri: string }> }) => {
+        promptCalls.push({
+          sessionID: input.sessionID,
+          text: input.text,
+          ...(input.files && input.files.length > 0 ? { files: input.files } : {}),
+        });
       },
       interrupt: async (input: { sessionID: string }) => {
         interruptCalls.push(input.sessionID);
@@ -229,6 +246,7 @@ describe("index 话题路由（集成）", () => {
     h.switchImpl = undefined;
     h.evaluateHook = undefined;
     h.sessionUpdates.length = 0;
+    h.resourceGets.length = 0;
     h.contextRaw = undefined;
     h.messagesRaw = undefined;
     h.generateRaw = undefined;
@@ -395,6 +413,31 @@ describe("index 话题路由（集成）", () => {
     const rootSet = storage.setCalls.find((c) => c.key.startsWith("feishu:v2:root:"));
     expect(rootSet).toBeDefined();
     expect((storage.raw(rootSet!.key) as { sessionID: string }).sessionID).toBe("ses_r1");
+  });
+
+  test("图片消息：下载附件并作为 file:// 附件挂进 prompt", async () => {
+    const { readFile, rm } = await import("node:fs/promises");
+    cleanup = await setup({ attachmentsDir: "/tmp/feishu-att-it" });
+    await rm("/tmp/feishu-att-it", { recursive: true, force: true });
+    // 先在话题里创建会话（普通文本）。
+    await deliver(msg("干活", { messageId: "om_img_boot", threadId: "omt_img", rootId: "omr_img" }));
+    // 同一话题内发图片：应下载并作为附件挂进 prompt。
+    await deliver(
+      msg("[图片]", {
+        messageId: "om_img1",
+        messageType: "image",
+        threadId: "omt_img",
+        rootId: "omr_img",
+        attachment: { kind: "image", fileKey: "img_v2_test" },
+      }),
+    );
+    const last = promptCalls.at(-1)!;
+    expect(last.text).toContain("[附件] 图片");
+    expect(last.files).toHaveLength(1);
+    expect(last.files![0]!.uri.startsWith("file://")).toBe(true);
+    expect(last.files![0]!.uri.replace("file://", "")).toBe("/tmp/feishu-att-it/om_img1-image.png");
+    expect(await readFile("/tmp/feishu-att-it/om_img1-image.png", "utf8")).toBe("png-bytes");
+    expect(h.resourceGets).toHaveLength(1);
   });
 
   // ── 任务 B：/model 切换后读回校验（集成） ─────────────────────────────

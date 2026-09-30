@@ -7,7 +7,7 @@
  *
  * 兼容 SDK/服务端两种字段路径（context.* 与顶层），避免版本差异导致丢事件。
  */
-import type { CardAction, IncomingMessage } from "../types.js";
+import type { CardAction, IncomingAttachment, IncomingMessage } from "../types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -94,6 +94,36 @@ function extractPostText(rawContent: string): string {
 }
 
 /**
+ * 解析图片/文件消息的资源信息（`image_key` / `file_key`）。
+ * 仅 image / file 两类；其余类型返回 undefined（保持占位文本行为）。
+ */
+export function parseIncomingAttachment(
+  messageType: string,
+  rawContent: string,
+): IncomingAttachment | undefined {
+  if (messageType !== "image" && messageType !== "file") return undefined;
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(rawContent) as Record<string, unknown>;
+  } catch {
+    return undefined;
+  }
+  if (!isRecordLike(parsed)) return undefined;
+  if (messageType === "image") {
+    const imageKey = str(parsed.image_key);
+    return imageKey ? { kind: "image", fileKey: imageKey } : undefined;
+  }
+  const fileKey = str(parsed.file_key);
+  if (!fileKey) return undefined;
+  const fileName = str(parsed.file_name);
+  return { kind: "file", fileKey, ...(fileName ? { fileName } : {}) };
+}
+
+function isRecordLike(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
  * 解析 `im.message.receive_v1` 载荷。
  * 返回 undefined 表示字段缺失（无法处理）；调用方负责静默丢弃。
  */
@@ -113,6 +143,7 @@ export function parseIncomingMessage(data: unknown): IncomingMessage | undefined
   const sender = data.sender;
   const senderOpenId = isRecord(sender) && isRecord(sender.sender_id) ? str(sender.sender_id.open_id) : "";
 
+  const attachment = parseIncomingAttachment(messageType, rawContent);
   return {
     eventId: str(data.event_id),
     messageId,
@@ -120,6 +151,7 @@ export function parseIncomingMessage(data: unknown): IncomingMessage | undefined
     chatType: str(message.chat_type) || "p2p",
     messageType,
     text: extractMessageText(messageType, rawContent),
+    ...(attachment ? { attachment } : {}),
     senderOpenId,
     ...(str(message.create_time) ? { createTime: str(message.create_time) } : {}),
     ...(str(message.thread_id) ? { threadId: str(message.thread_id) } : {}),

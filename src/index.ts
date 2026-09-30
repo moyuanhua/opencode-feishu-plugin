@@ -15,6 +15,7 @@
 import * as Lark from "@larksuiteoapi/node-sdk";
 import { createWriteStream, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
+import { pathToFileURL } from "node:url";
 import { Plugin } from "@opencode/plugin";
 import { hasSecret, resolveConfig } from "./config.js";
 import { createLogger, errorMessage, maskId } from "./logger.js";
@@ -29,6 +30,7 @@ import { OwnerPolicy } from "./security/allowlist.js";
 import { ReplayGuard, signApproval, signAllowSession, signStop, verifyApproval, verifyAllowSession, verifyStop } from "./security/token.js";
 import { startGateway } from "./feishu/gateway.js";
 import { createFeishuSender } from "./feishu/sender.js";
+import { downloadAttachment, downloadedAttachmentPrompt } from "./feishu/attachments.js";
 import { SessionMap } from "./feishu/session-map.js";
 import { MessageDedup } from "./feishu/dedup.js";
 import { decideDelivery, ExecutionTracker, type Delivery } from "./feishu/delivery.js";
@@ -896,7 +898,7 @@ async function start(
     const modelRef = (await readSessionModelQuiet(sessionID, link?.dir)) ?? link?.model;
     const model = modelRef ? modelLabel(modelRef) : undefined;
 
-    // 关键顺序：**先**发回执卡（含状态页脚），再发起 prompt。
+    // 关键顺序：**先**发回执卡（含状态页脚），再下载附件、发起 prompt。
     const receipt = await runs.beginRun({
       sessionID,
       chatId: message.chatId,
@@ -906,8 +908,29 @@ async function start(
     });
     if (!receipt.ok) log.warn("回执卡未发送，仍继续 prompt", { sessionID, delivery });
 
+    // 图片/文件：先下载到本地，作为会话附件挂进 prompt；失败降级为占位文本 + 原因。
+    let promptText = message.text;
+    const files: Array<{ uri: string }> = [];
+    if (config.acceptAttachments && message.attachment) {
+      const outcome = await downloadAttachment({
+        client,
+        messageId: message.messageId,
+        attachment: message.attachment,
+        dir: config.attachmentsDir,
+        maxBytes: config.attachmentMaxBytes,
+        timeoutMs: config.attachmentTimeoutMs,
+        log,
+      });
+      if (outcome.ok) {
+        files.push({ uri: pathToFileURL(outcome.path).href });
+        promptText = `${promptText}\n\n${downloadedAttachmentPrompt(message.attachment, outcome)}`;
+      } else {
+        promptText = `${promptText}\n\n[附件] 下载失败：${outcome.reason}`;
+      }
+    }
+
     try {
-      await promptSession(ctx, sessionID, message.text, delivery);
+      await promptSession(ctx, sessionID, promptText, delivery, files);
     } catch (err) {
       log.warn("prompt 发送失败", { sessionID, error: errorMessage(err) });
       // 卡片收尾为失败态，避免页脚永久停在「思考中」。
@@ -1261,21 +1284,28 @@ async function replyPermission(ctx: Plugin.Context, input: ReplyInput): Promise<
 }
 
 /**
- * 发起 prompt，带原生排队 `delivery`。
- * V2 的 promise 客户端类型对 `delivery` 的声明不稳定，这里做一次收敛的形状转换。
+ * 发起 prompt，带原生排队 `delivery` 与可选附件 `files`（file:// URI）。
+ * V2 的 promise 客户端类型对 `delivery` / `files` 的声明不稳定，这里做一次收敛的形状转换。
  */
 async function promptSession(
   ctx: Plugin.Context,
   sessionID: string,
   text: string,
   delivery: Delivery,
+  files?: ReadonlyArray<{ uri: string }>,
 ): Promise<void> {
   const api = ctx.session.prompt as unknown as (input: {
     sessionID: string;
     text: string;
     delivery: Delivery;
+    files?: ReadonlyArray<{ uri: string }>;
   }) => Promise<unknown>;
-  await api({ sessionID, text, delivery });
+  await api({
+    sessionID,
+    text,
+    delivery,
+    ...(files && files.length > 0 ? { files } : {}),
+  });
 }
 
 /**

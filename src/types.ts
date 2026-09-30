@@ -23,6 +23,16 @@ export type RawOptions = Readonly<Record<string, unknown>>;
  * 飞书 `im.message.receive_v1` 归一化后的最小消息模型。
  * 只保留 P0 需要 p2p 文本链路字段。
  */
+/** 飞书消息附件（图片/文件）的资源信息；下载见 `feishu/attachments.ts`。 */
+export interface IncomingAttachment {
+  /** 资源类型：作为 `im.messageResource.get` 的 `params.type`。 */
+  readonly kind: "image" | "file";
+  /** 资源 key（图片为 `image_key`，文件为 `file_key`）。 */
+  readonly fileKey: string;
+  /** 原始文件名（仅文件消息携带）。 */
+  readonly fileName?: string;
+}
+
 export interface IncomingMessage {
   readonly eventId: string;
   readonly messageId: string;
@@ -32,6 +42,8 @@ export interface IncomingMessage {
   readonly messageType: string;
   /** 已抽取并清理 @占位符 的文本；非文本消息为占位描述。 */
   readonly text: string;
+  /** 图片/文件消息的资源信息（其余类型 undefined）；`acceptAttachments` 时下载后挂进会话。 */
+  readonly attachment?: IncomingAttachment;
   readonly senderOpenId: string;
   readonly createTime?: string;
   /** 话题 ID（`omt_`）。单聊里通过「创建话题」产生；普通消息为 undefined。 */

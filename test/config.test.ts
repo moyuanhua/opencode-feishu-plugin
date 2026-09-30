@@ -416,6 +416,34 @@ describe("keepalive", () => {
   });
 });
 
+describe("附件接收（acceptAttachments）", () => {
+  const base = { appId: "a", appSecret: "b", logFile: false };
+  test("默认开启，20MB / 30s，落盘目录在 configDir 下", () => {
+    const cfg = resolveConfig(base, {}, noFile());
+    expect(cfg.acceptAttachments).toBe(true);
+    expect(cfg.attachmentMaxBytes).toBe(20 * 1024 * 1024);
+    expect(cfg.attachmentTimeoutMs).toBe(30_000);
+    expect(cfg.attachmentsDir).toBe("/tmp/opencode-feishu-v2-tests/no-config/plugins/feishu-files");
+  });
+  test("可关闭 / 可显式指定目录", () => {
+    const cfg = resolveConfig(
+      { ...base, acceptAttachments: false, attachmentsDir: "/data/att" },
+      {},
+      noFile(),
+    );
+    expect(cfg.acceptAttachments).toBe(false);
+    expect(cfg.attachmentsDir).toBe("/data/att");
+  });
+  test("大小与超时夹取到安全区间", () => {
+    expect(resolveConfig({ ...base, attachmentMaxBytes: 1 }, {}, noFile()).attachmentMaxBytes).toBe(1024 * 1024);
+    expect(resolveConfig({ ...base, attachmentMaxBytes: 999 * 1024 * 1024 }, {}, noFile()).attachmentMaxBytes).toBe(
+      100 * 1024 * 1024,
+    );
+    expect(resolveConfig({ ...base, attachmentTimeoutMs: 1 }, {}, noFile()).attachmentTimeoutMs).toBe(5_000);
+    expect(resolveConfig({ ...base, attachmentTimeoutMs: 999_999 }, {}, noFile()).attachmentTimeoutMs).toBe(120_000);
+  });
+});
+
 describe("gatewayMatchGraceMs（精确匹配宽限）", () => {
   const base = { appId: "a", appSecret: "b", logFile: false };
   test("默认 3000ms", () => {

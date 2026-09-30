@@ -166,6 +166,17 @@ export interface ResolvedConfig {
   readonly finalAnswerFileMinBytes: number;
   /** 保活心跳间隔（默认 20 分钟，夹取 5–45 分钟；必须显著小于 opencode 的 60 分钟 TTL）。 */
   readonly keepaliveIntervalMs: number;
+  /**
+   * 接收图片/文件（默认 true）：下载到 `attachmentsDir` 后作为会话附件挂进 prompt。
+   * 需要应用开通 `im:resource` 权限；未开通/失败时降级为占位文本。
+   */
+  readonly acceptAttachments: boolean;
+  /** 单附件大小上限（默认 20MB，夹取 1–100MB）；超限拒绝并提示。 */
+  readonly attachmentMaxBytes: number;
+  /** 附件下载超时（默认 30s，夹取 5–120s）。 */
+  readonly attachmentTimeoutMs: number;
+  /** 附件落盘目录（默认 `<configDir>/plugins/feishu-files`；显式配置优先）。 */
+  readonly attachmentsDir: string;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -242,6 +253,17 @@ export function resolveConfig(
   const runnerCardTextMax = clamp(asNumber(merged.runnerCardTextMax, 2048), 512, 8192);
   const finalAnswerMinChars = clamp(asNumber(merged.finalAnswerMinChars, 600), 0, 20_000);
   const finalAnswerFileMinBytes = clamp(asNumber(merged.finalAnswerFileMinBytes, 20 * 1024), 8192, 102_400);
+  const acceptAttachments = asBoolean(merged.acceptAttachments, true);
+  const attachmentMaxBytes = clamp(
+    asNumber(merged.attachmentMaxBytes, 20 * 1024 * 1024),
+    1024 * 1024,
+    100 * 1024 * 1024,
+  );
+  const attachmentTimeoutMs = clamp(asNumber(merged.attachmentTimeoutMs, 30_000), 5_000, 120_000);
+  const attachmentsDirRaw = asString(merged.attachmentsDir).trim();
+  const attachmentsDir = attachmentsDirRaw
+    ? attachmentsDirRaw
+    : join(resolveConfigDir(env, deps.configDir), "plugins", "feishu-files");
   const keepaliveIntervalMs = clamp(
     asNumber(merged.keepaliveIntervalMs, 20 * 60 * 1000),
     5 * 60 * 1000,
@@ -307,6 +329,10 @@ export function resolveConfig(
     runnerCardTextMax,
     finalAnswerMinChars,
     finalAnswerFileMinBytes,
+    acceptAttachments,
+    attachmentMaxBytes,
+    attachmentTimeoutMs,
+    attachmentsDir,
   };
 }
 

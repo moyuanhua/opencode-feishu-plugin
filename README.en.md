@@ -21,15 +21,19 @@ Connect [OpenCode](https://opencode.ai) to Feishu/Lark: **one Feishu topic = one
 | ✅ **Card approvals** | Permission requests become cards: allow once / always / this session only / deny — signed tokens prevent forgery and replay |
 | 📊 **Real-time visible** | "Thinking" receipt → live tool-call cards → streaming text updates; footer shows the current model |
 | ⏹ **Controllable** | Every reply card has a "force stop" button; a watchdog auto-interrupts stuck sessions; native queue with `/steer` `/now` to cut in |
+| 📎 **Images / files** | Images and files sent in Feishu are downloaded and attached to the session, so vision/file-capable models can see and read them |
 | 🚫 **No ports** | Full long-connection; no inbound port needed on the server |
 
 ## 1. Feishu app setup (~3 minutes)
 
 1. Open the [Feishu Open Platform](https://open.feishu.cn/app) → **Create an enterprise self-built app**.
 2. **Add app capability → Bot**.
-3. **Permission management** — enable only these two scopes:
+3. **Permission management** — enable these two minimal scopes:
    - `im:message.p2p_msg:readonly` — read messages users send to the bot in p2p chat
    - `im:message:send_as_bot` — send messages as the app (also used to update cards)
+
+   To **receive images / files** (downloaded and attached to sessions), add one more:
+   - `im:message:readonly` — fetch message resources (required to download images / files)
 4. **Events & Callbacks → Event configuration**: subscription method **"Use long connection to receive events"** (do **not** pick Webhook), add event `im.message.receive_v1`.
 5. **Events & Callbacks → Callback configuration**: same long-connection method, add callback `card.action.trigger` (zero permission requirement).
 6. **Version management & release**: availability = **only yourself**, create a version and **publish**. ⚠️ Without publishing the app stays in "development" state and the long connection cannot connect — the bot will never respond.
@@ -167,7 +171,7 @@ Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepa
 
 ## 6. Known limitations
 
-- Only **p2p text** (incl. rich text); images / files / audio-video get a text placeholder and aren't downloaded.
+- Image / file messages are **downloaded and attached to the session** (requires `im:message:readonly`); audio / video / stickers still get a text placeholder.
 - Only takes over approvals for **Feishu-originated sessions**; local TUI sessions are unaffected.
 - One main path to create a session: the `/new` / `/form` form card.
 - Forms are JSON 2.0; old clients need ≥ V3.7.0 for `select_static`.
@@ -178,7 +182,7 @@ Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepa
 
 Iterating from real usage feedback; current plan:
 
-- [ ] **Accept images / files**: currently only p2p text is handled — images / files get a text placeholder. Planned: download images / files and **attach them to the session** so vision / file-capable models can see the images and read the file contents.
+- [x] **Accept images / files**: done — downloaded automatically into `<configDir>/plugins/feishu-files/` and attached to the session (requires `im:message:readonly`; default max 20MB per attachment).
 - [ ] **New messages cut in by default when busy**: currently new messages queue natively while a session is busy (manual cut-in via `/steer`, `/now`). Planned: new messages default to **cutting in immediately**, interrupting the current step to run first.
 
 ## Advanced topics & development

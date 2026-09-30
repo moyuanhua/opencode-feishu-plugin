@@ -60,6 +60,13 @@ opencode 会**回收空闲的 location**，这会连带卸载插件、关闭飞�
 
 > 想要"完整轨迹保留、不省略工具调用"：把 `runnerCardMaxTools` 调到足够大并接受卡片消息变多（或提高 `finalAnswerMinChars` 降低拆分频率）。
 
+## 图片 / 文件接收
+
+- **权限**：需要应用开通 `im:message:readonly`（获取消息中的资源文件接口要求 `im:message` / `im:message:readonly` / `im:message.history:readonly` 任一）。未开通时下载失败，按降级处理，不影响文本消息。
+- **流程**：收到 image / file 消息 → 按 `image_key` / `file_key` 调 `im.messageResource.get` 下载 → 落盘 `<attachmentsDir>/<messageId>-<文件名>`（图片扩展名按响应 `Content-Type` 推断）→ 以 `file://` URI 作为附件挂进 `session.prompt`（文本末尾附保存路径提示）。
+- **限制**：单附件默认 ≤20MB（`attachmentMaxBytes`，夹取 1–100MB）；超时默认 30s（`attachmentTimeoutMs`）；失败时消息照常投递，仅附「下载失败：原因」。
+- **边界**：音频 / 视频 / 表情包不下载（仍占位文本）；合并转发与卡片内资源飞书不支持直接下载。飞书侧单资源上限 100MB。
+
 ## /sessions 数据源与恢复卡
 
 `/sessions` 列出 opencode **本机全部**会话（按更新时间倒序，分页 8 条可配）：
@@ -143,6 +150,10 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `runnerCardTextMax` | number | `2048` | 运行卡单个文本块字符上限（512–8192） |
 | `finalAnswerMinChars` | number | `600` | 最终回答 ≥ 该长度即**单独成卡/成文件**（0 = 关闭拆分） |
 | `finalAnswerFileMinBytes` | number | `20480` | 最终回答 ≥ 该字节数转为 `.md` 文件发送（8192–102400） |
+| `acceptAttachments` | boolean | `true` | 接收图片/文件：下载到 `attachmentsDir` 后作为附件挂进会话；失败降级为占位文本 |
+| `attachmentMaxBytes` | number | `20971520` | 单附件大小上限（1–100MB），超限拒绝并提示 |
+| `attachmentTimeoutMs` | number | `30000` | 附件下载超时（5–120s） |
+| `attachmentsDir` | string | `<configDir>/plugins/feishu-files` | 附件落盘目录 |
 | `keepalive` | boolean | `true` | **位置保活**：周期性向 opencode 发一次活动，阻止 60 分钟空闲回收 location（会关掉飞书长连接、机器人失联） |
 | `keepaliveIntervalMs` | number | `1200000` | 保活间隔（默认 20 分钟，夹取 5–45）；必须显著小于 opencode 硬编码的 60 分钟 TTL |
 
