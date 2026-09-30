@@ -427,3 +427,21 @@ describe("gatewayMatchGraceMs（精确匹配宽限）", () => {
     expect(resolveConfig({ ...base, gatewayMatchGraceMs: 999999 }, {}, noFile()).gatewayMatchGraceMs).toBe(10_000);
   });
 });
+
+describe("运行卡瘦身 / 最终答案拆分（P8.3）", () => {
+  const base = { appId: "a", appSecret: "b", logFile: false };
+  test("默认值", () => {
+    const cfg = resolveConfig(base, {}, noFile());
+    expect(cfg.runnerCardMaxTools).toBe(12);
+    expect(cfg.runnerCardTextMax).toBe(2048);
+    expect(cfg.finalAnswerMinChars).toBe(600);
+    expect(cfg.finalAnswerFileMinBytes).toBe(20 * 1024);
+  });
+  test("夹取范围", () => {
+    expect(resolveConfig({ ...base, runnerCardMaxTools: 999 }, {}, noFile()).runnerCardMaxTools).toBe(50);
+    expect(resolveConfig({ ...base, runnerCardMaxTools: 0 }, {}, noFile()).runnerCardMaxTools).toBe(1);
+    expect(resolveConfig({ ...base, runnerCardTextMax: 10 }, {}, noFile()).runnerCardTextMax).toBe(512);
+    expect(resolveConfig({ ...base, finalAnswerMinChars: 0 }, {}, noFile()).finalAnswerMinChars).toBe(0);
+    expect(resolveConfig({ ...base, finalAnswerFileMinBytes: 1 }, {}, noFile()).finalAnswerFileMinBytes).toBe(8192);
+  });
+});

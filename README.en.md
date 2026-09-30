@@ -402,8 +402,20 @@ Without this relay, any clarifying question would stall the Feishu session forev
 | `topicStatusInTitle` | boolean | `false` | Add a status emoji prefix to the root card title (e.g. `🟡 session name`). Off by default: the topic name shows in the sidebar, and flipping it would be noisy |
 | `topicStatusThrottleMs` | number | `1000` | Min root-card status refresh interval (clamped 500–10000); patched only when the kind changes |
 | `cardMaxTables` | number | `4` | Max markdown tables kept per card (clamped 1–5); tables beyond it are degraded **cumulatively per card** into fenced code blocks (no content lost) to avoid Feishu 400 `code=230099` |
+| `runnerCardMaxTools` | number | `12` | Max tool blocks kept on the run card (1–50); older ones collapse into "…omitted N tool calls" |
+| `runnerCardTextMax` | number | `2048` | Per-text-block character cap on the run card (512–8192) |
+| `finalAnswerMinChars` | number | `600` | Final answers at least this long are sent **as their own card/file** (`0` disables splitting) |
+| `finalAnswerFileMinBytes` | number | `20480` | Final answers at least this many bytes are delivered as a `.md` file (8192–102400) |
 | `keepalive` | boolean | `true` | **Location keep-alive**: periodically emits activity so OpenCode does not evict the idle Location after 60 minutes (which unloads the plugin and closes the Feishu long connection) |
 | `keepaliveIntervalMs` | number | `1200000` | Keep-alive interval (default 20 min, clamped 5–45); must stay well below OpenCode's hardcoded 60-minute TTL |
+
+### Long answers (run-card slimming + separate final answer)
+
+A long turn (dozens of tool calls) can push a single run card to its limits (28KB / 200 elements), triggering degradation and **dropping the oldest blocks** — the card looks "full" and earlier content disappears. Default strategy:
+
+1. **The run card is progress-only**: keep the last `runnerCardMaxTools` (default 12) tool blocks, collapsing older ones into "…omitted N tool calls"; each text block is capped at `runnerCardTextMax` (default 2KB).
+2. **The final answer is sent separately**: when a turn ends and the trailing text is at least `finalAnswerMinChars` (default 600 chars), it is sent as its own "✅ 完整回答" card; the run card keeps only a short notice.
+3. **Very long answers become files**: at least `finalAnswerFileMinBytes` (default 20KB) → delivered as a `.md` file (preview/download), never truncated.
 
 ### Location keep-alive (on by default)
 

@@ -153,6 +153,17 @@ export interface ResolvedConfig {
    * 关闭后长时间空闲会导致机器人沉默，需外部保活兜底。
    */
   readonly keepalive: boolean;
+  /** 运行卡最多保留的工具块数（默认 12，夹取 1–50）；更早的块合并为省略提示。 */
+  readonly runnerCardMaxTools: number;
+  /** 运行卡单个文本块字符上限（默认 2048，夹取 512–8192）。 */
+  readonly runnerCardTextMax: number;
+  /**
+   * 最终答案阈值（默认 600 字符，夹取 0–20000）：一轮结束时末尾文本 ≥ 该值就
+   * **单独成卡/成文件**发送，运行卡内只留提示。设 0 = 关闭拆分。
+   */
+  readonly finalAnswerMinChars: number;
+  /** 最终答案转 `.md` 文件的字节阈值（默认 20480，夹取 8192–102400）。 */
+  readonly finalAnswerFileMinBytes: number;
   /** 保活心跳间隔（默认 20 分钟，夹取 5–45 分钟；必须显著小于 opencode 的 60 分钟 TTL）。 */
   readonly keepaliveIntervalMs: number;
 }
@@ -227,6 +238,10 @@ export function resolveConfig(
   const topicStatusThrottleMs = clamp(asNumber(merged.topicStatusThrottleMs, 1_000), 500, 10_000);
   const cardMaxTables = clamp(asNumber(merged.cardMaxTables, 4), 1, 5);
   const keepalive = asBoolean(merged.keepalive, true);
+  const runnerCardMaxTools = clamp(asNumber(merged.runnerCardMaxTools, 12), 1, 50);
+  const runnerCardTextMax = clamp(asNumber(merged.runnerCardTextMax, 2048), 512, 8192);
+  const finalAnswerMinChars = clamp(asNumber(merged.finalAnswerMinChars, 600), 0, 20_000);
+  const finalAnswerFileMinBytes = clamp(asNumber(merged.finalAnswerFileMinBytes, 20 * 1024), 8192, 102_400);
   const keepaliveIntervalMs = clamp(
     asNumber(merged.keepaliveIntervalMs, 20 * 60 * 1000),
     5 * 60 * 1000,
@@ -288,6 +303,10 @@ export function resolveConfig(
     cardMaxTables,
     keepalive,
     keepaliveIntervalMs,
+    runnerCardMaxTools,
+    runnerCardTextMax,
+    finalAnswerMinChars,
+    finalAnswerFileMinBytes,
   };
 }
 

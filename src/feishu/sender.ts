@@ -68,6 +68,16 @@ export interface FeishuSender {
   getMessageMeta(messageId: string): Promise<MessageMeta | undefined>;
   /** 撤回消息（表单卡收敛后清理）。失败返回错误，调用方可降级为 patch。 */
   deleteMessage(messageId: string): Promise<{ ok: boolean; error?: string }>;
+  /**
+   * 发送文件（先 `im.file.create` 上传，再发 `msg_type=file`）——用于超长回答转 `.md`。
+   * `replyToMessageId` 有值时引用回复（留在话题内）。
+   */
+  sendFile(
+    chatId: string,
+    fileName: string,
+    content: Buffer,
+    replyToMessageId?: string,
+  ): Promise<{ ok: boolean; messageId?: string; error?: string }>;
 }
 
 type LarkClient = InstanceType<typeof Lark.Client>;
@@ -232,6 +242,32 @@ export function createFeishuSender(client: LarkClient, log: Logger, options: Sen
       } catch (err) {
         log.warn("读取消息异常", { messageId, error: describeLarkError(err) });
         return undefined;
+      }
+    },
+
+    async sendFile(chatId, fileName, content, replyToMessageId) {
+      try {
+        const uploaded = await client.im.file.create({
+          data: { file_type: "stream", file_name: fileName, file: content },
+        });
+        const fileKey = uploaded?.file_key ?? "";
+        if (!fileKey) return { ok: false, error: "missing file_key" };
+        const payload = { msg_type: "file", content: JSON.stringify({ file_key: fileKey }) };
+        const res = replyToMessageId
+          ? await client.im.message.reply({ path: { message_id: replyToMessageId }, data: payload })
+          : await client.im.message.create({
+              params: { receive_id_type: "chat_id" },
+              data: { receive_id: chatId, ...payload },
+            });
+        if (res?.code && res.code !== 0) {
+          log.warn("发送文件失败", { chatId, fileName, code: res.code, msg: res.msg });
+          return { ok: false, error: `code=${res.code} msg=${res.msg ?? ""}` };
+        }
+        const messageId = res?.data?.message_id ?? "";
+        return messageId ? { ok: true, messageId } : { ok: true };
+      } catch (err) {
+        log.warn("发送文件异常", { chatId, fileName, error: describeLarkError(err) });
+        return { ok: false, error: describeLarkError(err) };
       }
     },
 

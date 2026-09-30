@@ -49,6 +49,7 @@ class FakeSender implements FeishuSender {
     return undefined;
   }
 
+  async sendFile(): Promise<{ ok: boolean }> { return { ok: true }; }
   async deleteMessage(): Promise<{ ok: boolean }> { return { ok: true }; }
 }
 
@@ -211,6 +212,63 @@ describe("run controller", () => {
     controller.finalizeQueued("ses_1", "已中断（排队超时）");
     await vi.advanceTimersByTimeAsync(0);
     expect(lastPatchFor(sender, "om_0")).toContain("已中断");
+    controller.dispose();
+  });
+});
+
+describe("最终答案单独发送（P8.3）", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  test("长最终回答 → 运行卡收缩为提示 + sendFinalAnswer 收到完整文本", async () => {
+    const sender = new FakeSender();
+    const answers: Array<{ sessionID: string; chatId: string; replyToMessageId?: string; text: string }> = [];
+    const controller = createRunController({
+      sender,
+      log,
+      enabled: true,
+      throttleMs: 400,
+      finalAnswer: { minChars: 50 },
+      sendFinalAnswer: async (input) => {
+        answers.push(input);
+      },
+    });
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "steer", replyToMessageId: "om_user" });
+    controller.apply("ses_1", { type: "execution.started" });
+    const long = "最终回答正文".repeat(30);
+    controller.apply("ses_1", { type: "text.delta", delta: long });
+    controller.apply("ses_1", { type: "execution.succeeded" });
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(answers).toHaveLength(1);
+    expect(answers[0]!.text).toBe(long);
+    expect(answers[0]!.replyToMessageId).toBe("om_user");
+    const card = lastPatchFor(sender, "om_0");
+    expect(card).toContain("完整回答已单独发送");
+    expect(card).not.toContain("最终回答正文");
+    controller.dispose();
+  });
+
+  test("短回答 → 不拆分（保持原行为）", async () => {
+    const sender = new FakeSender();
+    const answers: unknown[] = [];
+    const controller = createRunController({
+      sender,
+      log,
+      enabled: true,
+      throttleMs: 400,
+      finalAnswer: { minChars: 500 },
+      sendFinalAnswer: async (input) => {
+        answers.push(input);
+      },
+    });
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "steer" });
+    controller.apply("ses_1", { type: "execution.started" });
+    controller.apply("ses_1", { type: "text.delta", delta: "短答案" });
+    controller.apply("ses_1", { type: "execution.succeeded" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(answers).toHaveLength(0);
+    expect(lastPatchFor(sender, "om_0")).toContain("短答案");
     controller.dispose();
   });
 });

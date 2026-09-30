@@ -43,7 +43,7 @@ import { ensureGatewayWatchdog, startKeepalive } from "./session/keepalive.js";
 import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js";
 import { decideRoute } from "./feishu/routing.js";
-import { buildConsoleHintCard, buildStopNoticeCard } from "./feishu/cards.js";
+import { buildConsoleHintCard, buildFinalAnswerCard, buildStopNoticeCard } from "./feishu/cards.js";
 import { buildSessionOpenedCard, buildResumeCompactPendingCard } from "./feishu/session-cards.js";
 import { isUnder, validateDirectory } from "./feishu/dirs.js";
 import { WizardStore } from "./feishu/wizard.js";
@@ -234,9 +234,50 @@ async function start(
     enabled: config.stream,
     throttleMs: config.streamThrottleMs,
     cardMaxTables: config.cardMaxTables,
+    runnerCardMaxTools: config.runnerCardMaxTools,
+    runnerCardTextMax: config.runnerCardTextMax,
+    finalAnswer: { minChars: config.finalAnswerMinChars },
+    // 长回答单独成卡/成文件：运行卡只留「完整回答已单独发送」提示。
+    sendFinalAnswer: (input) => sendFinalAnswer(input),
     // 每次 patch 重签强停 token（`stop` 在下方定义，闭包运行时才求值）。
     buildStopValue: (sessionID) => stop.buildStopValue(sessionID),
   });
+
+  /**
+   * 发送「最终答案」（P8.3）：超过文件阈值 → `.md` 文件；否则单独一张卡。
+   * 回复用户消息（有 replyToMessageId 时）以留在话题内。
+   */
+  async function sendFinalAnswer(input: {
+    readonly sessionID: string;
+    readonly chatId: string;
+    readonly replyToMessageId?: string;
+    readonly text: string;
+  }): Promise<void> {
+    const bytes = Buffer.byteLength(input.text, "utf8");
+    if (bytes > config.finalAnswerFileMinBytes) {
+      const fileName = `opencode-${input.sessionID.slice(-6)}.md`;
+      const res = await sender.sendFile(
+        input.chatId,
+        fileName,
+        Buffer.from(input.text, "utf8"),
+        input.replyToMessageId,
+      );
+      if (res.ok) {
+        log.info("最终答案已转为文件发送", { sessionID: input.sessionID, bytes, fileName });
+        return;
+      }
+      log.warn("最终答案转文件失败，降级为卡片", { sessionID: input.sessionID, error: res.error ?? "unknown" });
+    }
+    const card = buildFinalAnswerCard(input.text);
+    const res = input.replyToMessageId
+      ? await sender.replyCard(input.replyToMessageId, card)
+      : await sender.sendCard(input.chatId, card);
+    if (!res.ok) {
+      log.warn("最终答案卡片发送失败", { sessionID: input.sessionID, error: res.error ?? "unknown" });
+      return;
+    }
+    log.info("最终答案已单独成卡", { sessionID: input.sessionID, bytes });
+  }
 
   /**
    * 会话恢复例程：任务 A（卡片强停按钮）与任务 B（看门狗）共用同一中断路径。

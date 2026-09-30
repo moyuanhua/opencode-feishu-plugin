@@ -66,6 +66,7 @@ class FakeSender implements FeishuSender {
     const threadId = this.threadIdFor(messageId);
     return threadId ? { threadId } : undefined;
   }
+  async sendFile(): Promise<{ ok: boolean }> { return { ok: true }; }
   async deleteMessage(): Promise<{ ok: boolean }> { return { ok: true }; }
 }
 

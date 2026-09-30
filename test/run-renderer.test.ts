@@ -184,3 +184,42 @@ describe("renderRunCard 强制停止按钮", () => {
     expect(stopButton(card)).toBeTruthy();
   });
 });
+
+describe("运行卡瘦身（P8.3）", () => {
+  const toolState = (n: number): RunState => ({
+    blocks: Array.from({ length: n }, (_, i) => ({
+      kind: "tool" as const,
+      tool: { id: `t${i}`, name: "shell", status: "done" as const, output: `out${i}` },
+    })),
+    footer: "tool_running",
+    terminal: "running",
+  });
+
+  test("工具块超上限 → 省略提示 + 只保留最近 N 个", () => {
+    const card = JSON.stringify(renderRunCard(toolState(20), undefined, { maxTools: 12 }));
+    expect(card).toContain("已省略前 8 次工具调用");
+    expect(card).not.toContain("out0");
+    expect(card).toContain("out19");
+  });
+
+  test("未超上限 → 不出现省略提示", () => {
+    const card = JSON.stringify(renderRunCard(toolState(5), undefined, { maxTools: 12 }));
+    expect(card).not.toContain("已省略");
+  });
+
+  test("finalSeparated → 末尾文本收缩为提示", () => {
+    const long = "这是完整回答的正文".repeat(20);
+    const state: RunState = {
+      blocks: [
+        { kind: "tool", tool: { id: "t1", name: "shell", status: "done" as const } },
+        { kind: "text", content: long, streaming: false },
+      ],
+      footer: null,
+      terminal: "done",
+      finalSeparated: true,
+    };
+    const card = JSON.stringify(renderRunCard(state));
+    expect(card).toContain("完整回答已单独发送");
+    expect(card).not.toContain("这是完整回答的正文");
+  });
+});

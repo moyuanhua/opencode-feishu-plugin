@@ -263,6 +263,10 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `topicStatusInTitle` | boolean | `false` | 是否在根卡标题加状态 emoji 前缀 |
 | `topicStatusThrottleMs` | number | `1000` | 根卡状态刷新最小间隔（500–10000） |
 | `cardMaxTables` | number | `4` | 单卡最多保留的 markdown 表格数（1–5）；超出按整卡累计降级为围栏代码块，避免飞书 400 `code=230099` |
+| `runnerCardMaxTools` | number | `12` | 运行卡最多保留的工具块数（1–50）；更早的合并为「已省略前 N 次工具调用」 |
+| `runnerCardTextMax` | number | `2048` | 运行卡单个文本块字符上限（512–8192） |
+| `finalAnswerMinChars` | number | `600` | 最终回答 ≥ 该长度即**单独成卡/成文件**（0 = 关闭拆分） |
+| `finalAnswerFileMinBytes` | number | `20480` | 最终回答 ≥ 该字节数转为 `.md` 文件发送（8192–102400） |
 | `keepalive` | boolean | `true` | **位置保活**：周期性向 opencode 发一次活动，阻止 60 分钟空闲回收 location（会关掉飞书长连接、机器人失联） |
 | `keepaliveIntervalMs` | number | `1200000` | 保活间隔（默认 20 分钟，夹取 5–45）；必须显著小于 opencode 硬编码的 60 分钟 TTL |
 
@@ -283,6 +287,16 @@ permission.evaluate (插件 hook)               permission.asked (事件流)
 - **只对飞书来源的会话生效**：本地 TUI 等无映射会话不会被降级为 ask（否则会因没有审批出口而永久挂起）。
 - **三重单人边界**：可用范围「仅本人」+ 不申请群权限 + 代码层 open_id 白名单。
 - **`always` 语义**：仅当请求带 `save[]` 时才持久化，否则等价于「允许一次」。
+
+### 长回答处理（运行卡瘦身 + 最终答案独立）
+
+长任务（几十次工具调用）会把单张运行卡撑到上限（28KB / 200 元素），触发降级与**丢弃最旧块**——用户会看到"卡被撑满、前面内容消失"。默认策略：
+
+1. **运行卡只做进度**：最多保留最近 `runnerCardMaxTools`（默认 12）个工具块，更早的合并为「…已省略前 N 次工具调用」；单个文本块上限 `runnerCardTextMax`（默认 2KB）。
+2. **最终答案独立发送**：一轮结束时末尾文本 ≥ `finalAnswerMinChars`（默认 600 字符）→ 单独发一张「✅ 完整回答」卡（不与被工具噪声塞满的运行卡抢空间）；运行卡内只留「完整回答已单独发送」提示。
+3. **超长转文件**：最终回答 ≥ `finalAnswerFileMinBytes`（默认 20KB）→ 作为 `.md` 文件发送（可预览/下载），内容不截断、不丢失。
+
+> 想要"完整轨迹保留、不省略工具调用"：把 `runnerCardMaxTools` 调到足够大并接受卡片消息变多（或提高 `finalAnswerMinChars` 降低拆分频率）。
 
 ### 位置保活（防空闲失联，默认开启）
 

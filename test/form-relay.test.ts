@@ -31,6 +31,7 @@ class FakeSender implements FeishuSender {
   readonly deleted: string[] = [];
   /** 设为 true 模拟撤回失败（超时限/无权限）。 */
   failDelete = false;
+  async sendFile(): Promise<{ ok: boolean }> { return { ok: true }; }
   async deleteMessage(messageId: string): Promise<{ ok: boolean; error?: string }> {
     if (this.failDelete) return { ok: false, error: "recall denied" };
     this.deleted.push(messageId);

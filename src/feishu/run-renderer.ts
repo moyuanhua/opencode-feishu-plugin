@@ -19,6 +19,8 @@ const TOOL_INPUT_MAX = 600;
 const TOOL_OUTPUT_MAX = 600;
 const OUTPUT_FIRST_LINE_MAX = 200;
 const TEXT_ELEMENT_MAX = 8 * 1024;
+const DEFAULT_MAX_TOOLS = 12;
+const DEFAULT_TEXT_MAX = 2 * 1024;
 
 interface ToolGroup {
   readonly kind: "tools";
@@ -34,6 +36,10 @@ type Group = ToolGroup | TextGroup;
 export interface RenderRunCardOptions {
   /** 单卡最多保留的 markdown 表格数（默认见 `DEFAULT_CARD_MAX_TABLES`，夹取 1–5）。 */
   readonly maxTables?: number;
+  /** 单卡最多保留的**工具块**数（默认 12）；更早的工具块合并成一行省略提示。 */
+  readonly maxTools?: number;
+  /** 单个文本块的字符上限（默认 2048）；完整回答由「最终答案卡/文件」承载。 */
+  readonly textMax?: number;
   /** 发生表格降级 / 元素丢弃时回调（供调用方按 sessionID 记日志；纯函数本身不打日志）。 */
   readonly onLimit?: (report: CardLimitReport) => void;
 }
@@ -53,10 +59,28 @@ export function renderRunCard(
   options: RenderRunCardOptions = {},
 ): object {
   const elements: object[] = [];
+  const maxTools = options.maxTools ?? DEFAULT_MAX_TOOLS;
+  const textMax = options.textMax ?? DEFAULT_TEXT_MAX;
+  const capped = capToolBlocks(state.blocks, maxTools);
+  if (capped.omitted > 0) {
+    elements.push(note(`…已省略前 ${capped.omitted} 次工具调用（完整记录见 opencode 会话）`));
+  }
+  const groups = groupBlocks(capped.blocks);
+  const lastTextIndex = groups.reduce(
+    (acc, g, i) => (g.kind === "text" && g.content.trim() ? i : acc),
+    -1,
+  );
 
-  for (const group of groupBlocks(state.blocks)) {
+  for (let i = 0; i < groups.length; i += 1) {
+    const group = groups[i]!;
     if (group.kind === "text") {
-      if (group.content.trim()) elements.push(markdown(truncateCardContent(group.content, TEXT_ELEMENT_MAX)));
+      if (!group.content.trim()) continue;
+      // 终态且完整回答已单独发送 → 卡内只保留提示，避免重复占位。
+      if (state.finalSeparated && i === lastTextIndex) {
+        elements.push(note("✅ 完整回答已单独发送（见下方卡片 / 附件）"));
+        continue;
+      }
+      elements.push(markdown(truncateCardContent(group.content, Math.min(textMax, TEXT_ELEMENT_MAX))));
     } else {
       elements.push(...renderToolGroup(group.tools, state.terminal !== "running"));
     }
@@ -100,6 +124,28 @@ export function renderRunCard(
     options.onLimit(report);
   }
   return enforceSize(guarded);
+}
+
+/**
+ * 只保留最近 `maxTools` 个工具块；更早的直接丢弃（由省略提示代替），
+ * 避免长任务把 28KB 卡片塞满、把最旧内容悄悄挤掉。
+ */
+function capToolBlocks(
+  blocks: readonly RunBlock[],
+  maxTools: number,
+): { blocks: RunBlock[]; omitted: number } {
+  const total = blocks.reduce((n, b) => n + (b.kind === "tool" ? 1 : 0), 0);
+  if (maxTools <= 0 || total <= maxTools) return { blocks: [...blocks], omitted: 0 };
+  let toDrop = total - maxTools;
+  const out: RunBlock[] = [];
+  for (const block of blocks) {
+    if (block.kind === "tool" && toDrop > 0) {
+      toDrop -= 1;
+      continue;
+    }
+    out.push(block);
+  }
+  return { blocks: out, omitted: total - maxTools };
 }
 
 /** 连续的工具块归为一组；文本块单独成组，保持原始顺序。 */

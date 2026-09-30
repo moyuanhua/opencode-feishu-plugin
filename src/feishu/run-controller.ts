@@ -12,8 +12,9 @@
  * - 终态到来：finalize active 并清空 active，等待下一次 `execution.started`。
  */
 import type { Logger } from "../types.js";
+import { errorMessage } from "../logger.js";
 import { createThrottler } from "../utils/throttle.js";
-import { initialRunState, reduce, type RunEvent, type RunState } from "./run-state.js";
+import { initialRunState, reduce, type RunBlock, type RunEvent, type RunState } from "./run-state.js";
 import { renderRunCard } from "./run-renderer.js";
 import type { FeishuSender } from "./sender.js";
 import type { Delivery } from "./delivery.js";
@@ -33,6 +34,22 @@ export interface RunControllerDeps {
    * 每次 patch 都会调用 → 长任务 token 始终保持新鲜；缺省不渲染按钮。
    */
   readonly buildStopValue?: (sessionID: string) => Record<string, unknown> | undefined;
+  /** 运行卡最多保留的工具块数（默认 12，见 run-renderer）。 */
+  readonly runnerCardMaxTools?: number;
+  /** 运行卡单个文本块字符上限（默认 2048）。 */
+  readonly runnerCardTextMax?: number;
+  /**
+   * 最终答案阈值（P8.3）：一轮结束时，末尾文本 ≥ `minChars` 就**单独成卡/成文件**发送，
+   * 运行卡内只留提示——避免长回答与工具噪声抢同一张卡。
+   */
+  readonly finalAnswer?: { readonly minChars: number };
+  /** 发送「最终答案卡/文件」（由 index 注入；缺省 = 不拆分）。 */
+  readonly sendFinalAnswer?: (input: {
+    readonly sessionID: string;
+    readonly chatId: string;
+    readonly replyToMessageId?: string;
+    readonly text: string;
+  }) => Promise<void>;
 }
 
 export interface BeginRunInput {
@@ -80,12 +97,28 @@ interface Card {
   finalized: boolean;
   /** 进入排队队列的时间（ms）；用于排队超时检测。 */
   readonly queuedAt: number;
+  readonly replyToMessageId?: string;
 }
 
 interface SessionRuns {
   active?: Card;
   readonly queued: Card[];
   seq: number;
+}
+
+/** 取「最后一个工具块之后」的文本（即本轮最终回答），无工具时为全部文本。 */
+function trailingText(blocks: readonly RunBlock[]): string {
+  const parts: string[] = [];
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const block = blocks[i]!;
+    if (block.kind === "tool") {
+      if (parts.length > 0) break;
+      continue;
+    }
+    if (block.content.trim()) parts.unshift(block.content);
+    else if (parts.length > 0) break;
+  }
+  return parts.join("\n\n").trim();
 }
 
 export function createRunController(deps: RunControllerDeps): RunController {
@@ -111,6 +144,8 @@ export function createRunController(deps: RunControllerDeps): RunController {
   const renderCard = (sessionID: string, state: RunState): object =>
     renderRunCard(state, deps.buildStopValue?.(sessionID), {
       maxTables: deps.cardMaxTables,
+      maxTools: deps.runnerCardMaxTools,
+      textMax: deps.runnerCardTextMax,
       onLimit: (report) => {
         deps.log.warn("运行卡内容超限，已降级", {
           sessionID,
@@ -201,6 +236,7 @@ export function createRunController(deps: RunControllerDeps): RunController {
         chain: Promise.resolve(),
         finalized: false,
         queuedAt: Date.now(),
+        ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
       };
 
       if (input.delivery === "queue") {
@@ -236,7 +272,36 @@ export function createRunController(deps: RunControllerDeps): RunController {
       const card = runs.active;
       if (!card) return;
 
-      if (event.type === "execution.succeeded" || event.type === "execution.failed") {
+      if (event.type === "execution.succeeded") {
+        // 长回答：单独发「最终答案卡/文件」，卡内收缩为提示，避免两者抢同一张卡。
+        const text = trailingText(card.state.blocks);
+        const long =
+          deps.sendFinalAnswer !== undefined &&
+          deps.finalAnswer !== undefined &&
+          text.length >= deps.finalAnswer.minChars;
+        if (long) {
+          card.state = reduce(reduce(card.state, { type: "final.separated" }), event);
+          finalize(card);
+          runs.active = undefined;
+          void deps
+            .sendFinalAnswer!({
+              sessionID,
+              chatId: card.chatId,
+              ...(card.replyToMessageId ? { replyToMessageId: card.replyToMessageId } : {}),
+              text,
+            })
+            .catch((err) => {
+              deps.log.warn("最终答案发送失败", { sessionID, error: errorMessage(err) });
+            });
+          return;
+        }
+        update(card, event, true);
+        finalize(card);
+        runs.active = undefined;
+        return;
+      }
+
+      if (event.type === "execution.failed") {
         update(card, event, true);
         finalize(card);
         runs.active = undefined;

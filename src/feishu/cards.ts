@@ -275,3 +275,16 @@ function closeCodeFences(text: string): string {
   if (fences && fences.length % 2 !== 0) return `${text}${CODE_FENCE}`;
   return text;
 }
+
+/**
+ * 「完整回答」卡（P8.3）：长回答单独成卡，不与被工具噪声塞满的运行卡抢空间。
+ * 正文做 24KB 上限截断（超过该阈值的走 `.md` 文件，见 index.ts 的 sendFinalAnswer）。
+ */
+export function buildFinalAnswerCard(text: string): object {
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    header: { title: { tag: "plain_text", content: "✅ 完整回答" }, template: "green" },
+    body: { elements: [{ tag: "markdown", content: truncateCardContent(text, 24 * 1024) }] },
+  };
+}

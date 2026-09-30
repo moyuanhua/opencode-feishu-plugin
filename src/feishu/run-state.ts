@@ -43,6 +43,8 @@ export interface RunState {
   readonly assistantMessageID?: string;
   /** 当前会话模型展示名（P6，运行卡页脚展示）。 */
   readonly model?: string;
+  /** 终态：完整回答已单独成卡/成文件发送 → 卡内文本收缩为提示（P8.3）。 */
+  readonly finalSeparated?: boolean;
 }
 
 /** 归一化事件：把 SSE 事件名 + 关键字段收敛成 reducer 可直接消费的形状。 */
@@ -58,7 +60,9 @@ export type RunEvent =
   | { readonly type: "tool.input.started"; readonly id: string; readonly name: string; readonly assistantMessageID?: string }
   | { readonly type: "tool.input.ended"; readonly id: string; readonly input?: unknown; readonly assistantMessageID?: string }
   | { readonly type: "tool.success"; readonly id: string; readonly output?: string; readonly assistantMessageID?: string }
-  | { readonly type: "tool.error"; readonly id: string; readonly output?: string; readonly assistantMessageID?: string };
+  | { readonly type: "tool.error"; readonly id: string; readonly output?: string; readonly assistantMessageID?: string }
+  /** 完整回答已单独发送（终态收缩卡内正文）。 */
+  | { readonly type: "final.separated" };
 
 export function initialRunState(): RunState {
   return { blocks: [], footer: "thinking", terminal: "running" };
@@ -187,6 +191,9 @@ export function reduce(state: RunState, event: RunEvent): RunState {
         status: "error",
         output: event.output,
       }));
+
+    case "final.separated":
+      return { ...state, finalSeparated: true };
 
     default:
       return state;
