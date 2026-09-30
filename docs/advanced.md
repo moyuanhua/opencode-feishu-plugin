@@ -63,7 +63,8 @@ opencode 会**回收空闲的 location**，这会连带卸载插件、关闭飞�
 ## 图片 / 文件接收
 
 - **权限**：需要应用开通 `im:message:readonly`（获取消息中的资源文件接口要求 `im:message` / `im:message:readonly` / `im:message.history:readonly` 任一）。未开通时下载失败，按降级处理，不影响文本消息。
-- **流程**：收到 image / file 消息 → 按 `image_key` / `file_key` 调 `im.messageResource.get` 下载 → 落盘 `<attachmentsDir>/<messageId>-<文件名>`（图片扩展名按响应 `Content-Type` 推断）→ 以 `file://` URI 作为附件挂进 `session.prompt`（文本末尾附保存路径提示）。
+- **流程**：收到 image / file 消息 → 按 `image_key` / `file_key` 调 `im.messageResource.get` 下载 → 落盘到**附件目录**（默认 `<会话工作目录>/.opencode/temp/opencode-feishu-plugin/`，内置 `.gitignore` 避免污染 `git status`；可用 `attachmentsDir` 覆盖；无法确定会话目录时回退系统临时目录）→ 以 `file://` URI 作为附件挂进 `session.prompt`（文本末尾附保存路径提示）。
+- **为什么不放系统临时目录**：文件在会话工作目录**内**，模型用 `read` 等工具再读是"工作区内读取"，**不会触发越目录审批**；放在目录外则每次读取都要人工批准。
 - **限制**：单附件默认 ≤20MB（`attachmentMaxBytes`，夹取 1–100MB）；超时默认 30s（`attachmentTimeoutMs`）；失败时消息照常投递，仅附「下载失败：原因」。
 - **边界**：音频 / 视频 / 表情包不下载（仍占位文本）；合并转发与卡片内资源飞书不支持直接下载。飞书侧单资源上限 100MB。
 
@@ -153,7 +154,7 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `acceptAttachments` | boolean | `true` | 接收图片/文件：下载到 `attachmentsDir` 后作为附件挂进会话；失败降级为占位文本 |
 | `attachmentMaxBytes` | number | `20971520` | 单附件大小上限（1–100MB），超限拒绝并提示 |
 | `attachmentTimeoutMs` | number | `30000` | 附件下载超时（5–120s） |
-| `attachmentsDir` | string | `<configDir>/plugins/feishu-files` | 附件落盘目录 |
+| `attachmentsDir` | string | `<会话工作目录>/.opencode/temp/opencode-feishu-plugin` | 附件落盘目录；显式配置则精确使用（不再附加子目录），未配置时无法确定会话目录则回退系统临时目录 `<tmp>/opencode-feishu-plugin` |
 | `keepalive` | boolean | `true` | **位置保活**：周期性向 opencode 发一次活动，阻止 60 分钟空闲回收 location（会关掉飞书长连接、机器人失联） |
 | `keepaliveIntervalMs` | number | `1200000` | 保活间隔（默认 20 分钟，夹取 5–45）；必须显著小于 opencode 硬编码的 60 分钟 TTL |
 

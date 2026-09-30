@@ -182,7 +182,7 @@ agent 反问时表单会变成飞书卡片，**点按钮或在话题里直接发
 
 按真实使用反馈迭代，当前规划：
 
-- [x] **接收图片 / 文件**：已支持——自动下载到 `<configDir>/plugins/feishu-files/` 并作为附件挂进会话（需开 `im:message:readonly`；单附件默认 ≤20MB）。
+- [x] **接收图片 / 文件**：已支持——自动下载到**会话工作目录**下的 `.opencode/temp/opencode-feishu-plugin/`（内置 `.gitignore`，不污染 `git status`；可用 `attachmentsDir` 覆盖；单附件默认 ≤20MB）。
 - [ ] **忙时新消息默认插队**：目前会话忙时新消息默认排队（可用 `/steer`、`/now` 手动插队）。规划：忙时你发的新消息**默认直接插队**，立即打断当前步骤优先执行。
 
 ## 高级主题与开发

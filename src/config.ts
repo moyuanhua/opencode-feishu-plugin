@@ -168,15 +168,19 @@ export interface ResolvedConfig {
   readonly keepaliveIntervalMs: number;
   /**
    * 接收图片/文件（默认 true）：下载到 `attachmentsDir` 后作为会话附件挂进 prompt。
-   * 需要应用开通 `im:resource` 权限；未开通/失败时降级为占位文本。
+   * 需要应用开通 `im:message:readonly` 权限；未开通/失败时降级为占位文本。
    */
   readonly acceptAttachments: boolean;
   /** 单附件大小上限（默认 20MB，夹取 1–100MB）；超限拒绝并提示。 */
   readonly attachmentMaxBytes: number;
   /** 附件下载超时（默认 30s，夹取 5–120s）。 */
   readonly attachmentTimeoutMs: number;
-  /** 附件落盘目录（默认 `<configDir>/plugins/feishu-files`；显式配置优先）。 */
-  readonly attachmentsDir: string;
+  /**
+   * 附件落盘目录；**不配置时**默认落在**会话工作目录**下：
+   * `<会话工作目录>/.opencode/temp/opencode-feishu-plugin/`（无法确定会话目录时回退
+   * `<系统临时目录>/opencode-feishu-plugin`）。显式配置则完全覆盖（精确目录）。
+   */
+  readonly attachmentsDir?: string;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -261,9 +265,6 @@ export function resolveConfig(
   );
   const attachmentTimeoutMs = clamp(asNumber(merged.attachmentTimeoutMs, 30_000), 5_000, 120_000);
   const attachmentsDirRaw = asString(merged.attachmentsDir).trim();
-  const attachmentsDir = attachmentsDirRaw
-    ? attachmentsDirRaw
-    : join(resolveConfigDir(env, deps.configDir), "plugins", "feishu-files");
   const keepaliveIntervalMs = clamp(
     asNumber(merged.keepaliveIntervalMs, 20 * 60 * 1000),
     5 * 60 * 1000,
@@ -332,7 +333,7 @@ export function resolveConfig(
     acceptAttachments,
     attachmentMaxBytes,
     attachmentTimeoutMs,
-    attachmentsDir,
+    ...(attachmentsDirRaw ? { attachmentsDir: attachmentsDirRaw } : {}),
   };
 }
 

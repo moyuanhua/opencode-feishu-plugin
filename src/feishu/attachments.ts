@@ -1,15 +1,45 @@
 /**
  * 消息附件（图片/文件）接收：下载飞书消息资源到本地，作为会话附件喂给模型。
  *
- * - 需要应用开通 **`im:resource`**（获取消息中的资源文件）权限；未开通 / 下载失败时
+ * - 需要应用开通 **`im:message:readonly`**（消息资源下载接口要求 `im:message` /
+ *   `im:message:readonly` / `im:message.history:readonly` 任一）；未开通 / 下载失败时
  *   降级为纯占位文本 + 失败原因（**不阻断消息**，用户仍能获得反馈）。
- * - 下载落盘到 `<configDir>/plugins/feishu-files/`（可用 `attachmentsDir` 覆盖）。
+ * - 下载落盘到**会话工作目录**下：`<会话目录>/.opencode/temp/opencode-feishu-plugin/`
+ *   （可用 `attachmentsDir` 覆盖；无法确定会话目录时回退系统临时目录）。
  * - 纯逻辑 + 注入 IO，便于单测；**永不抛异常**（异常收敛为 `{ ok:false, reason }`）。
  */
-import { mkdir, rm, stat } from "node:fs/promises";
+import { mkdir, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { extname, join } from "node:path";
 import { errorMessage } from "../logger.js";
 import type { IncomingAttachment, Logger } from "../types.js";
+
+/** 附件目录（会话工作目录内）：`.opencode/temp/opencode-feishu-plugin`。 */
+export const ATTACHMENT_DIR_RELATIVE = [".opencode", "temp", "opencode-feishu-plugin"] as const;
+
+/**
+ * 计算附件的落盘目录。
+ * - 显式 `override` → 精确使用（不再附加任何子目录）；
+ * - 否则：有会话目录 → `<会话目录>/.opencode/temp/opencode-feishu-plugin`；
+ * - 会话目录未知 → `<系统临时目录>/opencode-feishu-plugin`（回退）。
+ */
+export function resolveAttachmentDir(override: string | undefined, sessionDir: string | undefined): string {
+  if (override && override.trim()) return override.trim();
+  if (sessionDir && sessionDir.trim()) return join(sessionDir.trim(), ...ATTACHMENT_DIR_RELATIVE);
+  return join(tmpdir(), "opencode-feishu-plugin");
+}
+
+/**
+ * 在附件目录内放一个 `.gitignore`（内容 `*`），避免下载的图片/文件
+ * 出现在用户的 `git status` 里。已存在或写入失败时静默忽略。
+ */
+export async function ensureAttachmentDirGitIgnored(dir: string): Promise<void> {
+  try {
+    await writeFile(join(dir, ".gitignore"), "*\n", { flag: "wx" });
+  } catch {
+    // 已存在 / 无权限：忽略
+  }
+}
 
 /** 下载资源所需的最小客户端形状（只依赖用到的方法，便于测试替身）。 */
 export interface AttachmentResourceClient {
@@ -38,6 +68,8 @@ export interface DownloadAttachmentInput {
   readonly maxBytes: number;
   readonly timeoutMs: number;
   readonly log: Logger;
+  /** true = 在目录内确保 `.gitignore`（`*`），默认落盘会话目录时用，避免污染 git status。 */
+  readonly gitIgnore?: boolean;
 }
 
 export type DownloadAttachmentOutcome =
@@ -141,11 +173,12 @@ export function attachmentSavedPrompt(input: {
 export async function downloadAttachment(
   input: DownloadAttachmentInput,
 ): Promise<DownloadAttachmentOutcome> {
-  const { client, messageId, attachment, dir, maxBytes, timeoutMs, log } = input;
+  const { client, messageId, attachment, dir, maxBytes, timeoutMs, log, gitIgnore } = input;
   const startedAt = Date.now();
   let target: string | undefined;
   try {
     await mkdir(dir, { recursive: true });
+    if (gitIgnore) await ensureAttachmentDirGitIgnored(dir);
     const res = await withTimeout(
       client.im.messageResource.get({
         params: { type: attachment.kind },

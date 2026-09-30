@@ -7,8 +7,10 @@ import {
   buildAttachmentFileName,
   downloadAttachment,
   downloadedAttachmentPrompt,
+  ensureAttachmentDirGitIgnored,
   formatBytes,
   imageExtFromHeaders,
+  resolveAttachmentDir,
   sanitizeAttachmentName,
   type AttachmentResourceClient,
 } from "../src/feishu/attachments.js";
@@ -96,6 +98,33 @@ describe("附件工具函数", () => {
   });
 });
 
+describe("resolveAttachmentDir", () => {
+  test("默认落在会话工作目录的 .opencode/temp/opencode-feishu-plugin", () => {
+    expect(resolveAttachmentDir(undefined, "/work/proj")).toBe(
+      "/work/proj/.opencode/temp/opencode-feishu-plugin",
+    );
+    expect(resolveAttachmentDir("  ", "/work/proj")).toBe("/work/proj/.opencode/temp/opencode-feishu-plugin");
+  });
+  test("显式配置精确覆盖（不再附加子目录）", () => {
+    expect(resolveAttachmentDir("/data/att", "/work/proj")).toBe("/data/att");
+  });
+  test("会话目录未知时回退系统临时目录", () => {
+    expect(resolveAttachmentDir(undefined, undefined)).toBe(join(tmpdir(), "opencode-feishu-plugin"));
+  });
+});
+
+describe("ensureAttachmentDirGitIgnored", () => {
+  test("写入 * 的 .gitignore；已存在时不覆盖", async () => {
+    const dir = await makeTmpDir();
+    await ensureAttachmentDirGitIgnored(dir);
+    expect(await readFile(join(dir, ".gitignore"), "utf8")).toBe("*\n");
+    // 二次调用不覆盖（wx 标志 + 忽略异常）。
+    await writeFile(join(dir, ".gitignore"), "custom\n");
+    await ensureAttachmentDirGitIgnored(dir);
+    expect(await readFile(join(dir, ".gitignore"), "utf8")).toBe("custom\n");
+  });
+});
+
 describe("downloadAttachment", () => {
   const attachment = { kind: "file" as const, fileKey: "file_1", fileName: "报告.pdf" };
 
@@ -117,6 +146,22 @@ describe("downloadAttachment", () => {
     expect(outcome.size).toBe(9);
     expect(await readFile(outcome.path, "utf8")).toBe("pdf-bytes");
     expect(downloadedAttachmentPrompt(attachment, outcome)).toContain(outcome.path);
+  });
+
+  test("gitIgnore=true：目录内自动生成 .gitignore（*）", async () => {
+    const dir = await makeTmpDir();
+    const outcome = await downloadAttachment({
+      client: fakeClient({}),
+      messageId: "om_gi",
+      attachment,
+      dir,
+      maxBytes: 1024,
+      timeoutMs: 1000,
+      log,
+      gitIgnore: true,
+    });
+    expect(outcome.ok).toBe(true);
+    expect(await readFile(join(dir, ".gitignore"), "utf8")).toBe("*\n");
   });
 
   test("超过大小上限：拒绝并删除已落盘文件", async () => {

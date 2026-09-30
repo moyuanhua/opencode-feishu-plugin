@@ -418,12 +418,12 @@ describe("keepalive", () => {
 
 describe("附件接收（acceptAttachments）", () => {
   const base = { appId: "a", appSecret: "b", logFile: false };
-  test("默认开启，20MB / 30s，落盘目录在 configDir 下", () => {
+  test("默认开启，20MB / 30s，attachmentsDir 默认未配置（落在会话目录）", () => {
     const cfg = resolveConfig(base, {}, noFile());
     expect(cfg.acceptAttachments).toBe(true);
     expect(cfg.attachmentMaxBytes).toBe(20 * 1024 * 1024);
     expect(cfg.attachmentTimeoutMs).toBe(30_000);
-    expect(cfg.attachmentsDir).toBe("/tmp/opencode-feishu-v2-tests/no-config/plugins/feishu-files");
+    expect(cfg.attachmentsDir).toBeUndefined();
   });
   test("可关闭 / 可显式指定目录", () => {
     const cfg = resolveConfig(

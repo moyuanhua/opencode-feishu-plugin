@@ -435,8 +435,10 @@ describe("index 话题路由（集成）", () => {
     expect(last.text).toContain("[附件] 图片");
     expect(last.files).toHaveLength(1);
     expect(last.files![0]!.uri.startsWith("file://")).toBe(true);
-    expect(last.files![0]!.uri.replace("file://", "")).toBe("/tmp/feishu-att-it/om_img1-image.png");
-    expect(await readFile("/tmp/feishu-att-it/om_img1-image.png", "utf8")).toBe("png-bytes");
+    // 显式 attachmentsDir：精确目录 + messageId 前缀。
+    const saved = last.files![0]!.uri.replace("file://", "");
+    expect(saved).toBe("/tmp/feishu-att-it/om_img1-image.png");
+    expect(await readFile(saved, "utf8")).toBe("png-bytes");
     expect(h.resourceGets).toHaveLength(1);
   });
 

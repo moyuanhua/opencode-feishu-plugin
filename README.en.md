@@ -182,7 +182,7 @@ Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepa
 
 Iterating from real usage feedback; current plan:
 
-- [x] **Accept images / files**: done — downloaded automatically into `<configDir>/plugins/feishu-files/` and attached to the session (requires `im:message:readonly`; default max 20MB per attachment).
+- [x] **Accept images / files**: done — downloaded automatically into the session working directory at `.opencode/temp/opencode-feishu-plugin/` (with a built-in `.gitignore`, so `git status` stays clean; override with `attachmentsDir`; default max 20MB per attachment).
 - [ ] **New messages cut in by default when busy**: currently new messages queue natively while a session is busy (manual cut-in via `/steer`, `/now`). Planned: new messages default to **cutting in immediately**, interrupting the current step to run first.
 
 ## Advanced topics & development

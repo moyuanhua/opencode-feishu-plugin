@@ -30,7 +30,7 @@ import { OwnerPolicy } from "./security/allowlist.js";
 import { ReplayGuard, signApproval, signAllowSession, signStop, verifyApproval, verifyAllowSession, verifyStop } from "./security/token.js";
 import { startGateway } from "./feishu/gateway.js";
 import { createFeishuSender } from "./feishu/sender.js";
-import { downloadAttachment, downloadedAttachmentPrompt } from "./feishu/attachments.js";
+import { downloadAttachment, downloadedAttachmentPrompt, resolveAttachmentDir } from "./feishu/attachments.js";
 import { SessionMap } from "./feishu/session-map.js";
 import { MessageDedup } from "./feishu/dedup.js";
 import { decideDelivery, ExecutionTracker, type Delivery } from "./feishu/delivery.js";
@@ -908,7 +908,8 @@ async function start(
     });
     if (!receipt.ok) log.warn("回执卡未发送，仍继续 prompt", { sessionID, delivery });
 
-    // 图片/文件：先下载到本地，作为会话附件挂进 prompt；失败降级为占位文本 + 原因。
+    // 图片/文件：先下载到本地（默认落在**会话工作目录**：`<dir>/.opencode/temp/opencode-feishu-plugin/`），
+    // 作为会话附件挂进 prompt；失败降级为占位文本 + 原因。
     let promptText = message.text;
     const files: Array<{ uri: string }> = [];
     if (config.acceptAttachments && message.attachment) {
@@ -916,10 +917,12 @@ async function start(
         client,
         messageId: message.messageId,
         attachment: message.attachment,
-        dir: config.attachmentsDir,
+        dir: resolveAttachmentDir(config.attachmentsDir, link?.dir),
         maxBytes: config.attachmentMaxBytes,
         timeoutMs: config.attachmentTimeoutMs,
         log,
+        // 显式配置的目录不动；默认的会话内目录顺手放 `.gitignore`，避免污染 git status。
+        ...(config.attachmentsDir ? {} : { gitIgnore: true }),
       });
       if (outcome.ok) {
         files.push({ uri: pathToFileURL(outcome.path).href });
