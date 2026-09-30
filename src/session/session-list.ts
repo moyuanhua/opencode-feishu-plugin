@@ -191,26 +191,22 @@ export async function enterSessionThread(
   const onLimit = (report: CardLimitReport): void => {
     ctx.deps.log.warn("会话恢复卡内容超限，已降级", { sessionID, ...report });
   };
-  const cardInput = {
+  const newNow = ctx.now();
+  // 根卡 = 话题根（标题即话题名）：只放会话元信息 + "已开话题"引导，摘要放话题首条回复。
+  const baseInput = {
     title: info?.title ?? "",
     sessionID,
     ...(dir ? { dir } : {}),
     ...(link?.model ? { model: modelLabel(link.model) } : {}),
     ...(info?.updatedAt ? { updatedAt: info.updatedAt } : {}),
-    now: ctx.now(),
+    now: newNow,
     ...(ctx.deps.cardMaxTables !== undefined ? { maxTables: ctx.deps.cardMaxTables } : {}),
     onLimit,
-    ...(showSummary ? { summaryPending: true } : {}),
-    // 「🗜 压缩并总结」只在开关开启且运行时装配了签名时渲染。
-    ...(showSummary && ctx.deps.signCompact
-      ? { compactButton: { sessionID, token: ctx.deps.signCompact(sessionID) } }
-      : {}),
+    openedTopic: true,
   };
-  const card = buildSessionOpenedCard(cardInput);
-  // 恢复会话：在主聊天流发一张**普通消息卡**作为该会话的"恢复卡"。
-  // 不预先开话题——用户**回复这张卡**时飞书会自动在该卡下形成话题（root_id = 卡片消息 id），
-  // 我们靠 root→session 映射把消息路由到该会话（见 index.ts 的入站路由）。
-  const res = await ctx.deps.sender.sendCard(chatId, card);
+  const rootCard = buildSessionOpenedCard(baseInput);
+  // 恢复会话：在主聊天流发一张**普通消息卡**作为话题根。
+  const res = await ctx.deps.sender.sendCard(chatId, rootCard);
   ctx.deps.log.info("发送会话恢复卡", {
     sessionID,
     source: input.source,
@@ -231,40 +227,86 @@ export async function enterSessionThread(
     return { ok: false, error };
   }
 
-  // 只绑 root：thread_id 要等用户第一次回复后才存在（届时入站路由会用 root 兜底并补写 thread 映射）。
+  // 只绑 root：即使自动开话题失败，用户回复本卡也能经 root→session 路由续上。
   await ctx.deps.sessionMap.bindRoot(res.messageId, sessionID);
   ctx.deps.log.info("resume card bound root to session", { sessionID, rootId: res.messageId });
 
-  // 持久化根卡基础内容：工作状态刷新时据此重渲染（不丢摘要/元信息）。
-  await ctx.deps.sessionMap.setRootCard(sessionID, {
-    style: "resumed",
+  /** 摘要相关区块（pending + 「🗜 压缩并总结」按钮），patch 时再替换为最终摘要。 */
+  const summaryBlock = {
+    ...(showSummary ? { summaryPending: true } : {}),
+    ...(showSummary && ctx.deps.signCompact
+      ? { compactButton: { sessionID, token: ctx.deps.signCompact(sessionID) } }
+      : {}),
+  };
+
+  // 自动开话题：对根卡 `reply_in_thread` 发「摘要 + 引导」卡，作为话题**首条回复**。
+  const openerInput = { ...baseInput, ...summaryBlock };
+  const openerRes = await ctx.deps.sender.replyCard(res.messageId, buildSessionOpenedCard(openerInput), {
+    replyInThread: true,
+  });
+  const openerMessageId = openerRes.ok ? openerRes.messageId : undefined;
+  let threadId = openerRes.threadId;
+  if (!threadId && openerMessageId) {
+    threadId = (await ctx.deps.sender.getMessageMeta(openerMessageId))?.threadId;
+  }
+
+  const rootCardBase = {
+    style: "resumed" as const,
     sessionID,
     title: info?.title ?? "",
     ...(dir ? { dir } : {}),
     ...(link?.model ? { model: modelLabel(link.model) } : {}),
     ...(info?.updatedAt ? { updatedAt: info.updatedAt } : {}),
-    ...(showSummary ? { summaryPending: true, compactButton: Boolean(cardInput.compactButton) } : {}),
-  });
+  };
 
-  // 任务 B：快摘要**火后执行**——先发卡（回调 3 秒内已回 toast），拿到结果再 patch 同一张卡。
-  // 刻意**不**在此处触发压缩（压缩会修改会话历史，必须用户主动点按钮）。
-  if (showSummary) {
-    void patchResumeSummary(ctx, sessionID, dir, res.messageId, cardInput);
+  if (threadId) {
+    // 话题打通：thread + root 双映射，用户直接在话题内回复即续聊。
+    await ctx.deps.sessionMap.bindThread(threadId, sessionID, chatId, operatorOpenId, res.messageId);
+    ctx.deps.log.info("恢复会话已自动开话题", {
+      sessionID,
+      threadId,
+      rootMessageId: res.messageId,
+      openerMessageId,
+    });
+    await ctx.deps.sessionMap.setRootCard(sessionID, { ...rootCardBase, openedTopic: true });
+    // 摘要只 patch 到话题首条回复卡（根卡保持稳定，状态刷新不会覆盖它）。
+    if (showSummary && openerMessageId) {
+      void patchResumeSummary(ctx, sessionID, dir, openerMessageId, openerInput, false);
+    }
+    return { ok: true, threadId, messageId: res.messageId };
   }
-  // thread_id 由用户首次回复后经 root 路由補写，这里只带卡片消息 id。
+
+  // 自动开话题失败 → 回退旧行为：根卡就地升级为"摘要 + 回复本卡"卡。
+  ctx.deps.log.warn("恢复会话自动开话题失败，回退为回复根卡", {
+    sessionID,
+    openError: openerRes.error ?? "unknown",
+  });
+  const fallbackInput = { ...baseInput, openedTopic: false, ...summaryBlock };
+  await ctx.deps.sender.patchCard(res.messageId, buildSessionOpenedCard(fallbackInput));
+  await ctx.deps.sessionMap.setRootCard(sessionID, {
+    ...rootCardBase,
+    ...(showSummary ? { summaryPending: true, compactButton: Boolean(fallbackInput.compactButton) } : {}),
+  });
+  if (showSummary) {
+    void patchResumeSummary(ctx, sessionID, dir, res.messageId, fallbackInput, true);
+  }
   return { ok: true, messageId: res.messageId };
 }
 
-/** 摘要来源标注：复用原生摘要 / 快摘要 / 已压缩。 */
+/** 摘要来源标注：复用原生摘要 / 快摘要 / 会话记录截取 / 已压缩。 */
 const SUMMARY_LABEL: Record<string, string> = {
   reused: "会话摘要",
   generated: "摘要（快摘要）",
+  excerpt: "最近会话记录（截取摘要）",
   compacted: "已压缩 · 会话摘要",
 };
 
 /**
- * 任务 B：异步获取**快摘要**并 patch 回恢复卡。失败/超时降级为「摘要生成失败，可直接发消息继续」。
- * 永不抛异常（只 log.warn），绝不影响已发出去的恢复卡与话题绑定。
+ * 任务 B：异步获取**快摘要**并 patch 回话题首条回复卡（或回退模式下的根卡）。
+ * 失败/超时会自动降级为「会话记录截取」（见 resume-summary.ts 的 excerpt 路径），
+ * 再不行才显示「（摘要生成失败，可直接发消息继续）」。
+ * `persistBase=true` 时才把摘要写回根卡基础内容（回退模式：摘要就在根卡上）。
+ * 永不抛异常（只 log.warn），绝不影响已发出去的卡片与话题绑定。
  */
 async function patchResumeSummary(
   ctx: SessionPrimitives,
@@ -272,6 +314,7 @@ async function patchResumeSummary(
   dir: string | undefined,
   messageId: string,
   cardInput: Parameters<typeof buildSessionOpenedCard>[0],
+  persistBase: boolean,
 ): Promise<void> {
   try {
     const outcome = await ctx.deps.summarizeSession!({
@@ -281,10 +324,12 @@ async function patchResumeSummary(
     });
     const summary = outcome.summary ?? "（摘要生成失败，可直接发消息继续）";
     const summaryLabel = SUMMARY_LABEL[outcome.source] ?? "摘要";
-    // 把摘要写回根卡基础内容：后续工作状态刷新重渲染时摘要不丢。
-    const base = await ctx.deps.sessionMap.getRootCard(sessionID);
-    if (base) {
-      await ctx.deps.sessionMap.setRootCard(sessionID, { ...base, summaryPending: false, summary, summaryLabel });
+    if (persistBase) {
+      // 把摘要写回根卡基础内容：后续工作状态刷新重渲染时摘要不丢。
+      const base = await ctx.deps.sessionMap.getRootCard(sessionID);
+      if (base) {
+        await ctx.deps.sessionMap.setRootCard(sessionID, { ...base, summaryPending: false, summary, summaryLabel });
+      }
     }
     const res = await ctx.deps.sender.patchCard(
       messageId,

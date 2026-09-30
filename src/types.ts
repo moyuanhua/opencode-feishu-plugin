@@ -152,6 +152,8 @@ export interface SessionRootCardBase {
   readonly compactButton?: boolean;
   /** 额外说明（created 自动开话题失败时的手动指引）。 */
   readonly note?: string;
+  /** 恢复会话时是否已由机器人在该卡下直接开了话题（渲染不同的引导文案）。 */
+  readonly openedTopic?: boolean;
 }
 
 /** 会话 ↔ 飞书会话映射，持久化在 ctx.storage。 */

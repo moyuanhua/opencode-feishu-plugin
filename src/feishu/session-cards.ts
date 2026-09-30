@@ -274,7 +274,12 @@ function renderResumedBody(title: string, base: SessionRootCardBase, now: number
     setup.push(`- 最近活动：${relativeTime(base.updatedAt, now)}`);
   }
   if (setup.length > 0) lines.push("", ...setup);
-  lines.push("", "**回复本卡片**即可继续这个历史会话（飞书回复会在本卡下形成话题）。");
+  lines.push(
+    "",
+    base.openedTopic
+      ? "✅ **话题已打开**：直接在本话题内回复即可继续这个历史会话。"
+      : "**回复本卡片**即可继续这个历史会话（飞书回复会在本卡下形成话题）。",
+  );
   if (base.summary || base.summaryPending || base.compactPending || base.compactError) {
     lines.push("", `**${base.summaryLabel ?? "摘要"}**：`);
     if (base.summaryPending) lines.push("⏳ 正在总结该会话…");
@@ -334,6 +339,8 @@ export function buildSessionOpenedCard(input: {
   readonly compactError?: string;
   /** 「🗜 压缩并总结」按钮（用户主动触发原生压缩）。 */
   readonly compactButton?: SessionOpenedCompactButton;
+  /** 机器人已在该卡下直接开了话题（渲染"直接在本话题内回复"引导）。 */
+  readonly openedTopic?: boolean;
   /** 单卡最多保留的 markdown 表格数（默认 4，夹取 1–5）。 */
   readonly maxTables?: number;
   /** 发生表格降级 / 元素丢弃时回调（调用方按 sessionID 记日志）。 */
@@ -352,6 +359,7 @@ export function buildSessionOpenedCard(input: {
     ...(input.compactPending ? { compactPending: true } : {}),
     ...(input.compactError ? { compactError: input.compactError } : {}),
     ...(input.compactButton ? { compactButton: true } : {}),
+    ...(input.openedTopic ? { openedTopic: true } : {}),
   };
   return buildSessionRootCard(base, undefined, {
     now: input.now ?? Date.now(),

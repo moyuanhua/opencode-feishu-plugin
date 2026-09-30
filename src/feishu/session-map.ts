@@ -503,6 +503,7 @@ function parseRootCard(value: unknown): SessionRootCardBase | undefined {
     ...(compactError ? { compactError } : {}),
     ...(value.compactButton === true ? { compactButton: true } : {}),
     ...(note ? { note } : {}),
+    ...(value.openedTopic === true ? { openedTopic: true } : {}),
   };
 }
 

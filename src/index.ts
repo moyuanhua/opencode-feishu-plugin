@@ -935,15 +935,39 @@ async function start(
       }),
   });
 
-  // ── 服务器事件订阅 ────────────────────────────────────────────────────
+  // ── 服务器事件订阅（带自动重连）───────────────────────────────────────
+  // 教训：SSE 流可能被服务端在中途"正常结束"（HTTP 200 + InterruptError），
+  // 早期版本只用一次性 `for await`，流一断插件就永久收不到事件（审批卡不生成、
+  // 运行状态不更新），会话会停在"等一个没人能批的权限"直到看门狗强杀。
+  // 现在断流后按指数退避自动重连，并把每次断/连都打日志。
   const abort = new AbortController();
+  const EVENT_RETRY_BASE_MS = 1_000;
+  const EVENT_RETRY_MAX_MS = 30_000;
+  const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
   const subscription = (async () => {
-    try {
-      for await (const event of ctx.event.subscribe({ signal: abort.signal })) {
-        await handleEvent(event);
+    let attempt = 0;
+    while (!abort.signal.aborted) {
+      try {
+        for await (const event of ctx.event.subscribe({ signal: abort.signal })) {
+          if (attempt > 0) {
+            log.info("事件订阅已重连", { attempt });
+          }
+          attempt = 0; // 收到过事件 = 流可用，重置退避
+          await handleEvent(event);
+        }
+        if (abort.signal.aborted) break;
+        // 流"正常结束"：不抛异常但连接没了 —— 必须重连。
+        attempt += 1;
+        const delay = Math.min(EVENT_RETRY_MAX_MS, EVENT_RETRY_BASE_MS * 2 ** Math.min(attempt, 5));
+        log.warn("事件订阅流已结束，准备重连", { attempt, delayMs: delay });
+        await sleep(delay);
+      } catch (err) {
+        if (abort.signal.aborted) break;
+        attempt += 1;
+        const delay = Math.min(EVENT_RETRY_MAX_MS, EVENT_RETRY_BASE_MS * 2 ** Math.min(attempt, 5));
+        log.error("事件订阅异常，准备重连", { attempt, delayMs: delay, error: errorMessage(err) });
+        await sleep(delay);
       }
-    } catch (err) {
-      if (!abort.signal.aborted) log.error("事件订阅异常退出", { error: errorMessage(err) });
     }
   })();
 

@@ -353,16 +353,17 @@ describe("index 话题路由（集成）", () => {
 
     const res = (await click({ cmd: "open", s: "ses_hist", c: "oc_1" })) as { toast: { type: string } };
     expect(res.toast.type).toBe("success");
-    // 恢复卡走主聊天流 sendCard（create），不再 reply_in_thread。
+    // 恢复卡走主聊天流 sendCard 当话题根；opener（摘要/引导卡）reply_in_thread 直接开话题。
     await vi.waitFor(() => expect(JSON.stringify(h.created.at(-1))).toContain("🔄 历史会话"));
-    expect(h.replied).toHaveLength(0);
+    expect(h.replied).toHaveLength(1);
+    expect((h.replied.at(-1) as { data: { reply_in_thread?: boolean } }).data.reply_in_thread).toBe(true);
 
     const rootSet = storage.setCalls.find((c) => c.key.startsWith("feishu:v2:root:"));
     expect(rootSet).toBeDefined();
     const cardId = rootSet!.key.replace("feishu:v2:root:", "");
     expect((storage.raw(`feishu:v2:root:${cardId}`) as { sessionID: string }).sessionID).toBe("ses_hist");
-    // 恢复卡阶段只绑 root，不预建 thread 映射。
-    expect(storage.raw(`feishu:v2:thread:${cardId}`)).toBeUndefined();
+    // 自动开话题成功：thread 映射在恢复阶段就建立（reply 直接带回 thread_id）。
+    expect((storage.raw("feishu:v2:thread:omt_new") as { sessionID: string }).sessionID).toBe("ses_hist");
 
     // 用户首次回复恢复卡：事件只带 root_id（无 thread_id）→ 仍路由到该会话，
     // 并读回消息元数据拿到 thread_id 后补写 thread 映射。
@@ -566,8 +567,9 @@ describe("index 话题路由（集成）", () => {
     await vi.waitFor(() => {
       expect(JSON.stringify(h.created.at(-1))).toContain("🔄 摘要会话");
     });
-    expect(h.replied).toHaveLength(0);
-    // 摘要在火后 patch 回同一张恢复卡（复用 compaction 摘要，不产生生成调用）。
+    // 机器人同时以 reply_in_thread 发了话题首条回复卡（opener）。
+    expect(h.replied).toHaveLength(1);
+    // 摘要在火后 patch 回同一张话题首条回复卡（复用 compaction 摘要，不产生生成调用）。
     await vi.waitFor(() => {
       expect(JSON.stringify(h.patched.at(-1))).toContain("1. 已完成 X");
     });
@@ -628,8 +630,9 @@ describe("index 话题路由（集成）", () => {
     await vi.waitFor(() => {
       expect(JSON.stringify(h.created.at(-1))).toContain("🔄 压缩会话");
     });
-    // 恢复卡带压缩按钮（签名由插件生成）。
-    const cardJson = JSON.stringify(h.created.at(-1));
+    // 话题首条回复卡（opener）带压缩按钮（签名由插件生成）。
+    const openerPayload = h.replied.at(-1);
+    const cardJson = JSON.stringify((openerPayload as { data?: { content?: string } }).data?.content);
     expect(cardJson).toContain("🗜 压缩并总结");
     // 等快摘要 patch 完，拿到按钮 token。
     await vi.waitFor(() => {
@@ -637,7 +640,7 @@ describe("index 话题路由（集成）", () => {
       expect(patched).toContain("摘要");
     });
     // 压缩"完成"由 mock 的 session.compact 触发：之后消息里出现新的 completed 摘要。
-    const token = extractCompactToken(h.created.at(-1));
+    const token = extractCompactToken(openerPayload);
     expect(token).toBeTruthy();
     const res = (await click({ cmd: "compact", s: "ses_cmp", t: token })) as { toast: { type: string } };
     expect(res.toast.type).toBe("success");
@@ -659,7 +662,7 @@ describe("index 话题路由（集成）", () => {
     await deliver(msg("你好", { messageId: "om_bootBad" }));
     await click({ cmd: "open", s: "ses_bad", c: "oc_1" });
     await vi.waitFor(() => expect(JSON.stringify(h.created.at(-1))).toContain("🔄 坏token"));
-    const token = extractCompactToken(h.created.at(-1))!;
+    const token = extractCompactToken(h.replied.at(-1))!;
     const res = (await click({ cmd: "compact", s: "ses_bad", t: `${token}x` })) as { toast: { content: string } };
     expect(res.toast.content).toContain("操作凭证无效");
     expect(h.compactCalls).toHaveLength(0);

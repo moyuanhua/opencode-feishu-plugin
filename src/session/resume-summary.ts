@@ -26,7 +26,7 @@ export const TRANSCRIPT_LINE_LIMIT = 600;
 /** 快摘要转写最多取多少条消息（从最近往前）。 */
 export const TRANSCRIPT_MAX_MESSAGES = 40;
 
-export type SessionSummarySource = "reused" | "generated" | "none";
+export type SessionSummarySource = "reused" | "generated" | "excerpt" | "none";
 
 export interface SummarizeSessionInput {
   readonly sessionID: string;
@@ -155,6 +155,29 @@ export function buildSummaryPrompt(transcript: string | undefined): string {
 }
 
 /**
+ * 兜底"摘要"：**无模型调用**，直接从精简转写里截取最近若干行（用户/助手原文），
+ * 让恢复卡在快摘要失败/超时时也至少有一份可见的会话线索。
+ */
+export function buildExcerptSummary(
+  transcript: string | undefined,
+  maxLines = 5,
+  maxChars = 900,
+): string | undefined {
+  if (!transcript) return undefined;
+  const lines = transcript.split("\n").filter(Boolean);
+  if (lines.length === 0) return undefined;
+  const out: string[] = [];
+  let bytes = 0;
+  for (const line of lines) {
+    const size = Buffer.byteLength(line, "utf8");
+    if (out.length >= maxLines || bytes + size > maxChars) break;
+    out.push(line);
+    bytes += size;
+  }
+  return out.length > 0 ? out.join("\n") : undefined;
+}
+
+/**
  * 复用或生成会话摘要。永不抛异常；超时/失败收敛为 `{source:"none", error}`。
  *
  * - 命中已有 compaction 摘要 → `reused`（零模型调用）；
@@ -192,6 +215,9 @@ export async function summarizeSession(
     );
     const generated = extractGeneratedText(raw);
     if (generated) return { summary: generated, source: "generated" };
+    // 2b) 快摘要失败/为空 → **截取兜底**：把最近会话记录直接当作摘要（零模型调用）。
+    const excerpt = buildExcerptSummary(transcript);
+    if (excerpt) return { summary: excerpt, source: "excerpt" };
     return { source: "none", error: "empty-summary" };
   } catch (err) {
     const error = errorMessage(err);
@@ -200,6 +226,13 @@ export async function summarizeSession(
       timedOut: err instanceof SummaryTimeoutError,
       error,
     });
+    // 转写可能已经取到：即使生成失败，也尽量给一份截取兜底。
+    try {
+      const excerpt = buildExcerptSummary(buildTranscript(messages));
+      if (excerpt) return { summary: excerpt, source: "excerpt" };
+    } catch {
+      // 忽略兜底失败，返回 none
+    }
     return { source: "none", error };
   }
 }
