@@ -2,55 +2,44 @@
 
 **English** | [简体中文](./README.md)
 
-Bring [OpenCode](https://opencode.ai) into Feishu/Lark: **one Feishu topic = one OpenCode session**. Manage multiple sessions from chat, drive the agent from inside topics, and **approve permission requests with a button on a Feishu card**.
+Connect [OpenCode](https://opencode.ai) to Feishu/Lark: **one Feishu topic = one OpenCode session**, and permission approvals happen right on Feishu cards.
 
-> Built **only on the OpenCode V2 plugin API** (`Plugin.define({ id, setup(ctx) })`) — no V1 packages.
-> **Pure long connection** (WebSocket) for events and card callbacks: **no listening port, no public URL required**.
+- OpenCode **V2 only** (`@opencode/plugin`, `Plugin.define`); no V1 packages.
+- **Pure long connection** (WebSocket) for events and card callbacks: no port listening, no public endpoint.
 
----
+## Preview
+
+![Full session inside a Feishu topic: tool calls, permission approval card, force stop](image/image.png)
 
 ## Highlights
 
-| | |
+| | Description |
 |---|---|
-| 🔐 **Minimal permissions** | Only 2 scopes (read p2p messages + send as bot). **No group scopes at all** — the bot physically cannot receive group messages |
-| 💬 **Topics as sessions** | Each Feishu topic maps to one OpenCode session. The main chat is a management console; work happens inside topics |
-| 🚀 **One-tap entry** | `/new` opens the setup form directly; on submit the bot creates a topic under your message automatically |
-| 📝 **One-shot form** | `/new` and `/form` are **fully equivalent**: fill directory + model + permissions once and submit. The directory can be typed or picked from a dropdown of the allowed root's first-level subdirectories. **Zero new permissions** |
-| 🗂 **Directory tolerance** | Empty directory = the allowed root; a non-existent one is created automatically (still constrained by the `allowedRoots` allowlist) |
-| ✅ **In-card approvals** | Permission requests become Feishu cards (allow once / always / reject) with signed, replay-proof buttons |
-| 🪜 **Permission presets** | Read-only / Editable / Ask-on-risky / Trust — pick once per session instead of approving every call |
-| 📊 **Live visibility** | Instant ack card, live tool calls (auto-collapsed when ≥3), streaming text, current model in the footer |
-| 🚦 **Status at a glance** | The topic root card changes colour by session state (running/review/pending/done…) with a body footer; the title stays stable and the summary is preserved |
-| 🧵 **Native queueing** | Busy session → messages queue via OpenCode's native `delivery:"queue"` |
-| ⏹ **One-tap force stop** | **Every AI reply card carries a "force stop" button** — one tap interrupts (whitelist + HMAC signed). The watchdog auto-interrupts stuck sessions instead of queueing forever |
-| 🚫 **No ports** | Everything over a long connection; nothing to expose |
-
----
+| 🔐 **Minimal permission** | Only 2 scopes; no group permission is requested, so the bot physically cannot receive group messages |
+| 💬 **Topic = session** | Each Feishu topic maps to one OpenCode session; the main chat is console-only |
+| 🚀 **One-shot session** | `/new` opens a single form (directory + model + permission preset); submit to create a session and auto-open a topic |
+| ✅ **Card approvals** | Permission requests become cards: allow once / always / this session only / deny — signed tokens prevent forgery and replay |
+| 📊 **Real-time visible** | "Thinking" receipt → live tool-call cards → streaming text updates; footer shows the current model |
+| ⏹ **Controllable** | Every reply card has a "force stop" button; a watchdog auto-interrupts stuck sessions; native queue with `/steer` `/now` to cut in |
+| 🚫 **No ports** | Full long-connection; no inbound port needed on the server |
 
 ## 1. Feishu app setup (~3 minutes)
 
-1. Go to the [Feishu Open Platform](https://open.feishu.cn/app) → **Create a custom app**.
-2. **Add capability → Bot**.
-3. **Permissions** — enable only these two:
-   - `im:message.p2p_msg:readonly` — read direct messages sent to the bot
-   - `im:message:send_as_bot` — send messages *as the app* (also used to update cards)
-4. **Events & Callbacks → Event subscription**: choose **"Receive events via long connection"** (do **not** pick Webhook), add event `im.message.receive_v1`.
-5. **Events & Callbacks → Callback subscription**: also choose **long connection**, add callback `card.action.trigger` (**zero permission required**).
-6. **Version management & release**: set **availability = only yourself**, create a version and publish it.
-7. Note the **App ID** (`cli_…`) and **App Secret**.
+1. Open the [Feishu Open Platform](https://open.feishu.cn/app) → **Create an enterprise self-built app**.
+2. **Add app capability → Bot**.
+3. **Permission management** — enable only these two scopes:
+   - `im:message.p2p_msg:readonly` — read messages users send to the bot in p2p chat
+   - `im:message:send_as_bot` — send messages as the app (also used to update cards)
+4. **Events & Callbacks → Event configuration**: subscription method **"Use long connection to receive events"** (do **not** pick Webhook), add event `im.message.receive_v1`.
+5. **Events & Callbacks → Callback configuration**: same long-connection method, add callback `card.action.trigger` (zero permission requirement).
+6. **Version management & release**: availability = **only yourself**, create a version and **publish**. ⚠️ Without publishing the app stays in "development" state and the long connection cannot connect — the bot will never respond.
+7. Note down the **App ID** (`cli_…`) and **App Secret**.
 
-> **Why no group scopes?** This plugin is a *personal console*. With no group scopes the bot **physically cannot**
-> receive group messages, so the single-user boundary is enforced by the platform, not just by code.
-
----
+> **Why no group permission?** This plugin is a "single-user remote control". Without group permission the bot **physically cannot receive group messages** — the single-user boundary is guaranteed by the platform scope layer, not only by code.
 
 ## 2. Installation
 
-### 2.1 Install the plugin (V2: loaded from npm, recommended)
-
-OpenCode V2 declares packages to load in the `plugins` array of its config; on startup it installs them with Bun
-(cached under `~/.cache/opencode/node_modules/`). Two equivalent ways:
+### 2.1 Install the plugin
 
 ```bash
 # Option A — CLI (recommended)
@@ -58,479 +47,143 @@ opencode plugin add opencode-feishu-plugin
 ```
 
 ```jsonc
-// Option B — write ~/.config/opencode/opencode.jsonc yourself
-{
-  "$schema": "https://opencode.ai/config.json",
-  "plugins": ["opencode-feishu-plugin"]
-}
+// Option B — write config manually (APPEND to the existing plugins array, don't overwrite the file)
+{ "plugins": ["opencode-feishu-plugin"] }
 ```
 
-The plugin entrypoint is the **self-contained** `dist/index.js` (Feishu SDK included), referenced by
-`package.json#exports`. You do **not** run `npm install` by hand and need no extra `node_modules`.
+The entrypoint is a **self-contained** `dist/index.js` (Feishu SDK bundled); no manual `npm install` needed at runtime.
 
-**Local development (without npm):** clone, `npm install && npm run build`, then point `plugins` at the local directory:
+### 2.2 Configuration
 
-```jsonc
-{ "plugins": ["./path/to/opencode-feishu-plugin"] }
-```
-
-### 2.2 Alternative: global plugin directory (offline / fixed path)
-
-You can also drop the build output into `<configDir>/plugins/<any-name>/` (`configDir` = `OPENCODE_CONFIG_DIR` or
-`~/.config/opencode`). OpenCode auto-discovers `index.js` there (this package ships such a root entry that re-exports `dist/`):
-
-```bash
-cd /path/to/opencode-feishu-plugin && npm install && npm run build
-mkdir -p ~/.config/opencode/plugins/feishu
-cp -r dist index.js package.json ~/.config/opencode/plugins/feishu/
-```
-
-> Whichever loading path you use, **restart the service after upgrading** so the module is re-imported:
-> ```bash
-> opencode service restart
-> ```
-
-### 2.3 Configure
-
-`<configDir>/plugins/feishu.json` (`configDir` = `OPENCODE_CONFIG_DIR` or `~/.config/opencode`):
+Create `~/.config/opencode/plugins/feishu.json` (`configDir` = `OPENCODE_CONFIG_DIR` or `~/.config/opencode`):
 
 ```bash
 install -m 600 /dev/null ~/.config/opencode/plugins/feishu.json
 cat > ~/.config/opencode/plugins/feishu.json <<'JSON'
 {
-  "appId": "{env:FEISHU_APP_ID}",
-  "appSecret": "{env:FEISHU_APP_SECRET}"
+  "appId": "cli_xxxxxxxx",
+  "appSecret": "xxxxxxxx",
+  "logFile": true
 }
 JSON
-chmod 600 ~/.config/opencode/plugins/feishu.json
 ```
 
-Put the credentials into the **OpenCode service process** environment (not your interactive shell):
+- Credential **priority**: `plugins[].options` > `feishu.json` > environment variables. You may also use `{env:NAME}` / `${NAME}` placeholders in values to pull from env.
+- **We recommend `logFile: true`**: stderr is discarded in server mode; the log file is your only window into plugin behavior.
 
-```bash
-opencode service set env FEISHU_APP_ID cli_xxxxxxxx
-opencode service set env FEISHU_APP_SECRET xxxxxxxx
-```
-
-Plaintext values inside `feishu.json` work too (keep it `chmod 600`). **Precedence**: `options` > `feishu.json` > environment.
-
-### 2.4 Activate & verify
+### 2.3 Activate & verify
 
 ```bash
 opencode reload
+tail -f ~/.config/opencode/plugins/feishu.log   # you should see "飞书长连接已启动（WSClient）"
 ```
 
-Send the bot a direct message. **The first sender is bound as the owner**; everyone else is silently ignored.
+Then send a message to the bot in Feishu. **The first person to message is auto-bound as owner** — a card reply means installation succeeded; everyone else is silently ignored.
 
----
+> After upgrading the plugin or switching to a global plugin directory, run `opencode service restart` so it re-imports.
 
-## 3. Usage
+## 3. Quick start
 
 ### Main chat (console)
 
-The main chat is management-only; plain text never enters a session.
+The main chat **only manages**; plain text never enters any session.
 
-| Command | Purpose |
+| Command | Effect |
 |---|---|
-| `/new [title]` | **Open the setup form directly**; submit to create the session and auto-open a topic (equivalent to `/form`; the title becomes the session title) |
-| `/form [title]` | Same as `/new` — an equivalent entry point |
-| `/sessions` (`/ls`) | **All** sessions card: each row shows title / short id / relative time / `💬 topic-bound` / `📍 directory`, with a "▶️ Enter topic" button; 8 per page (`sessionPageSize`, 5–20) |
-| `/use <n\|id-prefix>` | Switch current session (legacy, kept for compatibility) |
-| `/resume [n]` | **Resume a past session**: post a "🔄 resume card" in the main chat for the most-recently-updated (or the N-th) session; **reply to that card** to continue |
-| `/current` | Show current session |
-| `/stop` | Interrupt the running task in the current session (every run card also has a "⏹ force stop" button) |
-| `/steer <text>` | Send a message that **cuts in immediately** (steers into the running step instead of queuing) |
-| `/now` | Promote this session's already-queued, not-yet-delivered messages to run immediately |
-| `/dir <path>` | **Pre-fill** the form's working directory (empty = allowed root; a missing path is auto-created) |
-| `/model [query]` | **Pre-fill** the form's model (also switches the current session's model inside a topic) |
-| `/perm [preset]` | **Pre-fill** the form's permission preset (also changes the current session inside a topic) |
-| `/cancel` | Discard an un-submitted form |
-| `/help` | Command list |
+| `/new [title]` | Send a session-create form; submit to create a session and auto-open a topic (same as `/form`) |
+| `/sessions` (`/ls`) | **All** sessions list (including every local opencode session); paginate, enter, create |
+| `/resume [index]` | Send a resume card for the most recent (or Nth) session; **reply to the card** to continue |
+| `/current`, `/stop` | Show current session / interrupt current run |
+| `/steer <text>`, `/now` | Cut in immediately / run all queued messages now |
+| `/dir`, `/model`, `/perm` | **Pre-fill** the create-session form (directory / model / permission tier) |
+| `/cancel`, `/help` | Discard pending form / list commands |
+
+![Create-session form card: directory, model, permission](image/new.png)  ![Session list card: paginate, enter/reopen, create](image/sessions.png)
 
 ### Inside a topic (work)
 
-One topic = one session. **Plain text inside a topic is a prompt to the agent**; replies stay in the same topic.
+A topic = a session; sending plain text is giving the AI a command.
 
-| Command | Purpose |
+| Command | Effect |
 |---|---|
-| `/model` | Switch the model for this session |
-| `/perm` | Change the permission preset for this session |
-| `/cd <path>` | Move this session's working directory (empty = allowed root; a missing path is auto-created) |
-| `/steer <text>` | Steer a message into the running step immediately |
-| `/now` | Promote this session's queued messages to run immediately |
-| `/current` `/stop` `/help` | Same as main chat, scoped to this topic's session |
+| `/model` | Switch this session's model (affects follow-up replies only) |
+| `/perm` | Change this session's permission tier |
+| `/cd <path>` | Migrate this session's working directory |
+| `/steer <text>`, `/now` | Cut in / run queued messages now |
+| `/current`, `/stop`, `/help` | Same as main chat, scoped to this topic's session |
 
-### What `/model` really does
+### Permission tiers
 
-A `/model` switch only affects **subsequent** model calls; it does **not** rewrite history:
-
-- opencode's `switchModel` means "switch the model used by subsequent provider turns" and appends a `model-switched` marker to the session. Earlier assistant messages keep the model they **actually ran on** at the time.
-- So seeing "`Session.Info.model` is already the new model, but an earlier batch of messages is still the old model" is **expected**, not a failed switch.
-- To be safe, the plugin **reads back** `ctx.session.get` after switching: it shows "✅ model switched" only when the read-back matches; a mismatch is reported as "⚠️ model may not have taken effect"; a failed read-back degrades to the requested value with a note. **The run-card footer and `/current` also display the read-back truth**.
-- A failed switch (no permission / session not found) reports the error instead of pretending success.
-
-### Topic soft guidance (topics never hard-block off-topic messages)
-
-When you create a session from Feishu via `/new <title>` or the form, the title becomes the topic's "theme". The plugin does **not** block off-topic messages; it only injects a short system note so the model can **briefly remind** the user to open a new session with `/new` when they clearly drift away — without refusing to answer or lecturing:
-
-- Injected only for **Feishu-originated sessions**; local TUI sessions are **never** touched (no pollution of your own sessions).
-- Skipped when the session title is unavailable; injection failures only `log.warn` and never affect execution.
-- Disable it entirely with `topicGuidance: false`.
-
-### Creating a session (`/new` and `/form` are fully equivalent)
-
-```
-/new fix the login bug        (or /form fix the login bug)
-  ↓
-📝 setup form card
-   directory: type it, or pick from the dropdown (first-level subdirectories of the allowed root); empty = allowed root, auto-created if missing
-   model:     dropdown (defaults to the current/most recent)
-   permissions: pick one of four presets
-  ↓ tap "Create"
-The form message itself becomes the topic root: the bot replies to it with
-`reply_in_thread` to post the "session ready" card inside the topic
-  ↓
-The form card is rewritten in place into a success card titled
-`✅ Created · <session title>` (this title becomes the topic name)
-  ↓
-Jump into the topic and just send a message
-```
-
-- `/new` and `/form` share **one entry point** and post the setup form directly; the old directory → model → permissions → confirm step cards are **gone**.
-- `/dir` `/model` `/perm` still work, but only as **form pre-fill** (no longer required steps): each replies with a new pre-filled form card.
-- Submission consumes the wizard state first (prevents double-click duplicates); an invalid directory **never creates a session** and returns the form with an error while keeping your input.
-- Send `/cancel` to discard an un-submitted form.
-
-### Directory tolerance rules
-
-| Input | Behaviour |
+| Tier | Meaning |
 |---|---|
-| Empty | Uses the **allowed root** `allowedRoots[0]` (the user's home by default); not an error |
-| Non-existent absolute path | Auto-created with `mkdir -p`, but **must still be under `allowedRoots`** |
-| Outside the roots / system dir / `/` | Rejected, nothing is created |
-| Symlinks | Re-checked with `realpath` after creation; escaping `allowedRoots` or landing in a system dir → rejected |
+| 🔒 **Read-only** | Look only (denies `edit` / `shell`) |
+| ✏️ **Editable** | File edits free, shell commands ask |
+| ⚠️ **High-risk approval** | File edits, shell commands and out-of-root access all ask |
+| 🔓 **Full trust** | Never ask |
 
-`/cd` follows **exactly the same** rules.
+Permission requests become approval cards: `✅ Allow once` / `🔓 Always allow` / `✅ Allow this tool in this session` / `❌ Deny`. Changing tier (`/perm`) clears this session's "allow in this session" grants.
 
-**Directory precedence in the form** (dropdown and text input coexist): dropdown pick (other than "✍️ Manually enter a path") > text input > both empty falls back to `allowedRoots[0]`.
-The dropdown defaults to "✍️ Manually enter a path" so typing stays authoritative and you never accidentally pick an unexpected directory; `/dir <path>` writes to the input and selects it in the dropdown if it is one of the listed options, otherwise it falls back to "Manually enter a path" (any path can still be typed).
+### Forms & questions (`question` tool)
 
-### One-shot form (`/form`)
+When the agent asks via `question` or other form tools, the form becomes a Feishu card. **Click buttons or just reply in the topic with text** — both work, and the card is withdrawn after answering. For pure option questions you can reply with the option number/letter directly; any other content is treated as a normal message to the AI.
 
-- Send `/form` (or `/new` — they are equivalent) to open the form card.
-- Fill in one go: **directory** (type it, or pick from a dropdown of the allowed root's first-level subdirectories; may be empty), **model** (dropdown of recent + popular, defaulting to the current/most recent model) and **permission preset** (dropdown, four presets with descriptions). Tap **Create** to submit.
-- Directory dropdown options: `✍️ Manually enter a path (use the input above)` + `🏠 <root> (use this root)` + the **first-level subdirectories** of that root (hidden dirs and `node_modules` filtered out, sorted by name, at most 15; subdirectories containing `.git` are prefixed with `📦 `).
-- The dropdown uses **only `allowedRoots[0]`** (the first allowed root). A scan failure (missing / no permission) silently degrades to just "manual input + root" without affecting the form or the plugin; the scan runs while rendering the form (low-frequency, not cached). `/dir` can still type any (in-scope) path.
-- On submit: `session.create` → `reply_in_thread` on the **form card message** posts the ready card (the form message becomes the topic root) → bind, and you can start working in the new topic.
-- With `/new <title>`, the title is stored in the wizard state and becomes the session title on submit.
-- **Zero new permissions**: form submission reuses the `card.action.trigger` callback (permission requirement: None) — **no new scope, no app re-release**.
-- An invalid directory **never creates a session**: the bot returns the form with an error and keeps your filled-in directory/model/permissions so you can fix and resubmit.
+## 4. Configuration (common)
 
-### Resume a past session (`/sessions` + `/resume`)
-
-Besides sessions created from Feishu, you can **load any past OpenCode session visible to this machine** and keep working on it.
-
-**`/sessions` (`/ls`) — all sessions**
-
-```
-/sessions
-  ↓
-🧩 OpenCode sessions (all)
-  1. Fix the login bug (`ses_ab12cd34…`) · 3 hours ago · 💬 topic-bound · 📍 my-app
-  2. Refactor the API (`ses_ef56gh78…`) · 2 days ago · 📍 api-server
-  …
-  [▶️ Enter topic] [▶️ New topic] [⬅️ Prev] [➡️ Next] [➕ New session]
-```
-
-- Data source, in order: `ctx.session.list()` (usually **not exposed** in the V2 plugin runtime) → **local HTTP `GET /api/session`** (same machine, returns **all** sessions including ones created in the TUI/Web) → the plugin's mapping table. Entering an external session also binds a mapping for it so approvals/notifications keep working.
-- Each row shows: title (truncated), short id, relative time, `💬 topic-bound` (this session already has a topic mapping), `📍 <directory tail>`.
-- **Paging**: 8 per page by default (`sessionPageSize`, clamped 5–20); the bottom buttons flip pages (`{cmd:"list", page:N}`).
-- **"➕ New session"** opens the setup form card (same as `/new` `/form`) instead of creating a session directly.
-
-**"▶️ Enter topic" — post a resume card in the main chat**
-
-- Tap the button (value `{cmd:"open", s, c}`): first the session is checked for existence (`ctx.session.get`); if missing → toast "session not found" and the list card is patched into a notice.
-- If it exists → a plain resume card is posted in the **main chat**: **title `🔄 <session title>`**, body contains session id / directory / model / last activity / summary, and **that card message** is recorded as the session's root (`root → session`). **No topic is opened and no `thread_id` is bound at this stage.**
-- **How to continue**: simply **reply to the resume card** (Feishu forms a topic under it) to continue that past session. The user's first reply event **may carry only a `root_id` and no `thread_id`**; the plugin falls back to the `root → session` mapping to route to the session, and once a `thread_id` is available it writes the `thread → session` mapping. Later messages in that topic follow normal topic routing. (OpenCode session context is persistent, so this is effectively a resume.)
-- **Summary block (task B, three paths)**:
-  1. **Reuse (zero model calls)**: read the session's **full messages** (`session.message.list`, i.e. `/api/session/{id}/message`; note `/context` is a reduced shape without `summary`) and take the latest `status:"completed"` compaction `summary`, labelled "会话摘要";
-  2. **Fast summary (default path)**: when no native summary exists, it **never feeds the whole session** — it takes the most recent messages, builds a **compact transcript** (per-message clipping, ≤6K chars total) and passes it to a one-shot generation labelled "摘要（快摘要）". That request **must carry `x-opencode-session`**, otherwise the opencode-go endpoint rejects it (`Request is missing x-opencode-session`). It is implemented **A first, B fallback**: A calls `ctx.generate.text(input, { headers: { "x-opencode-session": sessionID } })`; B calls the local HTTP `POST /api/experimental/generate` (Basic auth from `service.json` + URL-encoded `x-opencode-directory`) and sets the header explicitly. It **never** falls back to `ctx.session.generate` (that feeds the whole session and always times out on large sessions). Timeout (`resumeSummaryTimeoutMs`, default **15s**, clamped 3–60s) degrades to "(summary generation failed; just send a message to continue)";
-  3. **Native compaction (user-initiated only)**: the card carries a **"🗜 压缩并总结"** button (value `{cmd:"compact", s, t}`, self-signed token + allowlist + replay guard). Tapping it returns a toast within 3s and **asynchronously** calls `POST /api/session/{id}/compact`; the card shows "🗜 正在压缩会话…" and polls the session messages every 2s until a **new** completed summary appears, then patches to "已压缩 · 会话摘要"; failure/timeout (`resumeCompactTimeoutMs`, default **120s**, clamped 30–300s) only patches an explanation, so you can keep working. **Compaction rewrites session history, so the plugin never triggers it implicitly when entering a session.**
-  Set `resumeSummary: false` to disable the whole summary block and the compact button.
-- Only the clicked session is affected: the card binds just that session's root; other sessions' mappings are untouched.
-- For an already topic-bound session the button becomes "▶️ New topic" — **one session can be routed from several topics** (each topic has its own conversation context; replies land in the triggering topic).
-
-**`/resume [n]` — skip the list**
-
-- `/resume` runs the same "post a resume card" flow for the **most recently updated** session; `/resume 3` picks the 3rd row. An out-of-range index reports the valid range. It is the same resume card — **reply to it** to continue.
-- It uses the same ordering as `/sessions` (`time.updated` desc).
-
-**Limitations**
-
-- Only sessions **visible on this machine** can be resumed; deleted / foreign / invisible-to-`session.list` sessions cannot be entered.
-- `/sessions` and `/resume` are main-chat commands and are **disabled inside topics** (they tell you to go back); once inside a topic just send plain text.
-- With `threadRouting=false` (fallback mode), entering topics and `/resume` are unsupported.
-
-### Topic root card status (colour + footer)
-
-The topic root card (the `/new` created card / the `/resume` resume card) reflects what the session is doing, so you can tell at a glance which sessions need you:
-
-| Kind | Header colour | Footer | Trigger |
-|---|---|---|---|
-| 🟡 Review | `orange` | `🟡 待审核：<tool>` | an **unanswered** permission request (`permission.asked`; cleared on reply) |
-| 🧠 Running | `blue` | `🧠 运行中 · 12:03` | `execution.started` / `session.status(busy\|retry)`, until a terminal event |
-| ⏳ Pending | `grey` | `⏳ 待回复（排队 2）` | the inbox has **queued, not-yet-delivered** messages (`inbox.enqueued` / `delivered`) |
-| 🔴 Failed | `red` | `🔴 失败` | the most recent terminal state was failure (`execution.failed` / run-card failure) |
-| ⏹ Interrupted | `grey` | `⏹ 已中断` | the most recent terminal state was interruption (`execution.interrupted` / `/stop` / watchdog) |
-| ✅ Done | `green` | `✅ 完成` | idle / `execution.succeeded` / `session.status(idle)` |
-
-**Priority (high → low): Review > Running > Pending > Failed/Interrupted > Done.** "Review" is deliberately ranked above "Running": when the session is blocked on an approval, that is exactly when you need to tap the button.
-
-- **The title carries no status by default**: the topic name shows up in the sidebar, and changing it on every status flip is noisy. Status is expressed only via the **header colour + body footer**; the title stays `🔄 <session topic>` (or `✅ 已创建 · <topic>` for a freshly created session). If you really want the status emoji in the title, set `topicStatusInTitle: true` (e.g. `🟡 已完成 · topic`).
-- **The summary/metadata is never lost**: a root card may carry a session summary plus directory/model metadata, and a status refresh is a **whole-card patch**. The plugin first persists the card's "base content" in the session record (`rootCard`) and, on refresh, re-renders from that base with the shared builder before layering the status on top — so a status change **never wipes the summary**.
-- **Only the session's latest root card is updated**: the target message id is the session's `replyMessageId`. A session without it (non-Feishu) or without base content (old session) is **skipped**; the plugin never fabricates a card.
-- **Throttling and fault tolerance**: the card is patched only when the **kind changes**, at most once per `topicStatusThrottleMs` (default 1s). A failed patch only logs a `warn` (the user may have deleted the card) — it never throws or retries in a storm; after repeated consecutive failures for a session the plugin stops refreshing it and logs why.
-- This is fully independent from the per-message **run card**: a status refresh only touches the topic root card and does not change the run card's streaming behaviour.
-
-Config: `topicStatus` (default `true`; disable to stop refreshing entirely), `topicStatusInTitle` (default `false`), `topicStatusThrottleMs` (default `1000`, clamped 500–10000).
-
-### Card content guard (table over-limit degradation)
-
-A Feishu card supports **at most 5 table components**; beyond that `im.message.patch` returns 400 `code=230099 card table number over limit`. The real-world trap: when a single assistant reply contains **many markdown comparison tables** (5+ in one go), **every card patch fails**, the card is stuck on old content, and the user thinks the bot has "frozen".
-
-The plugin guards the **whole card** (not each element separately):
-
-- **Tables are counted cumulatively per card**: multiple markdown elements **share** one budget (default `cardMaxTables=4`, leaving one slot of headroom; clamped 1–5, so even 5 equals the Feishu hard limit).
-- **Tables beyond the budget are degraded into fenced code blocks** (`` ``` `` / `~~~`): **no content is lost**, they are simply no longer rendered as tables, so the 400 is avoided.
-- **A `|` inside a code block is never misdetected as a table**: a per-line fence mask (``` / ~~~, up to 3 leading spaces) is computed first and fenced lines are skipped. Degrading is therefore **idempotent** and never loops.
-- **Element-count backstop**: a single card's component count is clamped to ≤200 (oldest elements are dropped first, keeping the newest content), avoiding another class of 400.
-- Applies to run-card text blocks, topic root / resume cards and their summaries, plus a **final backstop in the send layer** (`sendCard` / `replyCard` / `patchCard`) — no path can emit an over-limit card. A degradation logs a `warn` keyed by `sessionID` (with detected/degraded counts) for observability.
-
-Config: `cardMaxTables` (default `4`, clamped `1–5`).
-
-### Permission presets
-
-| Preset | Meaning | Session ruleset |
-|---|---|---|
-| 🔒 Read-only | Look, don't touch | deny `edit` / `shell` |
-| ✏️ Editable | Edits free, **commands need approval** | allow `edit`, `shell` → ask |
-| ⚠️ Ask-on-risky | Edits, commands and outside-directory access all ask | risky actions ask each time |
-| 🔓 Trust | Never ask | allow all |
-
-The preset is written to a **session-scoped** ruleset and can be changed any time with `/perm`, without affecting other sessions.
-
-### Approval card: per-session "allow this tool in this session"
-
-The approval card has **4 buttons** by default: `✅ Allow once` / `🔓 Always allow` / `✅ Allow this tool in this session` / `❌ Reject`.
-
-"Always allow" only persists the **command prefix** OpenCode provides (e.g. `ls *`), so a different command asks again; "Trust" is too broad (it also opens up edit / outside-directory). "**Allow this tool in this session**" is the middle ground:
-
-- It only affects the **current session**: the tool action is recorded in the session's `allowActions` and **appended** to the session ruleset (`{action, resource:"*", effect:"allow"}`); once matched, the `permission.evaluate` gate **no longer downgrades it to ask**, so later calls of the same tool in this session stop bothering you.
-- **Other sessions and the global config are untouched** — switch to another session and it still asks.
-- `shell` and `bash` are allowed together (the real tool id is `bash`, the design name is `shell`; both are covered).
-- Tapping also replies "once" to the **currently pending request** (otherwise this run would still hang), then the card collapses to "✅ Allowed bash in this session" with no buttons.
-- Changing the preset with `/perm` is an explicit permission change: it **clears the session's "allow in this session" grants** so old grants cannot override the new preset.
-- Same security boundary as force-stop: the button value is `{cmd:"allow_session", a:"<action>", t:"<token>"}`; the token reuses the HMAC mechanism and binds `sessionID + action + TTL + nonce` (plus requestID to locate the card). Click validation order is **allow-list → signature → sessionID match → replay guard**; forged / cross-session / replayed taps are rejected, and repeat taps only show a toast.
-- Set `sessionAllowButton: false` to hide this button (the card goes back to three buttons).
-
-### Queue and cut-in (`/steer` `/now`)
-
-While a session is busy, new messages use OpenCode's native queue (`delivery:"queue"`, the card footer shows "queued") and run only after the current task finishes. Two ways to cut in:
-
-- `/steer <text>` — send this message with `delivery:"steer"` to insert it immediately (interrupts the current step, like steering in the TUI).
-- `/now` — promote this session's already-queued, not-yet-delivered messages to `steer` (via OpenCode's `session.inbox.update`; content is neither lost nor re-sent).
-
-### Force-stop button and the watchdog
-
-**Every AI reply card has a "⏹ force stop" button at the bottom** (ack card, streaming run card, terminal card and stuck-notice card):
-
-- running / queued: a **red danger** "⏹ Force stop" button; tapping it interrupts the session's current execution and cancels not-yet-delivered queued messages;
-- done / failed / interrupted: still rendered, but as a `default` "⏹ Stop" button; tapping only shows the toast "this task has ended" (so it never looks like you can still stop it).
-
-The button is a **signed action** `{ cmd:"stop", sid:<sessionID>, t:<token> }`. The token reuses the approval-card HMAC mechanism and binds `sessionID + purpose + expiry + nonce`; the card **re-signs on every patch**, so long tasks never become un-stoppable due to an expired token.
-Validation order: **allowlist (allowUsers/owner) → signature → sessionID binding → replay guard**; forged, cross-session and replayed clicks are rejected.
-
-**Watchdog (5-minute threshold, configurable)**: when an execution has produced no event for longer than the threshold it is treated as stuck; the plugin **actually interrupts the server-side session** (`session.interrupt`) + **cancels queued inbox messages** + finalizes the run card + sends a notice card with a force-stop button. If a session stays queued past the same threshold without an `execution.started`, the same recovery runs and a notice is sent — no more "session stuck once, every later message queues forever".
-
-The threshold is `staleExecutionMs` (default 5 minutes, clamped to 1–60 minutes).
-
-### Forms and questions (`question` tool)
-
-When the agent calls the `question` tool (or any form interaction), OpenCode creates a pending form that blocks execution. The plugin relays it as a Feishu card:
-
-- **Two equivalent ways to answer**: tap an option button, or just **send text in the topic** (no need to tap "✍️ reply directly" first). Text is matched intelligently — option label/value are matched to their value, booleans accept 是/否 & yes/no & 1/0, numbers are parsed, multiselect splits on commas, anything else counts as a **manual answer**;
-- multi-field forms can be answered with a mix of taps and a text reply; they submit automatically once every field is filled;
-- **Option-only questions** (options present, custom input not allowed): you may reply with the **option number/letter** (e.g. `1`, `B`) or the option label. Any **other** text is treated as "you meant something else": the plugin **skips that form** and passes your message to the AI as a **normal message** instead of a bogus answer.
-- **the card is recalled once answered/cancelled**; if it is past Feishu's recall window, it degrades to a "submitted/cancelled" result card instead.
-
-Without this relay, any clarifying question would stall the Feishu session forever and every later message would queue behind it — a common cause of "stuck sessions".
-
----
-
-## 4. Configuration
-
-`<configDir>/plugins/feishu.json` (or `plugins[].options` in OpenCode). `{env:NAME}` / `${NAME}` expansion supported.
+`<configDir>/plugins/feishu.json` (or `plugins[].options` in opencode config); `{env:NAME}` / `${NAME}` expansion supported.
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `appId` | string | — | Feishu App ID (**required**; missing ⇒ plugin disabled, never throws) |
-| `appSecret` | string | — | Feishu App Secret (**required**; never logged) |
-| `domain` | `feishu`\|`lark` | `feishu` | Feishu or Lark international |
-| `allowUsers` | string[] | `[]` | open_id allowlist. **Empty = app owner only** (first sender is bound and persisted) |
-| `permissionGate` | `off`\|`notify`\|`gate`\|`lockdown` | `gate` | Global approval gate |
-| `allowTools` | string[] | `["read","glob","grep","webfetch"]` | Auto-allow list; supports `prefix*` |
-| `denyTools` | string[] | `[]` | Hard deny (takes precedence) |
-| `allowedRoots` | string[] | `[homedir]` | Roots allowed as session working directories (the default directory is `allowedRoots[0]`); `/`, the filesystem root and system dirs are always rejected; an empty directory falls back to the first root and a non-existent one is auto-created. **The directory dropdown only scans the first root's first-level subdirectories** |
-| `stream` | boolean | `true` | Stream replies into the card |
-| `streamThrottleMs` | number | `400` | Min card update interval (floor 400ms; Feishu limit is 5 QPS) |
-| `threadRouting` | boolean | `true` | Topic routing master switch; `false` restores the legacy behaviour |
-| `topicGuidance` | boolean | `true` | Topic soft guidance: inject a short "use `/new` for a new topic" system note into Feishu sessions (never blocks messages); local TUI sessions are never touched |
-| `recentDirsLimit` | number | `5` | Number of recent directories (1–20) |
-| `recentModelsLimit` | number | `5` | Number of recent models (1–20) |
-| `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | Log level (secrets are never logged, only their presence) |
-| `logFile` | string \| boolean | — | `true` writes `<configDir>/plugins/feishu.log`. **Plugin stderr is discarded in service mode — enable this when debugging** |
-| `gatewayLocation` | string | — | Only start the gateway in this location **or any of its subdirectories**. `~` is expanded and relative paths / trailing slashes are normalized. **Set this to your usual working directory** to avoid multiple long connections; leave empty to run in every location |
-| `gatewayMatchGraceMs` | number | `3000` | Grace window for **exact-match priority**: a subdirectory candidate waits this long and yields if a location equal to `gatewayLocation` shows up (`0` = no wait, subdirectory takes over immediately) |
-| `approvalTtlMs` | number | `600000` | Approval token / card TTL |
-| `staleExecutionMs` | number | `300000` | Watchdog threshold: an execution with no event for this long is treated as stuck and auto-interrupted; a queue stuck this long without `execution.started` also triggers a notice. Clamped to 1–60 minutes |
-| `maxResourcesShown` | number | `8` | Max resource lines shown on an approval card |
-| `sessionAllowButton` | boolean | `true` | Show the "✅ Allow this tool in this session" button on approval cards; disable to go back to three buttons |
-| `resumeSummary` | boolean | `true` | Show a summary on the resume card (reuse a native compaction summary first, else the fast summary; disabling also removes the compact button) |
-| `resumeSummaryTimeoutMs` | number | `15000` | Resume-card **fast summary** timeout (clamped 3000–60000); a timeout is treated as failure and degrades gracefully |
-| `resumeCompactTimeoutMs` | number | `120000` | Poll timeout after a **user-initiated** compaction (`session.compact`), clamped 30000–300000; a timeout only patches an explanation. Compaction is explicit and rewrites session history |
-| `topicStatus` | boolean | `true` | Topic root card status master switch (colour + footer). Disable to stop refreshing entirely |
-| `topicStatusInTitle` | boolean | `false` | Add a status emoji prefix to the root card title (e.g. `🟡 session name`). Off by default: the topic name shows in the sidebar, and flipping it would be noisy |
-| `topicStatusThrottleMs` | number | `1000` | Min root-card status refresh interval (clamped 500–10000); patched only when the kind changes |
-| `cardMaxTables` | number | `4` | Max markdown tables kept per card (clamped 1–5); tables beyond it are degraded **cumulatively per card** into fenced code blocks (no content lost) to avoid Feishu 400 `code=230099` |
-| `runnerCardMaxTools` | number | `12` | Max tool blocks kept on the run card (1–50); older ones collapse into "…omitted N tool calls" |
-| `runnerCardTextMax` | number | `2048` | Per-text-block character cap on the run card (512–8192) |
-| `finalAnswerMinChars` | number | `600` | Final answers at least this long are sent **as their own card/file** (`0` disables splitting) |
-| `finalAnswerFileMinBytes` | number | `20480` | Final answers at least this many bytes are delivered as a `.md` file (8192–102400) |
-| `keepalive` | boolean | `true` | **Location keep-alive**: periodically emits activity so OpenCode does not evict the idle Location after 60 minutes (which unloads the plugin and closes the Feishu long connection) |
-| `keepaliveIntervalMs` | number | `1200000` | Keep-alive interval (default 20 min, clamped 5–45); must stay well below OpenCode's hardcoded 60-minute TTL |
+| `appId` | string | — | Feishu App ID (**required**; plugin disabled when missing) |
+| `appSecret` | string | — | Feishu App Secret (**required**; never written to logs) |
+| `domain` | `feishu`\|`lark` | `feishu` | Feishu / Lark global |
+| `allowUsers` | string[] | `[]` | open_id allowlist; empty = owner only |
+| `permissionGate` | `off`\|`notify`\|`gate`\|`lockdown` | `gate` | Global permission gate tier |
+| `allowTools` | string[] | `["read","glob","grep","webfetch"]` | No-approval allowlist, supports `prefix*` |
+| `denyTools` | string[] | `[]` | Forced deny (takes precedence over allowlist) |
+| `allowedRoots` | string[] | `[user home]` | Allowed working-directory roots; out-of-root / system dirs denied |
+| `stream` | boolean | `true` | Stream reply updates |
+| `threadRouting` | boolean | `true` | Topic routing master switch |
+| `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | Log level |
+| `logFile` | string \| boolean | — | `true` = write `<configDir>/plugins/feishu.log`; recommended in server mode |
+| `approvalTtlMs` | number | `600000` | Approval token / card validity |
+| `staleExecutionMs` | number | `300000` | Watchdog threshold (1–60 min) |
+| `gatewayLocation` | string | — | Only start the gateway at this location (or its subdirectories); empty = any location |
 
-### Long answers (run-card slimming + separate final answer)
+Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepalive*`, `gatewayMatchGraceMs`) → [docs/advanced.en.md](./docs/advanced.en.md#full-configuration).
 
-A long turn (dozens of tool calls) can push a single run card to its limits (28KB / 200 elements), triggering degradation and **dropping the oldest blocks** — the card looks "full" and earlier content disappears. Default strategy:
-
-1. **The run card is progress-only**: keep the last `runnerCardMaxTools` (default 12) tool blocks, collapsing older ones into "…omitted N tool calls"; each text block is capped at `runnerCardTextMax` (default 2KB).
-2. **The final answer is sent separately**: when a turn ends and the trailing text is at least `finalAnswerMinChars` (default 600 chars), it is sent as its own "✅ 完整回答" card; the run card keeps only a short notice.
-3. **Very long answers become files**: at least `finalAnswerFileMinBytes` (default 20KB) → delivered as a `.md` file (preview/download), never truncated.
-
-### Location keep-alive (on by default)
-
-OpenCode **evicts idle Locations**, which unloads plugins and closes the Feishu long connection:
-
-| Mechanism | Where | Trigger | Effect |
-|---|---|---|---|
-| LayerMap `idleTimeToLive` | `packages/core/src/location-services.ts` (hardcoded `60 minutes`) | no **session-scoped request** for 60 min | Location services destroyed (silently) |
-| `@opencode/LocationActivity` | hardcoded 60 min as well | no **durable event carrying the location** for 60 min | interrupts active sessions, then `invalidate(location)`; logs `location services evicted` |
-
-Both dispose the plugin (closing the Feishu WS). **After that, no request means no recovery — the bot stays silent permanently** (see issues [#51343](https://github.com/anomalyco/opencode/issues/51343), [#48691](https://github.com/anomalyco/opencode/issues/48691), [#51828](https://github.com/anomalyco/opencode/issues/51828); the TTL has no config knob).
-
-The plugin ships two built-in layers (both on by default, **no external script required**):
-
-1. **Gateway keep-alive** (every 20 min, `keepaliveIntervalMs`): ① a session-scoped `GET /api/session/{id}` → `locations.get()` renews the LayerMap entry, and **re-creates the Location** if it was evicted; ② create + GET + delete a probe session → renews `LocationActivity` (via the `session.created` event).
-2. **Process-wide gateway watchdog** (same interval, exactly one timer per process): every Location's plugin instance registers it, and it performs a session-scoped GET against the gateway Location. Result:
-   - if the gateway instance was evicted, it is revived automatically as long as **any other Location** still has a loaded instance (e.g. you have a TUI/Web open in another project);
-   - after a **service restart**, the first use of any Location starts the watchdog, which fires an immediate probe after ~3s and brings the gateway back up.
-
-> **No external script / cron / systemd setup is required**: both layers run inside the plugin process. The only case neither can cover is "the opencode process is fully down and nothing is used for a long time" — no plugin can run then; the watchdog restores the gateway as soon as opencode is used again. Set `keepalive: false` to disable all keep-alive.
-
----
-
-## 5. Security model
-
-```
-permission.evaluate (plugin hook)              permission.asked (event stream)
-──────────────────────────                     ──────────────────────
-allow-listed tool   → allow                    event carries {id, sessionID, action, resources, save}
-deny list           → deny                                │
-session allowActions → allow (already granted)            │
-otherwise (per session preset) → ask ─────────────────────┘
-                                                          ▼
-                                      Feishu approval card (button value = signed token)
-                                                          │ user taps
-                                                          ▼
-                                card.action.trigger over the long connection (<3s response)
-                                                          │
-                     verify: operator allow-listed → signature → bound fields → replay guard
-                                                          ▼
-                                     ctx.permission.reply({sessionID, requestID, reply})
-```
-
-- **Signed tokens**: HMAC-SHA256 binding `requestID + sessionID + operator openId + expiry + nonce`; forgery, forwarding and replay are rejected.
-- **Force-stop uses the same signature scheme**: its token binds `sessionID + purpose + expiry + nonce`, the click passes the open_id allowlist before verification, and it is purpose-isolated from approval tokens (neither works for the other).
-- **Per-session allow uses the same signature scheme**: the approval card's "allow this tool in this session" token binds `sessionID + action + expiry + nonce` (plus requestID to locate the card) and is purpose-isolated. When matched it records `allowActions`, appends a session ruleset, and the `evaluate` gate **no longer downgrades that action to ask** (the `denyTools` red line still wins) — and **only for that session**.
-- **Only Feishu-originated sessions**: sessions without a chat↔session mapping (e.g. your local TUI) are **never downgraded to `ask`**, otherwise they would hang forever with no approval channel.
-- **Three layers of single-user isolation**: platform availability (only you) + no group scopes + code-level open_id allowlist with silent ignore.
-- **`always` semantics**: persisted only when the request carries `save[]`; otherwise it behaves like "once" (the card says so).
-
----
-
-## 6. Troubleshooting
+## 5. Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| Bot does not respond | ① App **published** and availability includes you? ② Event/callback subscription set to **long connection** (not Webhook)? ③ `im:message.p2p_msg:readonly` granted? |
-| `feishu.json` changes ignored | Confirm the path is `<configDir>/plugins/feishu.json`, then `opencode reload` |
-| Plugin never loads (no logs, no error) | npm path: make sure the package name is in the config `plugins` array (`opencode plugin list` shows it). Directory path: make sure `plugins/<name>/index.js` exists (OpenCode ignores `package.json#main`) |
-| Plugin code changes ignored | `opencode reload` only re-runs `setup`; it does **not** re-import the module from the same path. Upgrade with `opencode plugin update opencode-feishu-plugin`, or restart the service |
-| Multiple long connections / duplicate replies | Set `gatewayLocation` to your usual working directory (subdirectories also match) |
-| **No response at all**, and no "long connection started" / "plugin ready" in the log | Almost always `gatewayLocation` does not match the directory where you actually opened opencode. The plugin emits a `warn` about "no loaded location matched" after ~2s; you can also set `logLevel: "debug"` to see `skipping non-gateway location`. If still stuck, leave `gatewayLocation` empty to rule it out |
-| No approval cards | The session did not originate from Feishu (no mapping); by design the plugin does not take it over |
-| "Invalid credentials" on button tap | Token expired (default 10 min) or the tapper is not allow-listed |
-| Card content truncated | Feishu card limit is ~30KB; the plugin truncates and marks it. Very long sessions drop the oldest blocks from the card (full content stays in the session) |
-| Form submit does nothing / errors | Client too old (`select_static` needs ≥ V3.7.0), or the card is stale (form consumed/cancelled) — send `/form` or `/new` again for a fresh form |
-| Form submitted but no session | A directory outside the allowlist or in a system dir returns an error card and **does not create a session**; fix it and resubmit. Empty / non-existent in-scope dirs are auto-created and never fail |
-| No topic after creating a session | If auto-opening the topic fails, the form card is rewritten to "✅ Created · …" with manual-topic guidance; you can also create a topic manually from the `/sessions` card |
-| No plugin logs | Plugin stderr is discarded in service mode; set `logFile: true` and read `<configDir>/plugins/feishu.log` |
-| Main chat replies with a hint card | Expected: the main chat is management-only. Use `/new` and work inside a topic; set `threadRouting: false` to revert |
-| Session looks stuck and messages only queue | The watchdog auto-interrupts it after `staleExecutionMs` (default 5 min) and cancels the queue, then sends a notice card; you can also tap the card's "⏹ force stop" or send `/stop` |
-| **Bot goes completely silent after ~1 hour idle** (no "long connection started" in the log) | OpenCode evicted the idle Location (hardcoded 60-min TTL). The built-in keep-alive + process-wide watchdog are on by default and restore it automatically; you can also force it manually with one session-scoped request: `opencode api get /api/session/{id}`. If it never recovers, check that `keepalive` is not set to `false` |
-| Switched `/model` but older messages still show the old model | Expected: a switch only affects **subsequent** replies; history keeps each message's model. The receipt / run-card footer / `/current` all show the read-back truth |
+| No response to messages | ① Is the app **published** and does availability include you? ② Is the subscription **long connection** (not Webhook)? ③ Is `im:message.p2p_msg:readonly` enabled? |
+| `feishu.json` changes don't apply | Check the path, then `opencode reload` |
+| Plugin not loaded at all | npm: confirm the package name is in the `plugins` array; directory: confirm `plugins/<name>/index.js` exists |
+| No approval cards | That session wasn't started from Feishu (no mapping); by design the plugin doesn't take it over |
+| Button click says invalid credential | Token expired (10 min default) or clicker not in allowlist |
+| Session seems stuck, messages only queue | Watchdog auto-interrupts after 5 min; or tap "⏹ force stop" / send `/stop` |
+| Bot goes silent after ~1h idle | opencode recycles idle locations; built-in keepalive restores automatically, see [docs/advanced.en.md](./docs/advanced.en.md#location-keep-alive) |
+| Can't see plugin logs | stderr is discarded in server mode; set `logFile: true` |
+| Multiple long connections / duplicate replies | Set `gatewayLocation` to a common working directory, see [docs/advanced.en.md](./docs/advanced.en.md#multiple-instances-and-gateway-election) |
 
----
+## 6. Known limitations
 
-## 7. Development
+- Only **p2p text** (incl. rich text); images / files / audio-video get a text placeholder and aren't downloaded.
+- Only takes over approvals for **Feishu-originated sessions**; local TUI sessions are unaffected.
+- One main path to create a session: the `/new` / `/form` form card.
+- Forms are JSON 2.0; old clients need ≥ V3.7.0 for `select_static`.
+- A topic's first message may lack `thread_id`: the plugin falls back to `root_id` routing; if a command lands in the main chat from a new topic, just send it inside the topic.
+- There is another `opencode-feishu` (V1 plugin); it is incompatible and shares no code with this one.
 
-```bash
-npm install
-npm run typecheck   # tsc --noEmit
-npm run build       # tsup → dist/ (self-contained bundle)
-npm test            # vitest (pure logic, no live Feishu)
-npm run dev         # tsup --watch
-```
+## 7. Roadmap
 
-**Architecture**: `src/index.ts` is assembly only (config, gateway, watchdog, hook registration and cleanup); `src/runtime/` holds the unit-testable event dispatch (`event-router.ts`) and card-callback routing (`card-action-router.ts`); the session command orchestration is split under `src/session/` (`session-commands.ts` is a thin facade; implementations live in `session-list.ts` / `setup-wizard.ts` / `session-ops.ts` / `model-perm.ts` / `context.ts`); the Feishu interaction layer lives in `src/feishu/` (event parsing, card builders, topic routing, wizard state machine, streaming-card reducer — mostly **pure functions** for testability); `src/security/` holds token signing and the allowlist.
+Iterating from real usage feedback; current plan:
 
-**Implementation notes**
-- Cards are **JSON 2.0** (buttons directly in `body.elements`, callbacks via `behaviors`; the 1.0 `tag:"action"` container returns HTTP 400 on 2.0). Form cards add: `form` must sit at the root of `body.elements`, interactive `name`s must be globally unique, and at least one button must carry `form_action_type:"submit"`.
-- Card updates are throttled to ≥400ms; ≥3 consecutive tool calls collapse into one summary panel (names only) to stay under the 30KB limit.
-- Run-card state is maintained by a **pure reducer** (text blocks / tool blocks / footer / terminal state), keyed per `assistantMessageID`.
+- [ ] **Accept images / files**: currently only p2p text is handled — images / files get a text placeholder. Planned: download images / files and **attach them to the session** so vision / file-capable models can see the images and read the file contents.
+- [ ] **New messages cut in by default when busy**: currently new messages queue natively while a session is busy (manual cut-in via `/steer`, `/now`). Planned: new messages default to **cutting in immediately**, interrupting the current step to run first.
 
----
+## Advanced topics & development
 
-## 8. Relationship to other projects
-
-This plugin targets **OpenCode V2 only** (`@opencode/plugin`, `Plugin.define`). The separately maintained `opencode-feishu` package is a **V1** plugin (`@opencode-ai/plugin`) — the two are incompatible and share no code. Pick according to your OpenCode version.
-
-## Known limitations
-
-- Text-only inbound (including rich text); images/files/audio get a textual placeholder and are not downloaded.
-- Only approvals for **Feishu-originated** sessions are handled. Local TUI sessions are untouched by design.
-- Message dedup is `get-then-set` (not atomic): under extreme concurrency a duplicate is theoretically possible.
-- Deleted topics leave stale mappings (lazily ignored).
-- There is a single main path for creating sessions: the **`/new` / `/form` setup form card**; `/dir` `/model` `/perm` only pre-fill the form. The old directory/model/permissions/confirm step cards are retired from `/new` (their builders and compatibility callbacks remain, marked deprecated).
-- The form is JSON 2.0 (`form` at the root of `body.elements`, globally unique interactive `name`s, a submit button with `form_action_type:"submit"`); some older clients require `select_static` ≥ V3.7.0.
-
-- **A topic's first message may omit `thread_id`**: Feishu sometimes delivers the event without `thread_id` (it is assigned afterwards). When you **reply to a card that has a root mapping** (e.g. a resume card), the plugin falls back to the `root_id` to route to the corresponding session and writes the topic mapping once a `thread_id` is available. However, for a **brand-new topic** whose event omits `thread_id`, a main-chat-only command such as `/new` sent at that moment runs as a main-chat command (e.g. the form card lands in the main chat). Just continue inside the topic with a normal message.
-
-
-> Publishing tip: `npm publish` triggers `prepublishOnly` (typecheck + build + test). If `node_modules` is missing it **runs `npm ci` first**, so a fresh clone can be published directly without a manual install.
-
-
-> Publishing note: provenance can only be generated in CI (GitHub Actions), so `package.json` deliberately does **not** set `publishConfig.provenance`; our workflows pass `npm publish --provenance` explicitly. Publishing locally is just `npm publish --access public`.
+Security model, location keep-alive, card guard, session resume, multi-instance gateway election, full config reference, and development architecture → [docs/advanced.en.md](./docs/advanced.en.md).
 
 ## License
 
