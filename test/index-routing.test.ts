@@ -13,6 +13,11 @@ const h = vi.hoisted(() => ({
     | {
         onMessage: (m: IncomingMessage) => void | Promise<void>;
         onCardAction: (a: CardAction) => object | void | Promise<object | void>;
+        onBotMenu?: (c: {
+          eventId: string;
+          eventKey: string;
+          operatorOpenId: string;
+        }) => void | Promise<void>;
       }
     | undefined,
   created: [] as unknown[],
@@ -229,6 +234,15 @@ async function click(rawValue: unknown, operatorOpenId = "ou_1"): Promise<object
   );
 }
 
+/** 模拟机器人菜单点击（application.bot.menu_v6）。 */
+async function clickMenu(eventKey: string, operatorOpenId = "ou_1"): Promise<void> {
+  await h.gatewayOptions!.onBotMenu?.({
+    eventId: `evt_menu_${eventKey}_${h.created.length}`,
+    eventKey,
+    operatorOpenId,
+  });
+}
+
 describe("index 话题路由（集成）", () => {
   let cleanup: (() => Promise<void>) | undefined;
 
@@ -440,6 +454,35 @@ describe("index 话题路由（集成）", () => {
     expect(saved).toBe("/tmp/feishu-att-it/om_img1-image.png");
     expect(await readFile(saved, "utf8")).toBe("png-bytes");
     expect(h.resourceGets).toHaveLength(1);
+  });
+
+  // ── 机器人自定义菜单（application.bot.menu_v6）────────────────────────
+  test("菜单「新建会话」：等价执行 /new（发出建会话表单卡）", async () => {
+    cleanup = await setup();
+    await deliver(msg("你好", { messageId: "om_menu_boot" }));
+    await clickMenu("new");
+    await vi.waitFor(() => {
+      expect(JSON.stringify(h.created.at(-1))).toContain("setup_form");
+    });
+  });
+
+  test("菜单「会话列表」：等价执行 /sessions（发出会话列表卡）", async () => {
+    cleanup = await setup();
+    await deliver(msg("你好", { messageId: "om_menu_boot2" }));
+    await clickMenu("sessions");
+    await vi.waitFor(() => {
+      expect(JSON.stringify(h.created.at(-1))).toContain("新建会话");
+    });
+  });
+
+  test("未知菜单 key / 非 owner 点击：均静默忽略", async () => {
+    cleanup = await setup();
+    await deliver(msg("你好", { messageId: "om_menu_boot3" }));
+    const before = h.created.length;
+    await clickMenu("whatever");
+    await clickMenu("new", "ou_other");
+    await new Promise((r) => setTimeout(r, 20));
+    expect(h.created.length).toBe(before);
   });
 
   // ── 任务 B：/model 切换后读回校验（集成） ─────────────────────────────

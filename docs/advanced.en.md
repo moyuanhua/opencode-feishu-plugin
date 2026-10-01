@@ -66,6 +66,19 @@ A long turn (dozens of tool calls) can push a single run card to its limits (28K
 - **Limits**: max 20MB per attachment by default (`attachmentMaxBytes`, clamped 1–100MB); 30s timeout (`attachmentTimeoutMs`); on failure the message is still delivered, with a "download failed: reason" note.
 - **Boundaries**: audio / video / stickers are not downloaded (placeholders remain); merged-forward and in-card resources cannot be downloaded via the API. Feishu's own per-resource cap is 100MB.
 
+## Bot menu (main-window quick entries)
+
+Once menu items are configured in the developer console, a click in the bot chat window triggers them (`application.bot.menu_v6` event, zero permission requirement):
+
+| Item (suggested name) | Event key | Equivalent command |
+|---|---|---|
+| New session | `new` (also accepts `/new`) | `/new` |
+| Session list | `sessions` (also accepts `/sessions`) | `/sessions` |
+
+**Implementation**: the gateway registers an `application.bot.menu_v6` handler → normalizes to `{ eventId, eventKey, operatorOpenId }` → synthesizes an **equivalent command message** that reuses the existing `handleMessage` routing (allowlist, dedup, command matrix, main-chat decisions unchanged); unknown event keys are ignored silently.
+
+**chatId source**: the menu event carries **no chat_id**. The plugin remembers each user's most recent p2p chat id (`feishu:v2:menu-chat:<openId>`, persisted in local storage), so the menu can only work **after the user has messaged the bot at least once** (always true in normal use); if unknown, the click is logged with a `warn` and ignored.
+
 ## `/sessions` data source & resume card
 
 `/sessions` lists **all local opencode sessions** (newest first, 8 per page, configurable):

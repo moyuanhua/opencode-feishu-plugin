@@ -7,7 +7,7 @@
  *
  * 兼容 SDK/服务端两种字段路径（context.* 与顶层），避免版本差异导致丢事件。
  */
-import type { CardAction, IncomingAttachment, IncomingMessage } from "../types.js";
+import type { BotMenuClick, CardAction, IncomingAttachment, IncomingMessage } from "../types.js";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -158,6 +158,23 @@ export function parseIncomingMessage(data: unknown): IncomingMessage | undefined
     ...(str(message.root_id) ? { rootId: str(message.root_id) } : {}),
     ...(str(message.parent_id) ? { parentId: str(message.parent_id) } : {}),
   };
+}
+
+/**
+ * 解析 `application.bot.menu_v6`（机器人自定义菜单事件）载荷：
+ * `{ header: { event_id }, event: { operator: { operator_id: { open_id } }, event_key } }`。
+ * 字段缺失（无操作人 / 无 event_key）返回 undefined。
+ */
+export function parseBotMenuEvent(data: unknown): BotMenuClick | undefined {
+  if (!isRecord(data)) return undefined;
+  const header = isRecord(data.header) ? data.header : {};
+  const event = isRecord(data.event) ? data.event : {};
+  const operator = isRecord(event.operator) ? event.operator : {};
+  const operatorId = isRecord(operator.operator_id) ? operator.operator_id : {};
+  const operatorOpenId = str(operatorId.open_id);
+  const eventKey = str(event.event_key);
+  if (!operatorOpenId || !eventKey) return undefined;
+  return { eventId: str(header.event_id), eventKey, operatorOpenId };
 }
 
 /**

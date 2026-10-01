@@ -68,6 +68,19 @@ opencode 会**回收空闲的 location**，这会连带卸载插件、关闭飞�
 - **限制**：单附件默认 ≤20MB（`attachmentMaxBytes`，夹取 1–100MB）；超时默认 30s（`attachmentTimeoutMs`）；失败时消息照常投递，仅附「下载失败：原因」。
 - **边界**：音频 / 视频 / 表情包不下载（仍占位文本）；合并转发与卡片内资源飞书不支持直接下载。飞书侧单资源上限 100MB。
 
+## 机器人菜单（主窗口快捷入口）
+
+在开发者后台配置菜单项后，用户在机器人会话窗口点击即可触发（`application.bot.menu_v6` 事件，零权限要求）：
+
+| 菜单项（建议名） | 事件 Key | 等价命令 |
+|---|---|---|
+| 新建会话 | `new`（也接受 `/new`） | `/new` |
+| 会话列表 | `sessions`（也接受 `/sessions`） | `/sessions` |
+
+**实现**：网关注册 `application.bot.menu_v6` handler → 归一化为 `{ eventId, eventKey, operatorOpenId }` → 合成一条**等价命令消息**复用既有 `handleMessage` 路由（白名单、去重、命令矩阵、主聊天流决策完全一致）；未知 event_key 静默忽略。
+
+**chatId 来源**：菜单事件**不带 chat_id**。插件会记住每个用户最近一次单聊的 chatId（`feishu:v2:menu-chat:<openId>`，随本机 storage 持久化），因此**首次使用菜单前需先给机器人发过至少一条消息**（正常使用流程必然满足）；无记录时记 `warn` 并忽略本次点击。
+
 ## /sessions 数据源与恢复卡
 
 `/sessions` 列出 opencode **本机全部**会话（按更新时间倒序，分页 8 条可配）：

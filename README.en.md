@@ -22,22 +22,29 @@ Connect [OpenCode](https://opencode.ai) to Feishu/Lark: **one Feishu topic = one
 | 📊 **Real-time visible** | "Thinking" receipt → live tool-call cards → streaming text updates; footer shows the current model |
 | ⏹ **Controllable** | Every reply card has a "force stop" button; a watchdog auto-interrupts stuck sessions; native queue with `/steer` `/now` to cut in |
 | 📎 **Images / files** | Images and files sent in Feishu are downloaded and attached to the session, so vision/file-capable models can see and read them |
+| 🖱 **Main-window menu** | Two fixed quick buttons above the chat input — "New session" and "Session list" (bot custom menu) — one tap to fire them |
 | 🚫 **No ports** | Full long-connection; no inbound port needed on the server |
 
 ## 1. Feishu app setup (~3 minutes)
 
 1. Open the [Feishu Open Platform](https://open.feishu.cn/app) → **Create an enterprise self-built app**.
 2. **Add app capability → Bot**.
-3. **Permission management** — enable these two minimal scopes:
+3. **Permission management → API permissions**: enable these two **required** scopes first:
    - `im:message.p2p_msg:readonly` — read messages users send to the bot in p2p chat
    - `im:message:send_as_bot` — send messages as the app (also used to update cards)
 
-   To **receive images / files** (downloaded and attached to sessions), add one more:
-   - `im:message:readonly` — fetch message resources (required to download images / files)
+   **To receive images / files, add one more** (skip if you don't need it):
+   - `im:message:readonly` — fetch message resources (**required** to download images / files)
+
+   > ⚠️ Without `im:message:readonly`: images/files are **not downloaded** — the message still reaches the AI, but with placeholder text ("…download failed…"). After enabling it, **re-create and publish an app version** for it to take effect.
 4. **Events & Callbacks → Event configuration**: subscription method **"Use long connection to receive events"** (do **not** pick Webhook), add event `im.message.receive_v1`.
 5. **Events & Callbacks → Callback configuration**: same long-connection method, add callback `card.action.trigger` (zero permission requirement).
-6. **Version management & release**: availability = **only yourself**, create a version and **publish**. ⚠️ Without publishing the app stays in "development" state and the long connection cannot connect — the bot will never respond.
-7. Note down the **App ID** (`cli_…`) and **App Secret**.
+6. **Bot menu (optional, recommended)**: **App capabilities → Bot → Bot custom menu** — enable the menu, pick the **floating menu** style, and add two items (any name/icon, **action = push event**):
+   - "➕ New session" → `event_key` = `new`
+   - "📋 Session list" → `event_key` = `sessions`
+   Then add the event `application.bot.menu_v6` under **Event configuration** (zero permission requirement). Result: two quick buttons above the chat input that act like sending `/new` / `/sessions`.
+7. **Version management & release**: availability = **only yourself**, create a version and **publish**. ⚠️ Without publishing the app stays in "development" state and the long connection cannot connect — the bot will never respond.
+8. Note down the **App ID** (`cli_…`) and **App Secret**.
 
 > **Why no group permission?** This plugin is a "single-user remote control". Without group permission the bot **physically cannot receive group messages** — the single-user boundary is guaranteed by the platform scope layer, not only by code.
 
@@ -160,6 +167,7 @@ Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepa
 | Symptom | Fix |
 |---|---|
 | No response to messages | ① Is the app **published** and does availability include you? ② Is the subscription **long connection** (not Webhook)? ③ Is `im:message.p2p_msg:readonly` enabled? |
+| Images / files not received (placeholder / "download failed") | Enable `im:message:readonly` (Permission management → API permissions, search "fetch message resources") → **re-create and publish an app version**; check the `feishu.log` "附件下载失败" entry for the exact reason |
 | `feishu.json` changes don't apply | Check the path, then `opencode reload` |
 | Plugin not loaded at all | npm: confirm the package name is in the `plugins` array; directory: confirm `plugins/<name>/index.js` exists |
 | No approval cards | That session wasn't started from Feishu (no mapping); by design the plugin doesn't take it over |

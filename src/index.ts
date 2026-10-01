@@ -74,6 +74,7 @@ import { CompactController } from "./session/compact.js";
 import { compactSessionHttp, fetchSessionMessagesHttp } from "./session/compact-http.js";
 import { quickGenerateWithSession } from "./session/quick-generate.js";
 import type {
+  BotMenuClick,
   IncomingMessage,
   ModelRef,
   PermissionPreset,
@@ -773,6 +774,8 @@ async function start(
       log.debug("忽略非白名单用户", { sender: maskId(message.senderOpenId) });
       return;
     }
+    // 记住最近单聊 chatId：菜单点击事件不带 chat_id，需要靠它回推卡片（失败只降级日志）。
+    void rememberMenuChat(message.senderOpenId, message.chatId);
     if (!message.text) return;
 
     // 跨实例去重兜底：命中则直接丢弃（get-then-set 非原子，见 dedup.ts 注释）。
@@ -859,6 +862,78 @@ async function start(
     await sessionMap.bindRoot(anchor, created.id);
     log.info("话题新建 opencode 会话", { sessionID: created.id, threadId: message.threadId, chatId: message.chatId });
     await runInSession(message, created.id, message.messageId);
+  }
+
+  // ── 机器人自定义菜单（application.bot.menu_v6）─────────────────────────
+  /** 菜单 event_key → 等价命令（在开发者后台为菜单项配置这些 Key）。 */
+  const MENU_COMMANDS: Record<string, { cmd: string; label: string }> = {
+    new: { cmd: "/new", label: "新建会话" },
+    sessions: { cmd: "/sessions", label: "会话列表" },
+    // 容忍把命令原文直接当 event_key 配置。
+    "/new": { cmd: "/new", label: "新建会话" },
+    "/sessions": { cmd: "/sessions", label: "会话列表" },
+  };
+  /** openId → 最近单聊 chatId（菜单事件不带 chat_id，需记住消息来源）。 */
+  const menuChatCache = new Map<string, string>();
+  const menuChatKey = (openId: string): string => `feishu:v2:menu-chat:${openId}`;
+
+  async function rememberMenuChat(openId: string, chatId: string): Promise<void> {
+    if (!openId || !chatId || menuChatCache.get(openId) === chatId) return;
+    menuChatCache.set(openId, chatId);
+    try {
+      await ctx.storage.set(menuChatKey(openId), chatId);
+    } catch (err) {
+      log.debug("菜单 chatId 持久化失败", { error: errorMessage(err) });
+    }
+  }
+
+  async function resolveMenuChat(openId: string): Promise<string | undefined> {
+    const cached = menuChatCache.get(openId);
+    if (cached) return cached;
+    try {
+      const stored = await ctx.storage.get(menuChatKey(openId));
+      if (typeof stored === "string" && stored) {
+        menuChatCache.set(openId, stored);
+        return stored;
+      }
+    } catch {
+      // 读失败按未找到处理（点击会被忽略并记日志）。
+    }
+    return undefined;
+  }
+
+  /**
+   * 菜单点击 → 合成为等价命令消息，复用既有 `handleMessage` 路由
+   * （命令拦截 / 白名单 / 去重 / 主聊天流决策全部一致）。
+   */
+  async function handleBotMenu(click: BotMenuClick): Promise<void> {
+    if (!(await owner.admit(click.operatorOpenId))) {
+      log.debug("忽略非白名单用户的菜单点击", { operator: maskId(click.operatorOpenId) });
+      return;
+    }
+    const entry = MENU_COMMANDS[click.eventKey.trim()];
+    if (!entry) {
+      log.debug("未知菜单 event_key，忽略", { eventKey: click.eventKey });
+      return;
+    }
+    const chatId = await resolveMenuChat(click.operatorOpenId);
+    if (!chatId) {
+      log.warn("菜单点击缺少单聊上下文：请先给机器人发一条消息后再使用菜单", {
+        eventKey: click.eventKey,
+      });
+      return;
+    }
+    const synthetic: IncomingMessage = {
+      eventId: click.eventId,
+      messageId: `menu_${click.eventId || Date.now()}`,
+      chatId,
+      chatType: "p2p",
+      messageType: "text",
+      text: entry.cmd,
+      senderOpenId: click.operatorOpenId,
+    };
+    log.info("机器人菜单点击 → 执行命令", { eventKey: click.eventKey, cmd: entry.cmd, label: entry.label });
+    await handleMessage(synthetic);
   }
 
   /**
@@ -950,6 +1025,7 @@ async function start(
     log,
     logLevel: config.logLevel,
     onMessage: (message) => handleMessage(message),
+    onBotMenu: (click) => handleBotMenu(click),
     onCardAction: (action) =>
       routeCardAction(action, {
         log,
