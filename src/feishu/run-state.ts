@@ -26,7 +26,13 @@ export interface ToolEntry {
 }
 
 export type RunBlock =
-  | { readonly kind: "text"; readonly content: string; readonly streaming: boolean }
+  | {
+      readonly kind: "text";
+      readonly content: string;
+      readonly streaming: boolean;
+      /** 所属 assistant 消息 id（ended 全文按消息回填时用；缺省 = 未知）。 */
+      readonly msg?: string;
+    }
   | { readonly kind: "tool"; readonly tool: ToolEntry };
 
 /** 卡片底部状态页脚。null = 运行结束，不再显示。 */
@@ -155,32 +161,76 @@ export function reduce(state: RunState, event: RunEvent): RunState {
       const last = base[base.length - 1];
       const blocks: RunBlock[] =
         last && last.kind === "text" && last.streaming
-          ? [...base.slice(0, -1), { ...last, content: last.content + event.delta }]
-          : [...base, { kind: "text", content: event.delta, streaming: true }];
+          ? [...base.slice(0, -1), { ...last, content: last.content + event.delta, ...(event.assistantMessageID ? { msg: event.assistantMessageID } : {}) }]
+          : [...base, { kind: "text", content: event.delta, streaming: true, ...(event.assistantMessageID ? { msg: event.assistantMessageID } : {}) }];
       const next = withAssistantID(state, event.assistantMessageID);
       return { ...next, blocks, footer: "streaming", terminal: "running" };
     }
 
     case "text.ended": {
       const blocks = state.blocks;
-      const last = blocks[blocks.length - 1];
-      let nextBlocks: RunBlock[];
-      if (last && last.kind === "text" && last.streaming) {
-        nextBlocks = [...blocks.slice(0, -1), { ...last, content: event.text ?? last.content, streaming: false }];
-      } else if (event.text) {
-        // 交错到达：同一消息的流式块可能已被工具事件/步进提前关闭（模型"文字+工具"同步输出），
-        // 此时 ended 携带的是**该消息全文**——必须回填既有块，绝不追加重复块。
-        const idx = lastPrefixTextIndex(blocks, event.text);
-        if (idx >= 0) {
-          nextBlocks = blocks.map((b, i) =>
-            i === idx && b.kind === "text" ? { ...b, content: event.text!, streaming: false } : b,
-          );
+      const endedText = event.text;
+      const endedMsg = event.assistantMessageID;
+
+      // 无消息 id（旧路径兜底）：最后一块流式 → 关闭；带全文 → 回填前缀匹配块；否则原样关闭。
+      if (!endedMsg) {
+        const last = blocks[blocks.length - 1];
+        let nextBlocks: RunBlock[];
+        if (last && last.kind === "text" && last.streaming) {
+          nextBlocks = [...blocks.slice(0, -1), { ...last, content: endedText ?? last.content, streaming: false }];
+        } else if (endedText) {
+          const idx = lastPrefixTextIndex(blocks, endedText);
+          nextBlocks =
+            idx >= 0
+              ? blocks.map((b, i) => (i === idx && b.kind === "text" ? { ...b, content: endedText, streaming: false } : b))
+              : [...closeStreamingText(blocks), { kind: "text", content: endedText, streaming: false }];
         } else {
-          nextBlocks = [...closeStreamingText(blocks), { kind: "text", content: event.text, streaming: false }];
+          nextBlocks = closeStreamingText(blocks);
         }
-      } else {
-        nextBlocks = closeStreamingText(blocks);
+        return { ...state, blocks: nextBlocks, footer: "streaming" };
       }
+
+      // 找到该消息的最后一段文本块（可能仍在流式，也可能已被工具事件提前关闭）。
+      let targetIdx = -1;
+      for (let i = blocks.length - 1; i >= 0; i -= 1) {
+        const b = blocks[i]!;
+        if (b.kind === "text" && b.msg === endedMsg) {
+          targetIdx = i;
+          break;
+        }
+      }
+      const tail = blocks[blocks.length - 1];
+      if (targetIdx < 0 && tail && tail.kind === "text" && tail.streaming) targetIdx = blocks.length - 1;
+
+      // 该消息没有文本块（如无 delta 的纯 ended 携带全文）→ 追加。
+      if (targetIdx < 0) {
+        if (!endedText) return { ...state, blocks: closeStreamingText(blocks), footer: "streaming" };
+        return {
+          ...state,
+          blocks: [
+            ...closeStreamingText(blocks),
+            { kind: "text", content: endedText, streaming: false, msg: endedMsg },
+          ],
+          footer: "streaming",
+        };
+      }
+
+      // `ended.text` 是**整条消息的全文**（实测与 delta 之和一致），可能跨越工具前后多段文本：
+      // 先累计目标块之前、同消息文本的长度，再取后缀，避免把前段内容重复写进目标块。
+      const target = blocks[targetIdx]!;
+      let earlierLen = 0;
+      for (let i = 0; i < targetIdx; i += 1) {
+        const b = blocks[i]!;
+        if (b.kind === "text" && b.msg === endedMsg) earlierLen += b.content.length;
+      }
+      let content = target.kind === "text" ? target.content : "";
+      if (endedText !== undefined && endedText.length >= earlierLen) {
+        const suffix = endedText.slice(earlierLen);
+        if (suffix.length >= content.length) content = suffix; // 只在更完整时回填，避免内容回退
+      }
+      const nextBlocks = blocks.map((b, i) =>
+        i === targetIdx && b.kind === "text" ? { ...b, content, streaming: false } : b,
+      );
       return { ...state, blocks: nextBlocks, footer: "streaming" };
     }
 

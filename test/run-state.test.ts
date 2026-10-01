@@ -145,7 +145,9 @@ describe("run-state reducer", () => {
 
   test("text.ended 带全文但确实没有历史块：正常追加", () => {
     const state = run({ type: "text.ended", text: "直接来的全文", assistantMessageID: "m1" });
-    expect(state.blocks).toEqual([{ kind: "text", content: "直接来的全文", streaming: false }]);
+    expect(state.blocks).toEqual([
+      { kind: "text", content: "直接来的全文", streaming: false, msg: "m1" },
+    ]);
   });
 
   test("text.ended 交错且内容与既有块无前缀关系：保留两块（内容不同）", () => {
@@ -156,5 +158,29 @@ describe("run-state reducer", () => {
     );
     const texts = state.blocks.filter((b) => b.kind === "text").map((b) => (b.kind === "text" ? b.content : ""));
     expect(texts).toEqual(["好的", "完全不同的新内容"]);
+  });
+
+  test("text.ended 全文跨工具前后多段：只回填后缀，前段不重复（流式末尾）", () => {
+    const state = run(
+      { type: "text.delta", delta: "前段文字", assistantMessageID: "m1" },
+      { type: "tool.input.started", id: "t1", name: "shell", assistantMessageID: "m1" },
+      { type: "text.delta", delta: "后段文字", assistantMessageID: "m1" },
+      { type: "text.ended", text: "前段文字后段文字", assistantMessageID: "m1" },
+    );
+    const texts = state.blocks.filter((b) => b.kind === "text").map((b) => (b.kind === "text" ? b.content : ""));
+    // 而不是 ["前段文字", "前段文字后段文字"]（前段出现两次）
+    expect(texts).toEqual(["前段文字", "后段文字"]);
+  });
+
+  test("text.ended 全文跨多段且目标块已被工具关闭：保持分段、不重复", () => {
+    const state = run(
+      { type: "text.delta", delta: "AAA", assistantMessageID: "m1" },
+      { type: "tool.input.started", id: "t1", name: "shell", assistantMessageID: "m1" },
+      { type: "text.delta", delta: "BBB", assistantMessageID: "m1" },
+      { type: "tool.input.started", id: "t2", name: "read", assistantMessageID: "m1" },
+      { type: "text.ended", text: "AAABBB", assistantMessageID: "m1" },
+    );
+    const texts = state.blocks.filter((b) => b.kind === "text").map((b) => (b.kind === "text" ? b.content : ""));
+    expect(texts).toEqual(["AAA", "BBB"]);
   });
 });
