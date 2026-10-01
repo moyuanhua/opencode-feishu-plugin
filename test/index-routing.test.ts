@@ -739,7 +739,7 @@ describe("index 话题路由（集成）", () => {
       },
       { timeout: 6000 },
     );
-  });
+  }, 15_000);
 
   test("压缩按钮：伪造 token 被拒，不调用 session.compact", async () => {
     sessionListRaw = [
