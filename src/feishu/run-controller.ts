@@ -6,10 +6,13 @@
  * 2. `apply`：消费归一化事件，驱动纯 reducer，并按 ≥`throttleMs` 节流 patch 卡片；
  * 3. 终态（execution.succeeded|failed）强制 flush 并清理节流器。
  *
- * 排队模型：每个 session 至多一张「正在运行」的卡片 + 一个 FIFO 的「已排队」卡片列表。
- * - 运行中收到新消息 → 新卡片进 queued；
- * - `execution.started` 到来：若有 queued 则晋升队首为 active（页脚 思考中）；
- * - 终态到来：finalize active 并清空 active，等待下一次 `execution.started`。
+ * 排队模型（实测语义，2026-10 实验确认）：
+ * opencode 的 `delivery:"queue"` 消息会在**当前执行的下一个步骤**被注入处理
+ * （**不会产生新的 `execution.started`**）。因此：
+ * - 运行中收到新消息 → 新卡片进 queued（等待中）；
+ * - 若消息获得独立执行（少数情况），`execution.started` 会晋升队首；
+ * - 执行终态后仍在队列的卡片：宽限 3 秒等 `execution.started`；没有则按
+ *   「已随本轮处理」收尾（否则会永久停在「等待中」）。
  */
 import type { Logger } from "../types.js";
 import { errorMessage } from "../logger.js";
@@ -121,6 +124,22 @@ function trailingText(blocks: readonly RunBlock[]): string {
   return parts.join("\n\n").trim();
 }
 
+/** 「活动」事件：文本/工具类（会推进运行卡内容）；started/终态/queued/model.set 不算。 */
+function isActivityEvent(type: RunEvent["type"]): boolean {
+  return (
+    type === "text.started" ||
+    type === "text.delta" ||
+    type === "text.ended" ||
+    type === "tool.input.started" ||
+    type === "tool.input.ended" ||
+    type === "tool.success" ||
+    type === "tool.error"
+  );
+}
+
+/** 终态后排队卡的宽限窗口：超过仍未等到 `execution.started` 即视为「已随本轮处理」。 */
+export const QUEUED_DRAIN_GRACE_MS = 3_000;
+
 export function createRunController(deps: RunControllerDeps): RunController {
   const sessions = new Map<string, SessionRuns>();
   const throttlers = new Map<string, ReturnType<typeof createThrottler>>();
@@ -128,8 +147,44 @@ export function createRunController(deps: RunControllerDeps): RunController {
   const sessionModels = new Map<string, string>();
   /** 已就排队超时上报过的会话（收到 execution.started 后清除）。 */
   const notifiedQueued = new Set<string>();
+  /** 终态后的排队卡宽限定时器（等新一轮 started；超时即按「已随本轮处理」收尾）。 */
+  const drainTimers = new Map<string, ReturnType<typeof setTimeout>>();
   const throttleMs = Math.max(400, deps.throttleMs);
   let disposed = false;
+
+  const cancelDrain = (sessionID: string): void => {
+    const timer = drainTimers.get(sessionID);
+    if (timer) {
+      clearTimeout(timer);
+      drainTimers.delete(sessionID);
+    }
+  };
+
+  /** 终态后仍在队列的卡片：宽限 `QUEUED_DRAIN_GRACE_MS` 等 started；无则收尾。 */
+  const scheduleDrain = (sessionID: string, runs: SessionRuns): void => {
+    if (runs.queued.length === 0) {
+      cancelDrain(sessionID);
+      return;
+    }
+    cancelDrain(sessionID);
+    const timer = setTimeout(() => {
+      drainTimers.delete(sessionID);
+      if (disposed) return;
+      const live = sessions.get(sessionID);
+      if (!live || live.queued.length === 0) return;
+      deps.log.info("排队卡按「已随本轮处理」收尾（队列消息在当前执行内被消费）", {
+        sessionID,
+        count: live.queued.length,
+      });
+      for (const card of live.queued) {
+        card.state = reduce(card.state, { type: "execution.succeeded" });
+        finalize(card);
+      }
+      live.queued.length = 0;
+    }, QUEUED_DRAIN_GRACE_MS);
+    (timer as { unref?: () => void }).unref?.();
+    drainTimers.set(sessionID, timer);
+  };
 
   const sessionRuns = (sessionID: string): SessionRuns => {
     let runs = sessions.get(sessionID);
@@ -257,6 +312,9 @@ export function createRunController(deps: RunControllerDeps): RunController {
 
       if (event.type === "execution.started") {
         notifiedQueued.delete(sessionID);
+        cancelDrain(sessionID);
+        // 注意：正常流程中 started 会在「active 已存在」时到达（回执卡先于服务端执行建立），
+        // 因此这里**不能**按「上一轮结束」处理旧卡，保持更新 active 的原行为。
         if (runs.active) {
           update(runs.active, event, true);
           return;
@@ -264,50 +322,66 @@ export function createRunController(deps: RunControllerDeps): RunController {
         const next = runs.queued.shift();
         if (next) {
           runs.active = next;
+          deps.log.debug("排队卡晋升为运行卡", { sessionID, runID: next.runID });
           update(next, event, true);
         }
+        // 还有剩余排队卡？等本轮执行收尾后再结算。
+        if (runs.queued.length > 0) scheduleDrain(sessionID, runs);
         return;
+      }
+
+      if (!runs.active && runs.queued.length > 0 && isActivityEvent(event.type)) {
+        // 容错：队列消息可能被同一次执行消费、没有独立的 execution.started；
+        // 首个活动事件到来时按 FIFO 晋升队首，避免排队卡永久停留在「等待中」。
+        const next = runs.queued.shift()!;
+        runs.active = next;
+        deps.log.info("收到活动事件但无运行卡：晋升队首排队卡", {
+          sessionID,
+          runID: next.runID,
+          event: event.type,
+        });
+        next.state = reduce(next.state, { type: "execution.started" });
       }
 
       const card = runs.active;
-      if (!card) return;
 
-      if (event.type === "execution.succeeded") {
-        // 长回答：单独发「最终答案卡/文件」，卡内收缩为提示，避免两者抢同一张卡。
-        const text = trailingText(card.state.blocks);
-        const long =
-          deps.sendFinalAnswer !== undefined &&
-          deps.finalAnswer !== undefined &&
-          text.length >= deps.finalAnswer.minChars;
-        if (long) {
-          card.state = reduce(reduce(card.state, { type: "final.separated" }), event);
+      if (event.type === "execution.succeeded" || event.type === "execution.failed") {
+        if (card) {
+          if (event.type === "execution.succeeded") {
+            // 长回答：单独发「最终答案卡/文件」，卡内收缩为提示，避免两者抢同一张卡。
+            const text = trailingText(card.state.blocks);
+            const long =
+              deps.sendFinalAnswer !== undefined &&
+              deps.finalAnswer !== undefined &&
+              text.length >= deps.finalAnswer.minChars;
+            if (long) {
+              card.state = reduce(reduce(card.state, { type: "final.separated" }), event);
+              finalize(card);
+              runs.active = undefined;
+              void deps
+                .sendFinalAnswer!({
+                  sessionID,
+                  chatId: card.chatId,
+                  ...(card.replyToMessageId ? { replyToMessageId: card.replyToMessageId } : {}),
+                  text,
+                })
+                .catch((err) => {
+                  deps.log.warn("最终答案发送失败", { sessionID, error: errorMessage(err) });
+                });
+              scheduleDrain(sessionID, runs);
+              return;
+            }
+          }
+          update(card, event, true);
           finalize(card);
           runs.active = undefined;
-          void deps
-            .sendFinalAnswer!({
-              sessionID,
-              chatId: card.chatId,
-              ...(card.replyToMessageId ? { replyToMessageId: card.replyToMessageId } : {}),
-              text,
-            })
-            .catch((err) => {
-              deps.log.warn("最终答案发送失败", { sessionID, error: errorMessage(err) });
-            });
-          return;
         }
-        update(card, event, true);
-        finalize(card);
-        runs.active = undefined;
+        // 终态后仍在队列的卡片：宽限等新一轮 started；没有则按「已随本轮处理」收尾。
+        scheduleDrain(sessionID, runs);
         return;
       }
 
-      if (event.type === "execution.failed") {
-        update(card, event, true);
-        finalize(card);
-        runs.active = undefined;
-        return;
-      }
-
+      if (!card) return;
       update(card, event, false);
     },
 
@@ -352,6 +426,8 @@ export function createRunController(deps: RunControllerDeps): RunController {
       disposed = true;
       sessionModels.clear();
       notifiedQueued.clear();
+      for (const timer of drainTimers.values()) clearTimeout(timer);
+      drainTimers.clear();
       for (const throttler of throttlers.values()) throttler.cancel();
       throttlers.clear();
       for (const runs of sessions.values()) {

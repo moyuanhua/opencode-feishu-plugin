@@ -219,6 +219,71 @@ describe("run controller", () => {
     controller.dispose();
   });
 
+  test("execution.started 到来时 active 仍在：更新运行卡、不动队首（回执卡先建的正常流程）", async () => {
+    const { controller, sender } = setup();
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "steer" }); // om_0 active
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "queue" }); // om_1 queued
+    // 服务端 started 到达：不应收尾 om_0，也不应晋升 om_1（等上一轮终态）
+    controller.apply("ses_1", { type: "execution.started" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lastPatchFor(sender, "om_0")).not.toContain("已完成");
+    expect(lastPatchFor(sender, "om_1")).toBe("");
+    // 正常终态之后，下一轮 started 才晋升队首
+    controller.apply("ses_1", { type: "execution.succeeded" });
+    controller.apply("ses_1", { type: "execution.started" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lastPatchFor(sender, "om_1")).toContain("正在思考");
+    controller.dispose();
+  });
+
+  test("无 active 时收到活动事件：晋升队首（缺 started 的容错）", async () => {
+    const { controller, sender } = setup();
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "queue" });
+    // 没有 execution.started，直接来文本事件（队列消息被同一次执行消费的场景）
+    controller.apply("ses_1", { type: "text.delta", delta: "queued-run" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(lastPatchFor(sender, "om_0")).toContain("queued-run");
+    // 结束后：无 active 且队列已空 → 后续事件被丢弃（不误建卡）
+    controller.apply("ses_1", { type: "execution.succeeded" });
+    await vi.advanceTimersByTimeAsync(0);
+    controller.apply("ses_1", { type: "text.delta", delta: "ignored" });
+    await vi.advanceTimersByTimeAsync(500);
+    expect(lastPatchFor(sender, "om_0")).not.toContain("ignored");
+    controller.dispose();
+  });
+
+  test("终态后无 started：排队卡宽限 3 秒后按「已随本轮处理」收尾（实测语义）", async () => {
+    const { controller, sender } = setup();
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "steer" }); // om_0 active
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "queue" }); // om_1 queued
+    // 队列消息被同一次执行消费：只有一次 succeeded（实测无第二个 started）
+    controller.apply("ses_1", { type: "execution.succeeded" });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(lastPatchFor(sender, "om_0")).toContain("已完成");
+    // 宽限期内 om_1 仍保持等待
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(lastPatchFor(sender, "om_1")).not.toContain("已完成");
+    // 宽限到期 → 收尾，不再永久停留在「等待中」
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(lastPatchFor(sender, "om_1")).toContain("已完成");
+    expect(controller.staleQueued(60_000)).toEqual([]);
+    controller.dispose();
+  });
+
+  test("终态后宽限期内来 started：正常晋升、不触发宽限收尾", async () => {
+    const { controller, sender } = setup();
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "steer" }); // om_0
+    await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "queue" }); // om_1
+    controller.apply("ses_1", { type: "execution.succeeded" });
+    await vi.advanceTimersByTimeAsync(500);
+    // 独立执行开始（少数情况）→ 晋升并取消宽限
+    controller.apply("ses_1", { type: "execution.started" });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(lastPatchFor(sender, "om_1")).toContain("正在思考");
+    expect(lastPatchFor(sender, "om_1")).not.toContain("已完成");
+    controller.dispose();
+  });
+
   test("finalizeQueued：排队卡收尾为失败/中断态", async () => {
     const { sender, controller } = setup();
     await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "queue" });

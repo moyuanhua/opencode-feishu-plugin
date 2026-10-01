@@ -52,6 +52,14 @@ The watchdog (a 60s sweep) force-interrupts a session in two cases: "no progress
 
 > What still triggers it: a genuine hang — no events at all and no pending interaction. In that case the watchdog interrupts and sends the "已自动中断卡死会话" notice card by design.
 
+## Queued-card lifecycle (measured semantics)
+
+An opencode `delivery:"queue"` message is injected for processing **at the next step of the currently running execution** (**no** new `execution.started` is emitted — confirmed by a controlled experiment, 2026-10). The plugin manages receipt cards accordingly:
+
+- New message while busy → its receipt card enters the "waiting" queue;
+- Once consumed (within the same execution), its reply renders on **whichever card is running at that time**;
+- After the execution reaches a terminal state, remaining queued cards get a **3-second grace window**: if an independent `execution.started` arrives, they are promoted normally; otherwise they are closed as "handled with this run" — never left waiting forever.
+
 ## Card content guard (table over-limit degradation)
 
 Feishu allows **at most 5 table components per card**; exceeding it makes patch return 400 (`code=230099`) — with lots of markdown comparison tables the card stays stuck on old content and looks dead. The plugin guards the **whole card**:

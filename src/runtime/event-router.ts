@@ -159,18 +159,21 @@ export async function routeEvent(
     }
     case "session.execution.started": {
       const data = event.data as { sessionID: string };
+      deps.log.debug("execution.started", { sessionID: data.sessionID });
       deps.markStarted(data.sessionID);
       deps.applyRun(data.sessionID, { type: "execution.started" });
       break;
     }
     case "session.execution.succeeded": {
       const data = event.data as { sessionID: string };
+      deps.log.debug("execution.succeeded", { sessionID: data.sessionID });
       deps.markEnded(data.sessionID);
       deps.applyRun(data.sessionID, { type: "execution.succeeded" });
       break;
     }
     case "session.execution.failed": {
       const data = event.data as { sessionID: string; error: unknown };
+      deps.log.debug("execution.failed", { sessionID: data.sessionID });
       deps.markEnded(data.sessionID);
       deps.applyRun(data.sessionID, { type: "execution.failed", error: extractErrorText(data.error) });
       void deps.notifyFailure(data.sessionID, data.error);
@@ -180,6 +183,7 @@ export async function routeEvent(
       // /stop、shutdown、被 steer 取代等都会走这里；漏处理会让执行态永远卡在 running，
       // 之后每条飞书消息都被判为 queue → 永久排队（历史 bug）。
       const data = event.data as { sessionID: string; reason?: string };
+      deps.log.debug("execution.interrupted", { sessionID: data.sessionID, reason: data.reason });
       deps.markEnded(data.sessionID);
       deps.applyRun(data.sessionID, { type: "execution.failed", error: `已中断（${data.reason ?? "unknown"}）` });
       break;
@@ -188,6 +192,7 @@ export async function routeEvent(
       // 执行态权威信号（busy/retry/idle）。execution.* 事件可能丢失或错配，用状态事件兜底。
       const data = event.data as { sessionID: string; status?: { type?: string } };
       const statusType = data.status?.type;
+      deps.log.debug("session.status", { sessionID: data.sessionID, status: statusType });
       if (statusType === "idle") {
         deps.markEnded(data.sessionID);
         deps.applyRun(data.sessionID, { type: "execution.succeeded" });
@@ -199,6 +204,7 @@ export async function routeEvent(
     case "session.idle": {
       // 兜底收尾：某些路径可能没有 execution.succeeded，避免页脚悬挂。
       const data = event.data as { sessionID: string };
+      deps.log.debug("session.idle", { sessionID: data.sessionID });
       deps.markEnded(data.sessionID);
       deps.applyRun(data.sessionID, { type: "execution.succeeded" });
       break;
