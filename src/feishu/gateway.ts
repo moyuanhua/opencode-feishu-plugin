@@ -39,7 +39,21 @@ export interface Gateway {
 export function startGateway(options: GatewayOptions): Gateway {
   const { log } = options;
 
-  const dispatcher = new Lark.EventDispatcher({}).register({
+  // 分发器日志桥接：SDK 的 EventDispatcher 默认写 console（服务模式被丢弃）。
+  // 接上后能看到 `register xxx handle` / `execute xxx handle` / `no xxx handle`（未匹配事件的具体类型）——
+  // 「事件到了 WS 但没进 handler」这类问题全靠它定位。
+  const larkLogger = (tag: string) => ({
+    error: (...msg: unknown[]) => log.error(tag, { msg: safeArgs(msg) }),
+    warn: (...msg: unknown[]) => log.warn(tag, { msg: safeArgs(msg) }),
+    info: (...msg: unknown[]) => log.debug(tag, { msg: safeArgs(msg) }),
+    debug: (...msg: unknown[]) => log.debug(tag, { msg: safeArgs(msg) }),
+    trace: (...msg: unknown[]) => log.debug(tag, { msg: safeArgs(msg) }),
+  });
+
+  const dispatcher = new Lark.EventDispatcher({
+    loggerLevel: options.logLevel === "debug" ? Lark.LoggerLevel.debug : Lark.LoggerLevel.info,
+    logger: larkLogger("lark.dispatcher"),
+  }).register({
     "im.message.receive_v1": (data: unknown) => {
       try {
         const message = parseIncomingMessage(data);
@@ -79,7 +93,15 @@ export function startGateway(options: GatewayOptions): Gateway {
     "application.bot.menu_v6": (data: unknown) => {
       try {
         const click = parseBotMenuEvent(data);
-        if (!click) return;
+        if (!click) {
+          log.debug("菜单事件解析失败", {
+            shape:
+              typeof data === "object" && data !== null
+                ? Object.keys(data as Record<string, unknown>).slice(0, 20)
+                : typeof data,
+          });
+          return;
+        }
         log.debug("收到机器人菜单点击", {
           eventKey: click.eventKey,
           operator: maskId(click.operatorOpenId),
@@ -100,13 +122,7 @@ export function startGateway(options: GatewayOptions): Gateway {
     appSecret: options.appSecret,
     domain: options.domain === "lark" ? Lark.Domain.Lark : Lark.Domain.Feishu,
     loggerLevel,
-    logger: {
-      error: (...msg: unknown[]) => log.error("lark.ws", { msg: safeArgs(msg) }),
-      warn: (...msg: unknown[]) => log.warn("lark.ws", { msg: safeArgs(msg) }),
-      info: (...msg: unknown[]) => log.debug("lark.ws", { msg: safeArgs(msg) }),
-      debug: (...msg: unknown[]) => log.debug("lark.ws", { msg: safeArgs(msg) }),
-      trace: (...msg: unknown[]) => log.debug("lark.ws", { msg: safeArgs(msg) }),
-    },
+    logger: larkLogger("lark.ws"),
   });
 
   void wsClient.start({ eventDispatcher: dispatcher }).catch((err) => {

@@ -161,20 +161,25 @@ export function parseIncomingMessage(data: unknown): IncomingMessage | undefined
 }
 
 /**
- * 解析 `application.bot.menu_v6`（机器人自定义菜单事件）载荷：
- * `{ header: { event_id }, event: { operator: { operator_id: { open_id } }, event_key } }`。
+ * 解析 `application.bot.menu_v6`（机器人自定义菜单事件）载荷。
+ *
+ * 兼容两种形状：
+ * - 文档/Nested：`{ header: { event_id }, event: { operator: { operator_id: { open_id } }, event_key } }`
+ * - **SDK 长连接实收（拍平）**：`header.*` 与 `event.*` 提升到顶层，
+ *   即 `{ event_id, event_type, event_key, operator: { operator_id: { open_id } } }`
+ *
  * 字段缺失（无操作人 / 无 event_key）返回 undefined。
  */
 export function parseBotMenuEvent(data: unknown): BotMenuClick | undefined {
   if (!isRecord(data)) return undefined;
   const header = isRecord(data.header) ? data.header : {};
-  const event = isRecord(data.event) ? data.event : {};
+  const event = isRecord(data.event) ? data.event : data;
   const operator = isRecord(event.operator) ? event.operator : {};
   const operatorId = isRecord(operator.operator_id) ? operator.operator_id : {};
   const operatorOpenId = str(operatorId.open_id);
   const eventKey = str(event.event_key);
   if (!operatorOpenId || !eventKey) return undefined;
-  return { eventId: str(header.event_id), eventKey, operatorOpenId };
+  return { eventId: str(header.event_id) || str(data.event_id), eventKey, operatorOpenId };
 }
 
 /**

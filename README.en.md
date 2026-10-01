@@ -111,6 +111,22 @@ The main chat **only manages**; plain text never enters any session.
 
 ![Create-session form card: directory, model, permission](image/new.png)  ![Session list card: paginate, enter/reopen, create](image/sessions.png)
 
+### Bot menu (quick buttons above the input box)
+
+![Configure the bot custom menu in the developer console (floating menu): the phone preview shows "new" / "sessions" pinned above the input box; the right panel is the item config (action = push event)](image/btns.png)
+
+After configuring the menu (setup step 6), two quick buttons stay pinned **above the chat input** in the bot window:
+
+| Button | Equivalent command | Effect |
+|---|---|---|
+| `new` | `/new` | Opens the create-session form card |
+| `sessions` | `/sessions` | Opens the session list card |
+
+- Menu `event_key`s must be **`new` / `sessions`** (the literal `/new`, `/sessions` also accepted);
+- Clicks arrive over the long connection (`application.bot.menu_v6`, zero permission requirement); the plugin synthesizes an **equivalent command message** — allowlist, dedup and command matrix behave exactly like typed commands; unknown keys are ignored silently;
+- After changing the menu, **re-publish the app version** (per the console: takes effect within ~5 minutes after publishing);
+- Message the bot at least once before using the menu (the plugin remembers the p2p chat from messages; any normal usage satisfies this).
+
 ### Inside a topic (work)
 
 A topic = a session; sending plain text is giving the AI a command.
