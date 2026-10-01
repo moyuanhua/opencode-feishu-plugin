@@ -383,6 +383,16 @@ export function createRunController(deps: RunControllerDeps): RunController {
 
       if (!card) return;
       update(card, event, false);
+      // 临时诊断：记录块结构，定位“同段文本出现两次”的问题（debug 级，默认 info 不输出）。
+      if (isActivityEvent(event.type)) {
+        deps.log.debug("运行卡块结构", {
+          sessionID,
+          event: event.type,
+          blocks: card.state.blocks.map((b) =>
+            b.kind === "text" ? `T${b.streaming ? "*" : ""}${b.content.length}` : `tool:${b.tool.name}`,
+          ),
+        });
+      }
     },
 
     hasActive(sessionID): boolean {

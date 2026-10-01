@@ -100,6 +100,7 @@ export async function routeEvent(
       break;
     case "session.text.started": {
       const data = event.data as { sessionID: string; assistantMessageID?: string };
+      deps.log.debug("text.started", { sessionID: data.sessionID, msg: data.assistantMessageID });
       deps.applyRun(data.sessionID, {
         type: "text.started",
         ...(data.assistantMessageID ? { assistantMessageID: data.assistantMessageID } : {}),
@@ -108,6 +109,11 @@ export async function routeEvent(
     }
     case "session.text.delta": {
       const data = event.data as { sessionID: string; delta: string; assistantMessageID?: string };
+      deps.log.debug("text.delta", {
+        sessionID: data.sessionID,
+        msg: data.assistantMessageID,
+        len: typeof data.delta === "string" ? data.delta.length : 0,
+      });
       deps.applyRun(data.sessionID, {
         type: "text.delta",
         delta: data.delta,
@@ -117,6 +123,12 @@ export async function routeEvent(
     }
     case "session.text.ended": {
       const data = event.data as { sessionID: string; text?: string; assistantMessageID?: string };
+      deps.log.debug("text.ended", {
+        sessionID: data.sessionID,
+        msg: data.assistantMessageID,
+        len: typeof data.text === "string" ? data.text.length : -1,
+        hasText: typeof data.text === "string",
+      });
       deps.applyRun(data.sessionID, {
         type: "text.ended",
         ...(data.text ? { text: data.text } : {}),

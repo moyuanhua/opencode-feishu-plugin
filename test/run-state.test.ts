@@ -122,4 +122,39 @@ describe("run-state reducer", () => {
     expect(state.errorMsg).toBe("boom");
     expect(state.footer).toBeNull();
   });
+
+  test("text.ended 交错到达（工具事件已关闭流式块）：回填既有块，不重复追加", () => {
+    const state = run(
+      { type: "text.started", assistantMessageID: "m1" },
+      { type: "text.delta", delta: "你好", assistantMessageID: "m1" },
+      { type: "text.delta", delta: "世界", assistantMessageID: "m1" },
+      // 模型同一步里调用了工具（工具事件关闭流式文本块）
+      { type: "tool.input.started", id: "t1", name: "shell", assistantMessageID: "m1" },
+      // text.ended 在工具事件之后到达，携带该消息全文
+      { type: "text.ended", text: "你好世界", assistantMessageID: "m1" },
+    );
+    const texts = state.blocks.filter((b) => b.kind === "text");
+    expect(texts).toHaveLength(1);
+    if (texts[0]!.kind === "text") {
+      expect(texts[0]!.content).toBe("你好世界");
+      expect(texts[0]!.streaming).toBe(false);
+    }
+    // 工具块保留
+    expect(state.blocks.some((b) => b.kind === "tool" && b.tool.id === "t1")).toBe(true);
+  });
+
+  test("text.ended 带全文但确实没有历史块：正常追加", () => {
+    const state = run({ type: "text.ended", text: "直接来的全文", assistantMessageID: "m1" });
+    expect(state.blocks).toEqual([{ kind: "text", content: "直接来的全文", streaming: false }]);
+  });
+
+  test("text.ended 交错且内容与既有块无前缀关系：保留两块（内容不同）", () => {
+    const state = run(
+      { type: "text.delta", delta: "好的", assistantMessageID: "m1" },
+      { type: "tool.input.started", id: "t1", name: "shell", assistantMessageID: "m1" },
+      { type: "text.ended", text: "完全不同的新内容", assistantMessageID: "m2" },
+    );
+    const texts = state.blocks.filter((b) => b.kind === "text").map((b) => (b.kind === "text" ? b.content : ""));
+    expect(texts).toEqual(["好的", "完全不同的新内容"]);
+  });
 });

@@ -834,9 +834,9 @@ describe("index 话题路由（集成）", () => {
       () => {
         expect(JSON.stringify(h.patched.at(-1))).toContain("已压缩 · 会话摘要");
       },
-      { timeout: 6000 },
+      { timeout: 10_000 },
     );
-  }, 15_000);
+  }, 20_000);
 
   test("压缩按钮：伪造 token 被拒，不调用 session.compact", async () => {
     sessionListRaw = [

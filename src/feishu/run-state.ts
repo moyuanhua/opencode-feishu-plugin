@@ -84,6 +84,19 @@ function withAssistantID(state: RunState, assistantMessageID: string | undefined
   return { ...state, assistantMessageID };
 }
 
+/**
+ * 从后往前找最后一个「内容非空且是 `text` 前缀」的文本块（交错 ended 的回填目标）。
+ * 找不到返回 -1（调用方按"无 delta 的纯 ended"追加新块）。
+ */
+function lastPrefixTextIndex(blocks: readonly RunBlock[], text: string): number {
+  for (let i = blocks.length - 1; i >= 0; i -= 1) {
+    const block = blocks[i]!;
+    if (block.kind !== "text") continue;
+    if (block.content && text.startsWith(block.content)) return i;
+  }
+  return -1;
+}
+
 /** 就地更新一个工具块；未知 id 返回原状态（忽略迟到/越界事件）。 */
 function patchTool(
   state: RunState,
@@ -155,7 +168,16 @@ export function reduce(state: RunState, event: RunEvent): RunState {
       if (last && last.kind === "text" && last.streaming) {
         nextBlocks = [...blocks.slice(0, -1), { ...last, content: event.text ?? last.content, streaming: false }];
       } else if (event.text) {
-        nextBlocks = [...closeStreamingText(blocks), { kind: "text", content: event.text, streaming: false }];
+        // 交错到达：同一消息的流式块可能已被工具事件/步进提前关闭（模型"文字+工具"同步输出），
+        // 此时 ended 携带的是**该消息全文**——必须回填既有块，绝不追加重复块。
+        const idx = lastPrefixTextIndex(blocks, event.text);
+        if (idx >= 0) {
+          nextBlocks = blocks.map((b, i) =>
+            i === idx && b.kind === "text" ? { ...b, content: event.text!, streaming: false } : b,
+          );
+        } else {
+          nextBlocks = [...closeStreamingText(blocks), { kind: "text", content: event.text, streaming: false }];
+        }
       } else {
         nextBlocks = closeStreamingText(blocks);
       }
