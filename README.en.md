@@ -22,6 +22,7 @@ Connect [OpenCode](https://opencode.ai) to Feishu/Lark: **one Feishu topic = one
 | 📊 **Real-time visible** | "Thinking" receipt → live tool-call cards → streaming text updates; footer shows the current model |
 | ⏹ **Controllable** | Every reply card has a "force stop" button; a watchdog auto-interrupts stuck sessions; native queue with `/steer` `/now` to cut in |
 | 📎 **Images / files** | Images and files sent in Feishu are downloaded and attached to the session, so vision/file-capable models can see and read them |
+| 🧭 **One-sentence session** | Send a task in the main chat — the AI judges intent, finds the right working directory, and creates + starts the session in one tap |
 | 🖱 **Main-window menu** | Two fixed quick buttons above the chat input — "New session" and "Session list" (bot custom menu) — one tap to fire them |
 | 🚫 **No ports** | Full long-connection; no inbound port needed on the server |
 
@@ -127,6 +128,22 @@ After configuring the menu (setup step 6), two quick buttons stay pinned **above
 - After changing the menu, **re-publish the app version** (per the console: takes effect within ~5 minutes after publishing);
 - Message the bot at least once before using the menu (the plugin remembers the p2p chat from messages; any normal usage satisfies this).
 
+### One-sentence session creation (AI finds the directory)
+
+When you send plain text in the main chat, the AI first judges the **intent** and picks the best-matching working directory from candidates (recent dirs + local session dirs), then replies with a proposal card:
+
+```
+You: fix the zlib download bug
+→ 🆕 Suggested new session
+   Task: fix download bug | Dir: `/Users/code/zlib`
+   [✅ Create & send]  [❌ Cancel]
+```
+
+"Create & send" = create the session + auto-open a topic + send your original message in to start working (permission defaults to "Editable"; adjust later with `/perm`).
+
+- Chat/unrecognized/dir-not-in-candidates → falls back to the console hint card, **never creates a wrong session**; the model's path must match a candidate (anti-hallucination);
+- Proposal cards are valid for 1 hour; set `quickNew: false` to go back to the console-only mode.
+
 ### Inside a topic (work)
 
 A topic = a session; sending plain text is giving the AI a command.
@@ -174,6 +191,7 @@ When the agent asks via `question` or other form tools, the form becomes a Feish
 | `logFile` | string \| boolean | — | `true` = write `<configDir>/plugins/feishu.log`; recommended in server mode |
 | `approvalTtlMs` | number | `600000` | Approval token / card validity |
 | `staleExecutionMs` | number | `300000` | Watchdog threshold (0–60 min; **0 = disabled**; sessions waiting on a form / pending approval are never killed) |
+| `quickNew` | boolean | `true` | Main-chat "one-sentence session": AI judges intent + finds the directory, proposal card creates in one tap; `false` = console-only mode |
 | `gatewayLocation` | string | — | Only start the gateway at this location (or its subdirectories); empty = any location |
 
 Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepalive*`, `gatewayMatchGraceMs`) → [docs/advanced.en.md](./docs/advanced.en.md#full-configuration).

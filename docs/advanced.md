@@ -99,6 +99,16 @@ opencode 的 `delivery:"queue"` 消息会在**当前执行的下一个步骤**�
 
 **chatId 来源**：菜单事件**不带 chat_id**。插件会记住每个用户最近一次单聊的 chatId（`feishu:v2:menu-chat:<openId>`，随本机 storage 持久化），因此**首次使用菜单前需先给机器人发过至少一条消息**（正常使用流程必然满足）；无记录时记 `warn` 并忽略本次点击。
 
+## 一句话建会话（issue #2）
+
+主聊天流普通文本的 AI 路由（`quickNew`，默认开启）：
+
+- **候选目录**：最近使用目录（`RecentStore`）+ 本机全部会话目录（带会话标题作语义线索），去重后取前 40 条；
+- **识别**：`generate.text`（无会话上下文、秒级）输出严格 JSON `{intent, dir, title, reason}`；`dir` 必须**命中候选清单**（防幻觉路径），再经 `validateDir`（allowedRoots）校验；
+- **交互**：先回「识别中」占位卡，随后 patch 为**建议卡**（✅ 创建并发送 / ❌ 取消）；待办条目持久化在 `feishu:v2:quicknew:<id>`（TTL 1 小时，过期点击提示重发）；
+- **创建**：一键 = 建会话（权限预设「可编辑」）+ 对用户原消息 `reply_in_thread` 开话题 + 原消息作为首条 prompt 发送；
+- **回退**：闲聊 / 解析失败 / 目录不匹配 / 无候选目录 → 管理台提示卡（旧行为）；任何异常都不阻断消息。
+
 ## /sessions 数据源与恢复卡
 
 `/sessions` 列出 opencode **本机全部**会话（按更新时间倒序，分页 8 条可配）：
@@ -169,6 +179,7 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `gatewayMatchGraceMs` | number | `3000` | **精确匹配优先**的宽限窗口：子目录候选先等这么久，出现 `here === gatewayLocation` 就让位（0 = 不等待，子目录立即兜底） |
 | `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
 | `staleExecutionMs` | number | `300000` | 看门狗阈值（夹取 0–60 分钟；**0 = 关闭**；见「看门狗判活规则」） |
+| `quickNew` | boolean | `true` | 主聊天流「一句话建会话」（AI 判意图 + 找目录，建议卡一键创建）；`false` 关闭 |
 | `maxResourcesShown` | number | `8` | 审批卡最多展示的资源行数 |
 | `sessionAllowButton` | boolean | `true` | 审批卡是否显示「本会话内允许该工具」按钮 |
 | `resumeSummary` | boolean | `true` | 恢复卡是否展示会话摘要 |

@@ -446,6 +446,16 @@ describe("附件接收（acceptAttachments）", () => {
   });
 });
 
+describe("quickNew（一句话建会话）", () => {
+  const base = { appId: "a", appSecret: "b", logFile: false };
+  test("默认开启", () => {
+    expect(resolveConfig(base, {}, noFile()).quickNew).toBe(true);
+  });
+  test("可关闭", () => {
+    expect(resolveConfig({ ...base, quickNew: false }, {}, noFile()).quickNew).toBe(false);
+  });
+});
+
 describe("gatewayMatchGraceMs（精确匹配宽限）", () => {
   const base = { appId: "a", appSecret: "b", logFile: false };
   test("默认 3000ms", () => {

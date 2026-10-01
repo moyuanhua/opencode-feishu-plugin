@@ -181,6 +181,13 @@ export interface ResolvedConfig {
    * `<系统临时目录>/opencode-feishu-plugin`）。显式配置则完全覆盖（精确目录）。
    */
   readonly attachmentsDir?: string;
+  /**
+   * 主聊天流「一句话建会话」（issue #2，默认 true）：
+   * 普通文本先经 AI 判断意图与工作目录（候选=最近使用+本机会话目录），
+   * 任务类消息回一张「建议新建会话」卡，一键创建并开始处理；
+   * 闲聊/未识别到目录时回退到管理台提示卡。
+   */
+  readonly quickNew: boolean;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -265,6 +272,7 @@ export function resolveConfig(
   );
   const attachmentTimeoutMs = clamp(asNumber(merged.attachmentTimeoutMs, 30_000), 5_000, 120_000);
   const attachmentsDirRaw = asString(merged.attachmentsDir).trim();
+  const quickNew = asBoolean(merged.quickNew, true);
   const keepaliveIntervalMs = clamp(
     asNumber(merged.keepaliveIntervalMs, 20 * 60 * 1000),
     5 * 60 * 1000,
@@ -334,6 +342,7 @@ export function resolveConfig(
     attachmentMaxBytes,
     attachmentTimeoutMs,
     ...(attachmentsDirRaw ? { attachmentsDir: attachmentsDirRaw } : {}),
+    quickNew,
   };
 }
 

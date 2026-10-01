@@ -46,7 +46,23 @@ import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js";
 import { decideRoute } from "./feishu/routing.js";
 import { buildConsoleHintCard, buildFinalAnswerCard, buildStopNoticeCard } from "./feishu/cards.js";
-import { buildSessionOpenedCard, buildResumeCompactPendingCard } from "./feishu/session-cards.js";
+import {
+  buildSessionOpenedCard,
+  buildResumeCompactPendingCard,
+  buildSessionReadyCard,
+} from "./feishu/session-cards.js";
+import {
+  buildQuickNewProposalCard,
+  buildQuickNewResolvedCard,
+  buildQuickNewThinkingCard,
+  parseQuickNewActionValue,
+} from "./feishu/quick-new-cards.js";
+import {
+  buildQuickNewPrompt,
+  matchCandidateDirectory,
+  parseQuickNewDecision,
+  type QuickNewCandidate,
+} from "./session/quick-new.js";
 import { isUnder, validateDirectory } from "./feishu/dirs.js";
 import { WizardStore } from "./feishu/wizard.js";
 import { RecentStore } from "./feishu/recent.js";
@@ -57,15 +73,16 @@ import {
   sameModel,
   type ModelSwitchOutcome,
 } from "./feishu/models.js";
-import { extractSessionPermissions, extractSessionTitle } from "./feishu/session-list.js";
+import { extractSessionPermissions, extractSessionTitle, normalizeSessionList, type SessionListEntry } from "./feishu/session-list.js";
 import { injectTopicGuidance } from "./feishu/topic-guidance.js";
-import { allowActionsForGrant, appendAllowRules, presetAskActions, presetGateMode, presetToRuleset } from "./feishu/perm-presets.js";
+import { allowActionsForGrant, appendAllowRules, presetAskActions, presetGateMode, presetLabel, presetToRuleset } from "./feishu/perm-presets.js";
 import { ApprovalManager, decideEffectForSession, type ReplyInput } from "./permission.js";
 import { SessionCommands } from "./session-commands.js";
 import { routeEvent, extractErrorText, type EventRouterDeps } from "./runtime/event-router.js";
 import { routeCardAction } from "./runtime/card-action-router.js";
 import { createTopicStatusController } from "./runtime/topic-status.js";
 import {
+  extractGeneratedText,
   summarizeSession as summarizeSessionImpl,
   type SessionSummaryOutcome,
   type SummarizeSessionInput,
@@ -75,6 +92,7 @@ import { compactSessionHttp, fetchSessionMessagesHttp } from "./session/compact-
 import { quickGenerateWithSession } from "./session/quick-generate.js";
 import type {
   BotMenuClick,
+  CardAction,
   IncomingMessage,
   ModelRef,
   PermissionPreset,
@@ -822,6 +840,11 @@ async function start(
 
     if (decision.kind === "main-hint") {
       // 主聊天流 = 管理台：普通文本不进入任何会话（决策 1）。
+      // quickNew（默认开启）先做「一句话建会话」AI 识别；识别失败/闲聊回退提示卡。
+      if (config.quickNew) {
+        await handleQuickNew(message);
+        return;
+      }
       const res = await sender.sendCard(message.chatId, buildConsoleHintCard());
       if (!res.ok) log.warn("管理台提示卡发送失败", { error: res.error ?? "unknown" });
       return;
@@ -938,6 +961,288 @@ async function start(
     await handleMessage(synthetic);
   }
 
+  // ── 主聊天流「一句话建会话」（issue #2）────────────────────────────────
+  const QUICK_NEW_KEY_PREFIX = "feishu:v2:quicknew:";
+  /** 建议卡有效期：超时点击视为过期（需重发消息）。 */
+  const QUICK_NEW_TTL_MS = 60 * 60 * 1000;
+
+  interface QuickNewEntry {
+    readonly text: string;
+    readonly title: string;
+    readonly dir: string;
+    readonly chatId: string;
+    readonly openId: string;
+    readonly anchorMessageId: string;
+    readonly createdAt: number;
+  }
+
+  function parseQuickNewEntry(raw: unknown): QuickNewEntry | undefined {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return undefined;
+    const v = raw as Record<string, unknown>;
+    const text = typeof v.text === "string" ? v.text : "";
+    const dir = typeof v.dir === "string" ? v.dir : "";
+    const chatId = typeof v.chatId === "string" ? v.chatId : "";
+    const openId = typeof v.openId === "string" ? v.openId : "";
+    const anchorMessageId = typeof v.anchorMessageId === "string" ? v.anchorMessageId : "";
+    if (!text || !dir || !chatId || !openId || !anchorMessageId) return undefined;
+    return {
+      text,
+      title: typeof v.title === "string" ? v.title : "",
+      dir,
+      chatId,
+      openId,
+      anchorMessageId,
+      createdAt: typeof v.createdAt === "number" ? v.createdAt : 0,
+    };
+  }
+
+  /**
+   * 主聊天流普通文本：AI 判断「意图 + 工作目录」。
+   * - 任务类且目录命中候选 → 建议建会话卡（一键创建并发送）；
+   * - 闲聊 / 无候选 / 识别失败 → 回退管理台提示卡（旧行为）。
+   * 只允许候选目录，模型返回的路径必须命中候选（防幻觉）。
+   */
+  async function handleQuickNew(message: IncomingMessage): Promise<void> {
+    const hint = async (): Promise<void> => {
+      const res = await sender.sendCard(message.chatId, buildConsoleHintCard());
+      if (!res.ok) log.warn("管理台提示卡发送失败", { error: res.error ?? "unknown" });
+    };
+    try {
+      // 1) 候选目录：最近使用（优先）+ 本机会话目录（标题作语义线索）。
+      const candidates: QuickNewCandidate[] = [];
+      const seen = new Set<string>();
+      for (const dir of await recent.listDirs()) {
+        if (!seen.has(dir)) {
+          seen.add(dir);
+          candidates.push({ path: dir });
+        }
+      }
+      let entries: SessionListEntry[] = [];
+      try {
+        const raw = (await listAllSessionsRaw()) ?? (await listSessionsOverHttp({}, { log }));
+        entries = normalizeSessionList(raw) ?? [];
+      } catch (err) {
+        log.debug("quick-new 会话列表读取失败", { error: errorMessage(err) });
+      }
+      for (const entry of entries) {
+        if (entry.directory && !seen.has(entry.directory)) {
+          seen.add(entry.directory);
+          candidates.push({ path: entry.directory, ...(entry.title ? { label: entry.title } : {}) });
+        }
+      }
+      const routingSessionID = entries[0]?.sessionID;
+      if (candidates.length === 0 || !routingSessionID) {
+        log.debug("quick-new 无候选目录或会话，回退提示卡", {
+          candidates: candidates.length,
+          hasRouting: Boolean(routingSessionID),
+        });
+        await hint();
+        return;
+      }
+
+      // 2) 立即回执（识别通常 1-3 秒），完成后 patch 为建议卡/提示卡。
+      const ack = await sender.sendCard(message.chatId, buildQuickNewThinkingCard());
+      if (!ack.ok || !ack.messageId) {
+        await hint();
+        return;
+      }
+
+      // 3) 模型识别（无会话上下文的一次性生成）。
+      const generateText = async (
+        prompt: string,
+        requestOptions: { headers: Record<string, string> },
+      ): Promise<unknown> => {
+        const api = (ctx.generate as unknown as {
+          text?: (arg: { prompt: string }, options?: { headers?: Record<string, string> }) => Promise<unknown>;
+        }).text;
+        if (typeof api !== "function") throw new Error("generate.text unavailable");
+        return api({ prompt }, requestOptions);
+      };
+      const outcome = await quickGenerateWithSession(
+        { log, generateText },
+        { prompt: buildQuickNewPrompt(message.text, candidates), sessionID: routingSessionID },
+      );
+      const decision = parseQuickNewDecision(extractGeneratedText(outcome.result));
+      const dir = decision?.intent === "task" ? matchCandidateDirectory(decision.directory, candidates) : undefined;
+      const validation = dir ? validateDir(dir) : undefined;
+      if (!decision || decision.intent !== "task" || !dir || !validation?.ok) {
+        log.debug("quick-new 判定为非任务或未匹配到目录", {
+          intent: decision?.intent,
+          dir: decision?.directory,
+          reason: decision?.reason,
+        });
+        await sender.patchCard(ack.messageId, buildConsoleHintCard());
+        return;
+      }
+
+      // 4) 落待办条目 + 建议卡。
+      const id = `qn_${message.messageId}`;
+      const title = decision.title || topicTitle(message.text);
+      const entry: QuickNewEntry = {
+        text: message.text,
+        title,
+        dir: validation.path,
+        chatId: message.chatId,
+        openId: message.senderOpenId,
+        anchorMessageId: message.messageId,
+        createdAt: Date.now(),
+      };
+      await ctx.storage.set(
+        QUICK_NEW_KEY_PREFIX + id,
+        entry as unknown as Parameters<typeof ctx.storage.set>[1],
+      );
+      await sender.patchCard(
+        ack.messageId,
+        buildQuickNewProposalCard({
+          id,
+          title,
+          directory: validation.path,
+          textPreview: message.text,
+          ...(decision.reason ? { reason: decision.reason } : {}),
+        }),
+      );
+      log.info("quick-new 建议卡已发送", { dir: validation.path, title, reason: decision.reason });
+    } catch (err) {
+      log.warn("quick-new 处理失败，回退管理台提示", { error: errorMessage(err) });
+      await hint();
+    }
+  }
+
+  /** quicknew 建议卡按钮：create（建会话+开话题+发送原消息）/ cancel。 */
+  async function handleQuickNewCardAction(
+    action: CardAction,
+    value: { op: "create" | "cancel"; id: string },
+  ): Promise<object> {
+    if (!owner.isAllowed(action.operatorOpenId)) {
+      return { toast: { type: "error", content: "无操作权限" } };
+    }
+    const key = QUICK_NEW_KEY_PREFIX + value.id;
+    let raw: unknown;
+    try {
+      raw = await ctx.storage.get(key);
+    } catch {
+      raw = undefined;
+    }
+    const entry = parseQuickNewEntry(raw);
+    if (!entry || Date.now() - entry.createdAt > QUICK_NEW_TTL_MS) {
+      try {
+        await ctx.storage.remove(key);
+      } catch {
+        // 忽略：条目已不可用
+      }
+      if (action.messageId) {
+        await sender.patchCard(
+          action.messageId,
+          buildQuickNewResolvedCard("⌛️ 建议已过期", "请重新发送消息。", "orange"),
+        );
+      }
+      return { toast: { type: "warning", content: "已过期，请重发消息" } };
+    }
+    if (value.op === "cancel") {
+      try {
+        await ctx.storage.remove(key);
+      } catch {
+        // 忽略
+      }
+      if (action.messageId) {
+        await sender.patchCard(action.messageId, buildQuickNewResolvedCard("❌ 已取消", "未创建会话。"));
+      }
+      return { toast: { type: "info", content: "已取消" } };
+    }
+
+    const validation = validateDir(entry.dir);
+    if (!validation.ok) {
+      if (action.messageId) {
+        await sender.patchCard(
+          action.messageId,
+          buildQuickNewResolvedCard("⚠️ 目录不可用", `${entry.dir}：${validation.message}`, "red"),
+        );
+      }
+      return { toast: { type: "error", content: "目录不可用" } };
+    }
+    try {
+      await ctx.storage.remove(key);
+    } catch {
+      // 忽略
+    }
+
+    const perm: PermissionPreset = "edit";
+    const title = entry.title || topicTitle(entry.text);
+    // 后台执行（3 秒回调窗口内不阻塞）：建会话 → 开话题 → 发送原消息。
+    void (async () => {
+      const created = await createSessionInternal({
+        title,
+        chatId: entry.chatId,
+        openId: entry.openId,
+        setActive: false,
+        directory: validation.path,
+        permissions: presetToRuleset(perm),
+        perm,
+        gateMode: presetGateMode(perm),
+      });
+      await recent.addDir(validation.path);
+      const readyCard = buildSessionReadyCard({
+        title,
+        sessionID: created.id,
+        dir: validation.path,
+        perm: presetLabel(perm),
+      });
+      // 话题锚点 = 用户原消息：reply_in_thread 发就绪卡 → 绑定 root/thread。
+      const res = await sender.replyCard(entry.anchorMessageId, readyCard, { replyInThread: true });
+      if (res.ok && res.messageId) {
+        await sessionMap.bindRoot(entry.anchorMessageId, created.id);
+        const meta = res.threadId ? undefined : await sender.getMessageMeta(res.messageId);
+        const threadId = res.threadId ?? meta?.threadId;
+        if (threadId) {
+          await sessionMap.bindThread(threadId, created.id, entry.chatId, entry.openId, entry.anchorMessageId);
+        } else {
+          log.warn("quick-new 开话题后未读到 thread_id", { sessionID: created.id });
+        }
+        await sessionMap.setRootCard(created.id, {
+          style: "created",
+          sessionID: created.id,
+          title,
+          dir: validation.path,
+          perm: presetLabel(perm),
+        });
+      } else {
+        log.warn("quick-new 开话题失败", { sessionID: created.id, error: res.error ?? "unknown" });
+      }
+      await runInSession(
+        {
+          eventId: `quicknew_${value.id}`,
+          messageId: entry.anchorMessageId,
+          chatId: entry.chatId,
+          chatType: "p2p",
+          messageType: "text",
+          text: entry.text,
+          senderOpenId: entry.openId,
+        },
+        created.id,
+        entry.anchorMessageId,
+      );
+      if (action.messageId) {
+        await sender.patchCard(
+          action.messageId,
+          buildQuickNewResolvedCard(
+            "✅ 已创建",
+            `目录：\`${validation.path}\`\n已开话题并开始处理你的消息。`,
+            "green",
+          ),
+        );
+      }
+    })().catch((err) => {
+      log.warn("quick-new 建会话失败", { error: errorMessage(err) });
+      if (action.messageId) {
+        void sender.patchCard(
+          action.messageId,
+          buildQuickNewResolvedCard("⚠️ 创建失败", errorMessage(err).slice(0, 160), "red"),
+        );
+      }
+    });
+    return { toast: { type: "success", content: "已创建，正在打开话题…" } };
+  }
+
   /**
    * 回退路径（threadRouting=false）：沿用 P3 行为，普通文本进当前会话（无则自动建）。
    * 刻意不传 replyToMessageId —— 回退模式下即使消息带 thread_id 也不落话题。
@@ -1034,7 +1339,12 @@ async function start(
         handleForm: (a) => formRelay.handleCardAction(a),
         handleStop: (a) => stop.handleCardAction(a),
         handleCompact: (a) => compact.handleCardAction(a),
-        handleCommands: (a) => commands.handleCardAction(a),
+        handleCommands: (a) => {
+          // 「一句话建会话」建议卡按钮（独立处理，不走 SessionCommands）。
+          const quick = parseQuickNewActionValue(a.rawValue);
+          if (quick) return handleQuickNewCardAction(a, quick);
+          return commands.handleCardAction(a);
+        },
         handleApprovals: (a) => approvals.handleCardAction(a),
       }),
   });

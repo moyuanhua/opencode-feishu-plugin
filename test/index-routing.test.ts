@@ -1,4 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
+import { mkdtempSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { CardAction, IncomingMessage } from "../src/types.js";
 import { deriveSignSecret } from "../src/config.js";
 import { signAllowSession, signStop } from "../src/security/token.js";
@@ -86,6 +89,10 @@ vi.mock("@larksuiteoapi/node-sdk", () => ({
   Domain: { Feishu: "feishu", Lark: "lark" },
 }));
 
+/** quick-new 用例：真实可写的临时目录（/home/ubuntu 在 macOS 不可创建）。 */
+const QN_BASE = realpathSync(tmpdir());
+const QN_DIR = mkdtempSync(join(QN_BASE, "feishu-qn-"));
+
 const storage = new FakeStorage();
 const promptCalls: Array<{ sessionID: string; text: string; files?: Array<{ uri: string }> }> = [];
 const interruptCalls: string[] = [];
@@ -108,6 +115,9 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       stream: true,
       logFile: false,
       logLevel: "error",
+      // 测试默认关闭「一句话建会话」，避免主聊天流文本触发额外模型调用；
+      // quick-new 用例显式 setup({ quickNew: true })。
+      quickNew: false,
       ...overrides,
     },
     storage: {
@@ -483,6 +493,93 @@ describe("index 话题路由（集成）", () => {
     await clickMenu("new", "ou_other");
     await new Promise((r) => setTimeout(r, 20));
     expect(h.created.length).toBe(before);
+  });
+
+  // ── 主聊天流「一句话建会话」（issue #2）────────────────────────────────
+  /** 在全部 patch 中查找包含指定文案的卡片（避免受跨用例迟到 patch 影响）。 */
+  const findPatched = (text: string): string =>
+    JSON.stringify(h.patched.find((p) => JSON.stringify(p).includes(text)) ?? null);
+
+  test("主聊天流任务文本：AI 识别 → 建议卡 → 一键创建并发送", async () => {
+    sessionListRaw = [
+      {
+        id: "ses_old",
+        title: "zlib 下载任务",
+        time: { updated: 1_700_000_000_000 },
+        location: { directory: QN_DIR },
+      },
+    ];
+    // 先以「闲聊」识别完成 boot 消息（绑定 owner），再切换为任务识别。
+    h.generateRaw = { text: '{"intent":"chat"}' };
+    cleanup = await setup({ quickNew: true, allowedRoots: [QN_BASE] });
+    await deliver(msg("你好", { messageId: "om_qn_boot" }));
+    await vi.waitFor(() => {
+      expect(findPatched("管理台")).toContain("管理台");
+    });
+
+    h.generateRaw = {
+      text: JSON.stringify({
+        intent: "task",
+        dir: QN_DIR,
+        title: "修下载 bug",
+        reason: "消息提到下载 bug",
+      }),
+    };
+    await deliver(msg("帮我修一下下载的 bug", { messageId: "om_qn_1" }));
+    await vi.waitFor(() => {
+      expect(findPatched("建议新建会话")).toContain("建议新建会话");
+    });
+    const proposal = findPatched("建议新建会话");
+    expect(proposal).toContain(QN_DIR);
+    expect(proposal).toContain("修下载 bug");
+    // 识别 prompt 里带了候选目录（含会话标题线索）。
+    expect(h.generateTextCalls.at(-1)).toContain(`- ${QN_DIR}（zlib 下载任务）`);
+
+    // 点击「创建并发送」。
+    const res = (await click({ cmd: "quicknew", op: "create", id: "qn_om_qn_1" })) as {
+      toast: { type: string };
+    };
+    expect(res.toast.type).toBe("success");
+    await vi.waitFor(() => {
+      expect(promptCalls.at(-1)).toEqual({ sessionID: "ses_0", text: "帮我修一下下载的 bug" });
+    });
+    // 话题锚点 = 用户原消息；thread 映射建立。
+    expect((storage.raw("feishu:v2:root:om_qn_1") as { sessionID: string }).sessionID).toBe("ses_0");
+    expect((storage.raw("feishu:v2:thread:omt_new") as { sessionID: string }).sessionID).toBe("ses_0");
+    // 会话目录写入映射。
+    expect((storage.raw("feishu:v2:session:ses_0") as { dir?: string }).dir).toBe(QN_DIR);
+    await vi.waitFor(() => {
+      expect(findPatched("✅ 已创建")).toContain("✅ 已创建");
+    });
+  });
+
+  test("主聊天流闲聊文本：识别为 chat → 回退管理台提示卡", async () => {
+    sessionListRaw = [
+      { id: "ses_x", title: "某会话", time: { updated: 1 }, location: { directory: "/home/ubuntu" } },
+    ];
+    h.generateRaw = { text: '{"intent":"chat"}' };
+    cleanup = await setup({ quickNew: true, allowedRoots: ["/home/ubuntu"] });
+    await deliver(msg("你好", { messageId: "om_qn_boot2" }));
+    await vi.waitFor(() => {
+      expect(findPatched("管理台")).toContain("管理台");
+    });
+    // 没有创建任何会话，也没有 prompt。
+    expect(promptCalls).toHaveLength(0);
+  });
+
+  test("主聊天流任务文本但目录不在候选：回退管理台提示卡（防幻觉）", async () => {
+    sessionListRaw = [
+      { id: "ses_y", title: "某会话", time: { updated: 1 }, location: { directory: "/home/ubuntu/work" } },
+    ];
+    h.generateRaw = {
+      text: JSON.stringify({ intent: "task", dir: "/etc/evil", title: "x", reason: "r" }),
+    };
+    cleanup = await setup({ quickNew: true, allowedRoots: ["/home/ubuntu"] });
+    await deliver(msg("帮我搞点事情", { messageId: "om_qn_boot3" }));
+    await vi.waitFor(() => {
+      expect(findPatched("管理台")).toContain("管理台");
+    });
+    expect(promptCalls).toHaveLength(0);
   });
 
   // ── 任务 B：/model 切换后读回校验（集成） ─────────────────────────────

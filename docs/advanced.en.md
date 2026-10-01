@@ -97,6 +97,16 @@ Once menu items are configured in the developer console, a click in the bot chat
 
 **chatId source**: the menu event carries **no chat_id**. The plugin remembers each user's most recent p2p chat id (`feishu:v2:menu-chat:<openId>`, persisted in local storage), so the menu can only work **after the user has messaged the bot at least once** (always true in normal use); if unknown, the click is logged with a `warn` and ignored.
 
+## One-sentence session creation (issue #2)
+
+AI routing for plain text in the main chat (`quickNew`, on by default):
+
+- **Candidates**: recent dirs (`RecentStore`) + every local session's directory (session titles act as semantic hints), deduped, capped at 40;
+- **Analysis**: `generate.text` (no session context, sub-second) returns strict JSON `{intent, dir, title, reason}`; `dir` **must match a candidate** (anti-hallucination), then goes through `validateDir` (allowedRoots);
+- **Interaction**: a "recognizing" placeholder card is patched into a **proposal card** (✅ Create & send / ❌ Cancel); the pending entry is persisted at `feishu:v2:quicknew:<id>` (1-hour TTL; expired clicks ask you to resend);
+- **Creation**: one tap = create the session (permission preset "Editable") + `reply_in_thread` a ready card under your original message + send the original text as the first prompt;
+- **Fallback**: chat / parse failure / no matching dir / no candidates → the console hint card (old behavior); no exception ever blocks the message.
+
 ## `/sessions` data source & resume card
 
 `/sessions` lists **all local opencode sessions** (newest first, 8 per page, configurable):
@@ -167,6 +177,7 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `gatewayMatchGraceMs` | number | `3000` | **Exact-match-first** grace window: subdirectory candidates wait this long for a `here === gatewayLocation` instance (0 = no wait, immediate fallback) |
 | `approvalTtlMs` | number | `600000` | Approval token / card validity |
 | `staleExecutionMs` | number | `300000` | Watchdog threshold (clamped 0–60 min; **0 = disabled**; see "Watchdog staleness rules") |
+| `quickNew` | boolean | `true` | Main-chat "one-sentence session" (AI judges intent + finds the dir; proposal card creates in one tap); `false` disables |
 | `maxResourcesShown` | number | `8` | Max resource rows shown on approval cards |
 | `sessionAllowButton` | boolean | `true` | Show the "allow this tool in this session" button |
 | `resumeSummary` | boolean | `true` | Show session summary on resume card |
