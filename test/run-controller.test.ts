@@ -206,6 +206,19 @@ describe("run controller", () => {
     controller.dispose();
   });
 
+  test("staleQueued：shouldSkip 的会话（待答表单/未决审批）不标记、不通知（issue #1）", async () => {
+    const { controller } = setup();
+    await controller.beginRun({ sessionID: "ses_wait", chatId: "oc_1", delivery: "queue" });
+    const base = Date.now();
+    // 等待期：豁免 → 不上报
+    expect(
+      controller.staleQueued(60_000, base + 120_000, (id) => id === "ses_wait"),
+    ).toEqual([]);
+    // 用户处理后（不再豁免）→ 正常上报（未被 notifiedQueued 提前吃掉）
+    expect(controller.staleQueued(60_000, base + 180_000)).toEqual(["ses_wait"]);
+    controller.dispose();
+  });
+
   test("finalizeQueued：排队卡收尾为失败/中断态", async () => {
     const { sender, controller } = setup();
     await controller.beginRun({ sessionID: "ses_1", chatId: "oc_1", delivery: "queue" });

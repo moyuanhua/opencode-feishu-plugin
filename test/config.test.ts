@@ -138,10 +138,12 @@ describe("resolveConfig", () => {
     expect(cfg.allowUsers).toEqual(["ou_1", "ou_2"]);
   });
 
-  test("staleExecutionMs：默认 5 分钟，夹取 1–60 分钟", () => {
+  test("staleExecutionMs：默认 5 分钟，夹取 0–60 分钟（0 = 关闭看门狗）", () => {
     expect(resolve({ appId: "a", appSecret: "s" }, {}).staleExecutionMs).toBe(5 * 60_000);
     expect(resolve({ appId: "a", appSecret: "s", staleExecutionMs: 10 * 60_000 }, {}).staleExecutionMs).toBe(10 * 60_000);
-    expect(resolve({ appId: "a", appSecret: "s", staleExecutionMs: 1000 }, {}).staleExecutionMs).toBe(60_000);
+    expect(resolve({ appId: "a", appSecret: "s", staleExecutionMs: 0 }, {}).staleExecutionMs).toBe(0);
+    expect(resolve({ appId: "a", appSecret: "s", staleExecutionMs: -5 }, {}).staleExecutionMs).toBe(0);
+    expect(resolve({ appId: "a", appSecret: "s", staleExecutionMs: 1_000 }, {}).staleExecutionMs).toBe(1_000);
     expect(resolve({ appId: "a", appSecret: "s", staleExecutionMs: 99_999_999 }, {}).staleExecutionMs).toBe(60 * 60_000);
   });
 

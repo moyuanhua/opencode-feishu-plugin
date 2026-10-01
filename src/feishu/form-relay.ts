@@ -253,6 +253,14 @@ export class FormRelay {
     void this.finish(pending, "cancelled");
   }
 
+  /** 是否有尚未提交/取消的待答表单（看门狗判活：等表单属合法等待，不应判 stale）。 */
+  hasPendingFor(sessionID: string): boolean {
+    for (const [, pending] of this.forms.entries()) {
+      if (pending.sessionID === sessionID && !pending.settled) return true;
+    }
+    return false;
+  }
+
   dispose(): void {
     this.disposed = true;
     this.forms.clear();

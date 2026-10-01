@@ -42,6 +42,16 @@ opencode 会**回收空闲的 location**，这会连带卸载插件、关闭飞�
 > 唯一无法覆盖的是「opencode 进程整个挂掉且长时间无人使用」——此时任何插件都无从执行；
 > 重新使用 opencode 时会由看门狗自动恢复。`keepalive: false` 可关闭全部保活。
 
+## 看门狗判活规则
+
+看门狗（默认每 60s 扫一次）会在两类情况下自动中断会话：「长时间无进展」（`staleExecutionMs` 内无任何事件）与「排队超时」（排队超过阈值仍无 `execution.started`）。为减少误杀，判活规则如下（issue #1 修复）：
+
+1. **子会话活动计入父链**：`task` 子代理跑在**子会话**里，其事件只带子会话 ID；插件通过 `session.created` 的 `parentID` 维护 child→parent 链路，任意事件沿父链逐级刷新活动时间——父会话在子代理运行期间不会被误判卡死；
+2. **合法等待不判 stale**：有**待答表单**（`question`）或**未决审批**的会话，等用户多久都不自动中断、也不取消其排队消息（等用户操作 ≠ 卡死）；
+3. **可关闭**：`staleExecutionMs: 0` 完全关闭看门狗（回到"永不自动中断"）。
+
+> 仍会命中的情形：长时间**无任何事件**且无待答交互的真空转（典型为真正的挂起）。此时看门狗按设计中断并发送「已自动中断卡死会话」提示卡。
+
 ## 卡片内容守卫（表格超限降级）
 
 飞书**单卡最多 5 个表格组件**，超限时 patch 直接返回 400（`code=230099`）——回复里出现大量 markdown 对照表时，卡片会永远停在旧内容、看起来像卡死。插件对**整张卡片**做守卫：
@@ -150,7 +160,7 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `gatewayLocation` | string | — | 只在该 location（或其**子目录**兜底）启动网关；`~` 自动展开、相对路径/尾斜杠会归一化。留空 = 任意 location 生效 |
 | `gatewayMatchGraceMs` | number | `3000` | **精确匹配优先**的宽限窗口：子目录候选先等这么久，出现 `here === gatewayLocation` 就让位（0 = 不等待，子目录立即兜底） |
 | `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
-| `staleExecutionMs` | number | `300000` | 看门狗阈值（夹取 1–60 分钟） |
+| `staleExecutionMs` | number | `300000` | 看门狗阈值（夹取 0–60 分钟；**0 = 关闭**；见「看门狗判活规则」） |
 | `maxResourcesShown` | number | `8` | 审批卡最多展示的资源行数 |
 | `sessionAllowButton` | boolean | `true` | 审批卡是否显示「本会话内允许该工具」按钮 |
 | `resumeSummary` | boolean | `true` | 恢复卡是否展示会话摘要 |

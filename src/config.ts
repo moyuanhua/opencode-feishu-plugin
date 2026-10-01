@@ -73,7 +73,7 @@ export interface ResolvedConfig {
   readonly approvalTtlMs: number;
   /**
    * 看门狗阈值：执行态超过该时长无任何事件即视为卡死，主动中断并收尾。
-   * 默认 5 分钟；夹取 1–60 分钟。排队超过该时长仍无 `execution.started` 也会提示。
+   * 默认 5 分钟；夹取 0–60 分钟，**0 = 关闭看门狗**。排队超过该时长仍无 `execution.started` 也会提示。
    */
   readonly staleExecutionMs: number;
   /** HMAC 密钥；未显式配置时从 appSecret 派生（不落盘、不打印）。 */
@@ -236,7 +236,7 @@ export function resolveConfig(
   const topicGuidance = asBoolean(merged.topicGuidance, true);
   const throttle = clamp(asNumber(merged.streamThrottleMs, 400), 400, 60_000);
   const approvalTtlMs = clamp(asNumber(merged.approvalTtlMs, 10 * 60 * 1000), 30_000, 24 * 60 * 60 * 1000);
-  const staleExecutionMs = clamp(asNumber(merged.staleExecutionMs, 5 * 60 * 1000), 60_000, 60 * 60 * 1000);
+  const staleExecutionMs = clamp(asNumber(merged.staleExecutionMs, 5 * 60 * 1000), 0, 60 * 60 * 1000);
   const maxResourcesShown = clamp(asNumber(merged.maxResourcesShown, 8), 1, 50);
   const allowedRootsRaw = asStringArray(merged.allowedRoots);
   const allowedRootsCandidates = (allowedRootsRaw.length > 0 ? allowedRootsRaw : [...DEFAULT_ALLOWED_ROOTS]).filter(isAbsolute);

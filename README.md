@@ -173,7 +173,7 @@ agent 反问时表单会变成飞书卡片，**点按钮或在话题里直接发
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | 日志级别 |
 | `logFile` | string \| boolean | — | `true` = 写 `<configDir>/plugins/feishu.log`，服务模式建议开启 |
 | `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
-| `staleExecutionMs` | number | `300000` | 看门狗阈值（1–60 分钟） |
+| `staleExecutionMs` | number | `300000` | 看门狗阈值（0–60 分钟；**0 = 关闭看门狗**；待答表单 / 未决审批期间不判卡死） |
 | `gatewayLocation` | string | — | 只在该 location（及其子目录）启动网关；留空 = 任意 location 生效 |
 
 完整配置（含 `cardMaxTables`、`topicStatus*`、`resumeSummary*`、`keepalive*`、`gatewayMatchGraceMs` 等进阶项）见 [docs/advanced.md](./docs/advanced.md#完整配置项)。
@@ -188,7 +188,7 @@ agent 反问时表单会变成飞书卡片，**点按钮或在话题里直接发
 | 插件完全没被加载 | npm 方式确认包名在 `plugins` 数组；目录方式确认 `plugins/<名>/index.js` 存在 |
 | 审批卡收不到 | 该会话不是从飞书发起的（无映射），插件按设计不接管 |
 | 点按钮提示凭证无效 | token 过期（默认 10 分钟）或点击者不在白名单 |
-| 会话像卡死、只排队 | 看门狗默认 5 分钟后自动中断；也可点「⏹ 强制停止」或发 `/stop` |
+| 会话像卡死、只排队 | 看门狗默认 5 分钟后自动中断（**待答表单 / 未决审批期间不中断**；`staleExecutionMs: 0` 可关闭）；也可点「⏹ 强制停止」或发 `/stop` |
 | 空闲约 1 小时后失联 | opencode 会回收空闲 location；内置保活默认开启会自动恢复，见 [docs/advanced.md](./docs/advanced.md#位置保活) |
 | 看不到插件日志 | 服务模式下 stderr 被丢弃，设 `logFile: true` |
 | 多个长连接 / 重复回复 | 设置 `gatewayLocation` 为常用工作目录，见 [docs/advanced.md](./docs/advanced.md#多实例与网关选举) |

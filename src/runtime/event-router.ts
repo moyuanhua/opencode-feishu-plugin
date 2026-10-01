@@ -30,6 +30,11 @@ export interface EventRouterDeps {
   /** `session.execution.failed` 的失败通知（原 `notifyFailure`）。 */
   readonly notifyFailure: (sessionID: string, error: unknown) => Promise<void>;
   /**
+   * `session.created`：登记 child→parent 链路（看门狗父链判活）。
+   * 子会话（task 子代理）事件只带子会话 ID，父会话靠这条链路获取活动刷新。
+   */
+  readonly onSessionCreated?: (sessionID: string, parentID: string | undefined) => void;
+  /**
    * 任意事件都下发给话题状态控制器（可选，缺省不影响既有行为）。
    * 话题根卡状态需要 permission / inbox / status 等**非 run 事件**，故在 switch 之前统一派发。
    */
@@ -48,6 +53,30 @@ export async function routeEvent(
   if (typeof touched === "string") deps.touch(touched);
 
   switch (event.type) {
+    case "session.created": {
+      // 事件体兼容两种形状：`{ sessionID | id, parentID | parentId }`（不同版本字段名不一）。
+      const data = event.data as {
+        sessionID?: unknown;
+        id?: unknown;
+        parentID?: unknown;
+        parentId?: unknown;
+      };
+      const childId =
+        typeof data.sessionID === "string" && data.sessionID
+          ? data.sessionID
+          : typeof data.id === "string" && data.id
+            ? data.id
+            : "";
+      if (!childId) break;
+      const parent =
+        typeof data.parentID === "string" && data.parentID
+          ? data.parentID
+          : typeof data.parentId === "string" && data.parentId
+            ? data.parentId
+            : undefined;
+      deps.onSessionCreated?.(childId, parent);
+      break;
+    }
     case "permission.asked":
       // 发卡是网络 IO，不能阻塞事件流（否则会拖慢后续 text.delta）。
       void deps

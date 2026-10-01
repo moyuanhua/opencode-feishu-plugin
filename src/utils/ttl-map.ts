@@ -61,6 +61,19 @@ export class TtlMap<V> {
     this.data.delete(key);
   }
 
+  /** 遍历未过期条目（惰性清理已过期项；用于按会话反查 pending 状态）。 */
+  entries(): Array<[string, V]> {
+    const out: Array<[string, V]> = [];
+    for (const [key, hit] of this.data) {
+      if (hit.expiresAt <= this.now()) {
+        this.delete(key);
+        continue;
+      }
+      out.push([key, hit.value]);
+    }
+    return out;
+  }
+
   clear(): void {
     for (const timer of this.timers.values()) clearTimeout(timer);
     this.timers.clear();

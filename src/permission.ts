@@ -341,6 +341,14 @@ export class ApprovalManager {
     );
   }
 
+  /** 该会话是否有未决审批（看门狗判活：等审批属合法等待，不应判 stale）。 */
+  hasPendingFor(sessionID: string): boolean {
+    for (const [, card] of this.cards.entries()) {
+      if (!card.resolved && card.input.sessionID === sessionID) return true;
+    }
+    return false;
+  }
+
   dispose(): void {
     this.seenRequests.clear();
     this.cards.clear();

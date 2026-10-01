@@ -81,7 +81,7 @@ export interface RunController {
    * 返回「有排队卡但超过 maxIdleMs 仍无 execution.started」的会话。
    * 每个会话在超时窗口内只上报一次（收到 execution.started 后重置）。
    */
-  staleQueued(maxIdleMs: number, now?: number): string[];
+  staleQueued(maxIdleMs: number, now?: number, shouldSkip?: (sessionID: string) => boolean): string[];
   /** 把某会话所有排队卡收尾（看门狗中断时避免排队卡永久悬挂）。 */
   finalizeQueued(sessionID: string, error: string): void;
   dispose(): void;
@@ -315,12 +315,14 @@ export function createRunController(deps: RunControllerDeps): RunController {
       return sessions.get(sessionID)?.active !== undefined;
     },
 
-    staleQueued(maxIdleMs, now = Date.now()): string[] {
+    staleQueued(maxIdleMs, now = Date.now(), shouldSkip?: (sessionID: string) => boolean): string[] {
       const out: string[] = [];
       for (const [sessionID, runs] of sessions) {
         if (runs.active) continue;
         const first = runs.queued[0];
         if (!first || now - first.queuedAt < maxIdleMs) continue;
+        // 合法等待（待答表单 / 未决审批）：不标记、不通知，等用户处理后再判。
+        if (shouldSkip?.(sessionID)) continue;
         if (notifiedQueued.has(sessionID)) continue;
         notifiedQueued.add(sessionID);
         out.push(sessionID);

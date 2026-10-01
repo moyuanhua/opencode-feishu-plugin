@@ -173,7 +173,7 @@ When the agent asks via `question` or other form tools, the form becomes a Feish
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | Log level |
 | `logFile` | string \| boolean | — | `true` = write `<configDir>/plugins/feishu.log`; recommended in server mode |
 | `approvalTtlMs` | number | `600000` | Approval token / card validity |
-| `staleExecutionMs` | number | `300000` | Watchdog threshold (1–60 min) |
+| `staleExecutionMs` | number | `300000` | Watchdog threshold (0–60 min; **0 = disabled**; sessions waiting on a form / pending approval are never killed) |
 | `gatewayLocation` | string | — | Only start the gateway at this location (or its subdirectories); empty = any location |
 
 Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepalive*`, `gatewayMatchGraceMs`) → [docs/advanced.en.md](./docs/advanced.en.md#full-configuration).
@@ -188,7 +188,7 @@ Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepa
 | Plugin not loaded at all | npm: confirm the package name is in the `plugins` array; directory: confirm `plugins/<name>/index.js` exists |
 | No approval cards | That session wasn't started from Feishu (no mapping); by design the plugin doesn't take it over |
 | Button click says invalid credential | Token expired (10 min default) or clicker not in allowlist |
-| Session seems stuck, messages only queue | Watchdog auto-interrupts after 5 min; or tap "⏹ force stop" / send `/stop` |
+| Session seems stuck, messages only queue | Watchdog auto-interrupts after 5 min (never while a form / approval is pending; `staleExecutionMs: 0` disables it); or tap "⏹ force stop" / send `/stop` |
 | Bot goes silent after ~1h idle | opencode recycles idle locations; built-in keepalive restores automatically, see [docs/advanced.en.md](./docs/advanced.en.md#location-keep-alive) |
 | Can't see plugin logs | stderr is discarded in server mode; set `logFile: true` |
 | Multiple long connections / duplicate replies | Set `gatewayLocation` to a common working directory, see [docs/advanced.en.md](./docs/advanced.en.md#multiple-instances-and-gateway-election) |

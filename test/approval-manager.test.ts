@@ -367,6 +367,18 @@ describe("ApprovalManager 会话内允许（任务 A）", () => {
   });
 });
 
+describe("ApprovalManager.hasPendingFor（看门狗判活：等审批属合法等待）", () => {
+  test("未决为 true；replied 后为 false；无关会话 false", async () => {
+    const { manager } = setup();
+    expect(manager.hasPendingFor("ses_1")).toBe(false);
+    await manager.onAsked(REQUEST);
+    expect(manager.hasPendingFor("ses_1")).toBe(true);
+    expect(manager.hasPendingFor("ses_other")).toBe(false);
+    manager.onReplied({ sessionID: "ses_1", requestID: "per_1", reply: "once" });
+    expect(manager.hasPendingFor("ses_1")).toBe(false);
+  });
+});
+
 describe("ApprovalManager.onReplied", () => {
   test("未由点击更新的卡片在 replied 时收敛", async () => {
     const { manager, sender } = setup();

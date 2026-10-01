@@ -33,6 +33,24 @@ describe("routeEvent", () => {
     expect(deps.applyRun).toHaveBeenCalledWith("s1", { type: "text.delta", delta: "hi" });
   });
 
+  test("session.created：登记 child→parent（兼容 id/parentID 与 sessionID/parentId 两种形状）", async () => {
+    const deps = makeDeps({ onSessionCreated: vi.fn() });
+    await routeEvent({ type: "session.created", data: { id: "child", parentID: "parent" } }, deps);
+    expect(deps.onSessionCreated).toHaveBeenCalledWith("child", "parent");
+
+    const alt = makeDeps({ onSessionCreated: vi.fn() });
+    await routeEvent({ type: "session.created", data: { sessionID: "child2", parentId: "parent2" } }, alt);
+    expect(alt.onSessionCreated).toHaveBeenCalledWith("child2", "parent2");
+
+    const top = makeDeps({ onSessionCreated: vi.fn() });
+    await routeEvent({ type: "session.created", data: { id: "root" } }, top);
+    expect(top.onSessionCreated).toHaveBeenCalledWith("root", undefined);
+
+    const bad = makeDeps({ onSessionCreated: vi.fn() });
+    await routeEvent({ type: "session.created", data: { foo: 1 } }, bad);
+    expect(bad.onSessionCreated).not.toHaveBeenCalled();
+  });
+
   test("session.execution.failed：markEnded + 失败 run 事件 + 失败通知", async () => {
     const deps = makeDeps();
     await routeEvent(

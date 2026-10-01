@@ -93,6 +93,26 @@ describe("FormRelay.onCreated", () => {
   });
 });
 
+describe("FormRelay.hasPendingFor（看门狗判活：等表单属合法等待）", () => {
+  test("待答为 true；提交后为 false；无关会话 false", async () => {
+    const { relay } = setup();
+    expect(relay.hasPendingFor("ses_1")).toBe(false);
+    await relay.onCreated({ form: FORM });
+    expect(relay.hasPendingFor("ses_1")).toBe(true);
+    expect(relay.hasPendingFor("ses_other")).toBe(false);
+    // 作答提交（settled）→ false
+    const action: CardAction = {
+      rawValue: { f: "frm_1", k: "q0", v: "a" },
+      messageId: "om_card",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    };
+    relay.handleCardAction(action);
+    await tick();
+    expect(relay.hasPendingFor("ses_1")).toBe(false);
+  });
+});
+
 describe("FormRelay.handleCardAction / consumeText", () => {
   test("点击唯一字段选项 → 提交并携带目录", async () => {
     const { relay, sender, replies } = setup();

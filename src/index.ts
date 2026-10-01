@@ -33,7 +33,7 @@ import { createFeishuSender } from "./feishu/sender.js";
 import { downloadAttachment, downloadedAttachmentPrompt, resolveAttachmentDir } from "./feishu/attachments.js";
 import { SessionMap } from "./feishu/session-map.js";
 import { MessageDedup } from "./feishu/dedup.js";
-import { decideDelivery, ExecutionTracker, type Delivery } from "./feishu/delivery.js";
+import { decideDelivery, ExecutionTracker, SessionParentLinks, type Delivery } from "./feishu/delivery.js";
 import { createRunController } from "./feishu/run-controller.js";
 import { createSessionRecovery, type CancelQueuedResult } from "./feishu/session-recovery.js";
 import { StopController } from "./feishu/run-stop.js";
@@ -230,6 +230,8 @@ async function start(
   const dedup = new MessageDedup(storage, log);
   // per-session 执行态，用于原生排队决策。
   const executions = new ExecutionTracker();
+  // 子会话（task 子代理）→ 父会话链路：子会话事件沿父链刷新看门狗活动时间（issue #1）。
+  const sessionLinks = new SessionParentLinks();
 
   const runs = createRunController({
     sender,
@@ -1075,9 +1077,13 @@ async function start(
 
   const eventDeps: EventRouterDeps = {
     log,
-    touch: (sessionID) => executions.touch(sessionID),
+    touch: (sessionID) => sessionLinks.walk(sessionID, (id) => executions.touch(id)),
     markStarted: (sessionID) => executions.markStarted(sessionID),
     markEnded: (sessionID) => executions.markEnded(sessionID),
+    onSessionCreated: (sessionID, parentID) => {
+      sessionLinks.remember(sessionID, parentID);
+      log.debug("session.created 父子登记", { sessionID, parentID: parentID ?? null });
+    },
     applyRun: (sessionID, event) => runs.apply(sessionID, event),
     onPermissionAsked: (data) => approvals.onAsked(data),
     onPermissionReplied: (data) => approvals.onReplied(data),
@@ -1107,15 +1113,29 @@ async function start(
    * 看门狗（任务 B）：真正「救会话」，不再只是放开插件侧排队判定。
    * - 陈旧执行（长时间无事件）→ 走共享恢复例程主动中断 + 取消排队 + 卡片收尾；
    * - 排队超时（排队超过阈值仍无 execution.started）→ 同样中断 + 提示卡。
-   * 阈值可配置（`staleExecutionMs`，默认 5 分钟，夹取 1–60 分钟）。
+   * 阈值可配置（`staleExecutionMs`，默认 5 分钟，夹取 0–60 分钟；**0 = 关闭看门狗**）。
+   *
+   * 判活规则（issue #1）：
+   * - 子会话（task 子代理）事件沿父链刷新父会话活动（`sessionLinks`）；
+   * - **合法等待**（待答表单 / 未决审批）的会话不判 stale——等用户操作不算卡死。
    */
-  const stopWatchdog = startWatchdog({
-    log,
-    staleExecutionMs: config.staleExecutionMs,
-    staleExecutions: () => executions.stale(config.staleExecutionMs),
-    staleQueued: () => runs.staleQueued(config.staleExecutionMs),
-    recover: (sessionID, reason) => recovery.recover(sessionID, reason),
-  });
+  const hasPendingInteraction = (sessionID: string): boolean =>
+    approvals.hasPendingFor(sessionID) || formRelay.hasPendingFor(sessionID);
+
+  const stopWatchdog =
+    config.staleExecutionMs > 0
+      ? startWatchdog({
+          log,
+          staleExecutionMs: config.staleExecutionMs,
+          staleExecutions: () =>
+            executions.stale(config.staleExecutionMs, Date.now(), hasPendingInteraction),
+          staleQueued: () =>
+            runs.staleQueued(config.staleExecutionMs, Date.now(), hasPendingInteraction),
+          recover: (sessionID, reason) => recovery.recover(sessionID, reason),
+        })
+      : () => {
+          log.info("看门狗已关闭（staleExecutionMs=0）");
+        };
 
   /** 卡死 / 排队超时提示卡：带「强制停止」按钮，自动恢复失败时可手动重试。 */
   async function notifyStuck(sessionID: string, reason: string, ok: boolean): Promise<void> {

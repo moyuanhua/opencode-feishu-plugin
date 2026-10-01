@@ -42,6 +42,16 @@ The plugin ships two built-in defenses (both on by default, **no external script
 > The only uncovered case is "the whole opencode process is down and nobody uses it for a long time" — no plugin can act then;
 > the watchdog restores automatically when opencode is used again. `keepalive: false` disables all keep-alive.
 
+## Watchdog staleness rules
+
+The watchdog (a 60s sweep) force-interrupts a session in two cases: "no progress" (no event for `staleExecutionMs`) and "queue timeout" (queued longer than the threshold without `execution.started`). To avoid false kills (issue #1 fix):
+
+1. **Child-session activity credits the parent chain**: a `task` subagent runs in a **child** session; its events carry only the child ID. The plugin tracks the child→parent chain via `session.created`'s `parentID` and refreshes activity up the chain — the parent is not misjudged while a subagent runs.
+2. **Legitimate waits are never stale**: sessions with a **pending form** (`question`) or an **unresolved approval** are not interrupted no matter how long the user takes, and their queued messages are not cancelled (waiting on the user ≠ stuck).
+3. **Off switch**: `staleExecutionMs: 0` disables the watchdog entirely ("never auto-interrupt").
+
+> What still triggers it: a genuine hang — no events at all and no pending interaction. In that case the watchdog interrupts and sends the "已自动中断卡死会话" notice card by design.
+
 ## Card content guard (table over-limit degradation)
 
 Feishu allows **at most 5 table components per card**; exceeding it makes patch return 400 (`code=230099`) — with lots of markdown comparison tables the card stays stuck on old content and looks dead. The plugin guards the **whole card**:
@@ -148,7 +158,7 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `gatewayLocation` | string | — | Only start the gateway at this location (or **subdirectories** as fallback); `~` expands, relative / trailing slash normalized. Empty = any location works |
 | `gatewayMatchGraceMs` | number | `3000` | **Exact-match-first** grace window: subdirectory candidates wait this long for a `here === gatewayLocation` instance (0 = no wait, immediate fallback) |
 | `approvalTtlMs` | number | `600000` | Approval token / card validity |
-| `staleExecutionMs` | number | `300000` | Watchdog threshold (clamped 1–60 min) |
+| `staleExecutionMs` | number | `300000` | Watchdog threshold (clamped 0–60 min; **0 = disabled**; see "Watchdog staleness rules") |
 | `maxResourcesShown` | number | `8` | Max resource rows shown on approval cards |
 | `sessionAllowButton` | boolean | `true` | Show the "allow this tool in this session" button |
 | `resumeSummary` | boolean | `true` | Show session summary on resume card |
