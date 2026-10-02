@@ -322,11 +322,20 @@ async function patchResumeSummary(
       ...(dir ? { directory: dir } : {}),
       timeoutMs: ctx.deps.resumeSummaryTimeoutMs ?? 15_000,
     });
+    // 压缩流程优先：根卡已进入「压缩中」或「已压缩」态时，迟到的快摘要 patch 直接让位，
+    // 避免把压缩进度/结果冲掉（真实竞态：开卡后立刻点「🗜 压缩并总结」，摘要生成晚到）。
+    const base = await ctx.deps.sessionMap.getRootCard(sessionID);
+    if (base?.compactPending || base?.summaryLabel === "已压缩 · 会话摘要") {
+      if (base.summaryPending) {
+        await ctx.deps.sessionMap.setRootCard(sessionID, { ...base, summaryPending: false });
+      }
+      ctx.deps.log.info("恢复卡摘要让位压缩流程（跳过 patch）", { sessionID, source: outcome.source });
+      return;
+    }
     const summary = outcome.summary ?? "（摘要生成失败，可直接发消息继续）";
     const summaryLabel = SUMMARY_LABEL[outcome.source] ?? "摘要";
     if (persistBase) {
       // 把摘要写回根卡基础内容：后续工作状态刷新重渲染时摘要不丢。
-      const base = await ctx.deps.sessionMap.getRootCard(sessionID);
       if (base) {
         await ctx.deps.sessionMap.setRootCard(sessionID, { ...base, summaryPending: false, summary, summaryLabel });
       }

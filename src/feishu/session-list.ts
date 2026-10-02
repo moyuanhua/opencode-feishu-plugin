@@ -24,6 +24,13 @@ export interface SessionListEntry {
 }
 
 /**
+ * 「内部临时会话」标题前缀：插件的一次性生成（意图识别 / 快摘要）会建瞬时临时会话，
+ * 用完立即删除（见 `session/quick-generate.ts` 的 `TEMP_SESSION_TITLE`）。
+ * 列表归一化时过滤，避免用户恰好撞见并误入已删除的会话。
+ */
+const INTERNAL_SESSION_TITLE_PREFIX = "⚙️ 内部生成（临时";
+
+/**
  * 归一化 `ctx.session.list()` 的返回值。
  * 返回 `undefined` = 无法识别的形状（调用方回退）；空数组是合法结果。
  */
@@ -35,6 +42,7 @@ export function normalizeSessionList(raw: unknown): SessionListEntry[] | undefin
   for (const item of array) {
     const entry = normalizeSessionInfo(item);
     if (!entry || seen.has(entry.sessionID)) continue;
+    if (entry.title.startsWith(INTERNAL_SESSION_TITLE_PREFIX)) continue;
     seen.add(entry.sessionID);
     out.push(entry);
   }

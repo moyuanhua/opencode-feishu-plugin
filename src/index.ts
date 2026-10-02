@@ -440,6 +440,23 @@ async function start(
   }
 
   /**
+   * 生成通道（快摘要 / AI 会话管理）的显式模型解析：
+   * 会话真实模型（`ctx.session.get` 读回）优先；读不到时兜底模型列表首个。
+   *
+   * 背景：`/api/experimental/generate` 未指定模型时依赖服务器基础配置的默认模型，
+   * 实际环境常见 400 `No model specified and no supported model is available`。
+   */
+  async function resolveGenerateModel(
+    sessionID: string,
+    directory?: string,
+  ): Promise<{ providerID: string; id: string } | undefined> {
+    const sessionModel = await readSessionModelQuiet(sessionID, directory);
+    if (sessionModel) return { providerID: sessionModel.providerID, id: sessionModel.id };
+    const first = (await listModels())[0];
+    return first ? { providerID: first.providerID, id: first.id } : undefined;
+  }
+
+  /**
    * `/model` 切换 + **读回校验**。
    *
    * 取证结论：`switchModel` 只影响**后续** provider turn，历史消息仍保留旧模型；
@@ -594,21 +611,31 @@ async function start(
     const generateText = async (prompt: string, directory: string | undefined): Promise<unknown> => {
       const api = (ctx.generate as unknown as {
         text?: (
-          arg: { prompt: string },
+          arg: { prompt: string; model?: { providerID: string; id: string } },
           options?: { headers?: Record<string, string> },
         ) => Promise<unknown>;
       }).text;
+      // 显式模型（会话模型优先）——服务端不支持"无模型"生成。
+      const model = await resolveGenerateModel(input.sessionID, directory);
       const outcome = await quickGenerateWithSession(
         {
           log,
           ...(typeof api === "function"
             ? {
-                generateText: (p: string, requestOptions: { headers: Record<string, string> }) =>
-                  api({ prompt: p }, requestOptions),
+                generateText: (
+                  p: string,
+                  requestOptions: { headers: Record<string, string> },
+                  modelRef?: { providerID: string; id: string },
+                ) => api({ prompt: p, ...(modelRef ? { model: modelRef } : {}) }, requestOptions),
               }
             : {}),
         },
-        { prompt, sessionID: input.sessionID, ...(directory ? { directory } : {}) },
+        {
+          prompt,
+          sessionID: input.sessionID,
+          ...(directory ? { directory } : {}),
+          ...(model ? { model } : {}),
+        },
       );
       return outcome.result;
     };
@@ -1018,22 +1045,28 @@ async function start(
         return;
       }
 
-      // 3) 识别（无会话上下文的一次性生成）。
+      // 3) 识别（无会话上下文的一次性生成；显式模型，服务端不支持"无模型"生成）。
+      const genModel = await resolveGenerateModel(routingSessionID, entries[0]?.directory);
       const generateText = async (
         prompt: string,
         requestOptions: { headers: Record<string, string> },
+        model?: { providerID: string; id: string },
       ): Promise<unknown> => {
         const api = (ctx.generate as unknown as {
-          text?: (arg: { prompt: string }, options?: { headers?: Record<string, string> }) => Promise<unknown>;
+          text?: (
+            arg: { prompt: string; model?: { providerID: string; id: string } },
+            options?: { headers?: Record<string, string> },
+          ) => Promise<unknown>;
         }).text;
         if (typeof api !== "function") throw new Error("generate.text unavailable");
-        return api({ prompt }, requestOptions);
+        return api({ prompt, ...(model ? { model } : {}) }, requestOptions);
       };
       const outcome = await quickGenerateWithSession(
         { log, generateText },
         {
           prompt: buildQuickNewPrompt({ text: message.text, candidates, models }),
           sessionID: routingSessionID,
+          ...(genModel ? { model: genModel } : {}),
         },
       );
       const decision = parseQuickNewDecision(extractGeneratedText(outcome.result));

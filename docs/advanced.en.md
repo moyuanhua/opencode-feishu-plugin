@@ -127,7 +127,7 @@ AI routing for plain text in the main chat (`quickNew`, on by default):
 - Each row shows title / short id / relative time / topic-bound or not / directory; the current session is marked "← current"; bound topics show "▶️ reopen", others "▶️ enter"; pagination at the bottom plus "➕ create session".
 - **"▶️ enter topic"**: sends a resume card (with session summary) in the main chat; **reply to the card** to continue that historical session.
 - `/resume [index]` skips the list; same "resume card → reply to continue" flow.
-- Summary: "reuse native compaction summary → fast-summary only if missing", plus a "🗜 compress & summarize" button (explicit; never implicitly mutates history). Fast summary requests **must carry the `x-opencode-session` header** (opencode-go rejects without it); implemented as **`ctx.generate.text(input, { headers })` first, falling back to local HTTP `POST /api/experimental/generate`** — never feeds the whole session to a model.
+- Summary: "reuse native compaction summary → fast-summary only if missing", plus a "🗜 compress & summarize" button (explicit; never implicitly mutates history). Fast-summary / intent-recognition requests **must carry the `x-opencode-session` header** (opencode-go rejects without it), and only the **session pipeline** attaches it automatically — the stateless `generate` endpoint cannot. Implemented as three channels: **① temporary session (create → `session.generate` → delete; preferred, provider-agnostic) → ② `ctx.generate.text(input, { headers })` → ③ local HTTP `POST /api/experimental/generate`**; all carry an explicit model — never feeds the whole session to a model.
 
 ## Topic root card status
 

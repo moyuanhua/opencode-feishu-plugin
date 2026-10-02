@@ -1080,6 +1080,36 @@ describe("SessionCommands 恢复卡标题 + 摘要（任务 B）", () => {
     expect(sender.repliedCards).toHaveLength(1);
   });
 
+  test("压缩流程优先：根卡进入压缩中态时，迟到的摘要不覆盖卡片（也不清掉压缩态）", async () => {
+    // 摘要生成「慢」：挂起期间模拟用户已点「🗜 压缩并总结」，压缩控制器把根卡置为压缩中。
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const summarize = vi.fn(async (): Promise<SessionSummaryOutcome> => {
+      await gate;
+      return { summary: "迟到的摘要", source: "generated" };
+    });
+    const { commands, sender, sessionMap } = setup({ getSession: async () => raw, summarizeSession: summarize });
+    sender.replyThreadId = "omt_resume";
+
+    await commands.handleCardAction(action);
+    // enterSessionThread 是 fire-and-forget：先等根卡/链接落库（摘要仍被 gate 挂起）。
+    await flush();
+    const base = await sessionMap.getRootCard("ses_old");
+    expect(base).toBeDefined();
+    await sessionMap.setRootCard("ses_old", { ...base!, compactPending: true });
+    release();
+    await flush();
+
+    // 摘要 patch 让位：不产生任何 patch；根卡保留压缩态、summaryPending 被清掉。
+    expect(sender.patched).toHaveLength(0);
+    const after = await sessionMap.getRootCard("ses_old");
+    expect(after?.compactPending).toBe(true);
+    expect(after?.summary).toBeUndefined();
+    expect(after?.summaryPending).not.toBe(true);
+  });
+
   test("摘要失败 → patch 成「生成失败」文案（不抛）", async () => {
     const { commands, sender } = setup({
       getSession: async () => raw,

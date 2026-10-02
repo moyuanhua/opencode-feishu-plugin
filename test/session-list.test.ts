@@ -52,6 +52,14 @@ describe("normalizeSessionList（兼容 ctx.session.list 形状）", () => {
     expect(normalizeSessionList({ data: [] })).toEqual([]);
   });
 
+  test("过滤插件内部临时会话（⚙️ 内部生成（临时…））", () => {
+    const out = normalizeSessionList([
+      { id: "ses_temp", title: "⚙️ 内部生成（临时，可忽略）", time: { updated: NOW } },
+      { id: "ses_real", title: "正常会话", time: { updated: NOW - 1 } },
+    ]);
+    expect(out?.map((e) => e.sessionID)).toEqual(["ses_real"]);
+  });
+
   test("去重：同一 id 只保留第一次", () => {
     const out = normalizeSessionList([
       { id: "ses_1", title: "a" },

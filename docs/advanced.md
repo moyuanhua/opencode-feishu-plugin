@@ -125,7 +125,7 @@ opencode 的 `delivery:"queue"` 消息会在**当前执行的下一个步骤**�
 - 每条显示标题 / 短 id / 相对时间 / 是否已绑话题 / 目录，当前会话标「← 当前」；已绑话题的按钮显示「▶️ 再开」，其余为「▶️ 进入」；底部可翻页 + 「➕ 新建会话」。
 - **「▶️ 进入话题」**：在主聊天流发一张恢复卡（含会话摘要），**直接回复这张卡**即续聊该历史会话。
 - `/resume [序号]` 跳过列表直达，同一套「发恢复卡 → 回复即续聊」流程。
-- 摘要走「复用原生 compaction 摘要 → 缺失才快摘要」，另带「🗜 压缩并总结」按钮（显式触发，不隐式修改会话历史）；快摘要请求**必须携带 `x-opencode-session` 头**（否则 opencode-go 端拒绝），实现为**优先 `ctx.generate.text(input, { headers })`、失败回退本机 HTTP `POST /api/experimental/generate`**，绝不整会话喂模型。
+- 摘要走「复用原生 compaction 摘要 → 缺失才快摘要」，另带「🗜 压缩并总结」按钮（显式触发，不隐式修改会话历史）；快摘要 / 意图识别请求**必须携带 `x-opencode-session` 头**（否则 opencode-go 端拒绝），且只有**会话管线**会自动附加该头，无会话的 `generate` 端点拿不到。实现为三级通道：**① 临时会话（建 → `session.generate` → 删，首选、兼容任何 provider）→ ② `ctx.generate.text(input, { headers })` → ③ 本机 HTTP `POST /api/experimental/generate`**；三通道都显式带模型，绝不整会话喂模型。
 
 ## 话题根卡工作状态
 
