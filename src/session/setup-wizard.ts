@@ -11,6 +11,7 @@ import type {
   IncomingMessage,
   ModelRef,
   PermissionPreset,
+  WizardState,
 } from "../types.js";
 import type { CommandScope } from "../feishu/routing.js";
 import {
@@ -55,6 +56,7 @@ import {
 } from "./model-perm.js";
 import type {
   SessionPrimitives,
+  SetupFormPrefill,
   SetupWizardApi,
   WizardStateLike,
 } from "./context.js";
@@ -114,6 +116,29 @@ export async function openSetupForm(
   const card = await renderFormCard(ctx, state);
   const res = await ctx.deps.sender.sendCard(message.chatId, card);
   if (!res.ok) ctx.deps.log.warn("表单卡发送失败", { chatId: message.chatId, error: res.error ?? "unknown" });
+}
+
+/**
+ * AI 预填：把解析出的 title/dir/model/perm 写入向导状态，返回**未发送**的表单卡。
+ * 调用方通常把「识别中」占位卡就地 patch 成该表单（表单消息 id 即话题锚点）。
+ */
+export async function buildPrefilledSetupForm(
+  ctx: SessionPrimitives,
+  chatId: string,
+  anchorMessageId: string,
+  prefill: SetupFormPrefill,
+): Promise<object> {
+  let state: WizardState | undefined = await ctx.deps.wizard.get(chatId);
+  if (!state) state = await ctx.deps.wizard.start(chatId, prefill.title, anchorMessageId);
+  const next: WizardState = {
+    ...state,
+    ...(prefill.title !== undefined ? { title: prefill.title } : {}),
+    ...(prefill.dir !== undefined ? { dir: prefill.dir } : {}),
+    ...(prefill.model !== undefined ? { model: prefill.model } : {}),
+    ...(prefill.perm !== undefined ? { perm: prefill.perm } : {}),
+  };
+  await ctx.deps.wizard.set(chatId, next);
+  return renderFormCard(ctx, next);
 }
 
 /**
@@ -635,5 +660,7 @@ export function createSetupWizardApi(ctx: SessionPrimitives): SetupWizardApi {
     applySetupFormSubmit: (action) => applySetupFormSubmit(ctx, action),
     sendSetupFormForChat: (chatId, anchorMessageId, openId) =>
       sendSetupFormForChat(ctx, chatId, anchorMessageId, openId),
+    buildPrefilledSetupForm: (chatId, anchorMessageId, prefill) =>
+      buildPrefilledSetupForm(ctx, chatId, anchorMessageId, prefill),
   };
 }

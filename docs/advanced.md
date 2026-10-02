@@ -101,17 +101,23 @@ opencode 的 `delivery:"queue"` 消息会在**当前执行的下一个步骤**�
 
 **chatId 来源**：菜单事件**不带 chat_id**。插件会记住每个用户最近一次单聊的 chatId（`feishu:v2:menu-chat:<openId>`，随本机 storage 持久化），因此**首次使用菜单前需先给机器人发过至少一条消息**（正常使用流程必然满足）；无记录时记 `warn` 并忽略本次点击。
 
-## 一句话建会话（issue #2）
+## AI 会话管理（issue #2 演进）
 
 主聊天流普通文本的 AI 路由（`quickNew`，默认开启）：
 
-- **候选目录**：最近使用目录（`RecentStore`）+ 本机全部会话目录（带会话标题作语义线索），去重后取前 40 条；
-- **识别**：`generate.text`（无会话上下文、秒级）输出严格 JSON `{intent, dir, title, reason}`；`dir` 必须**命中候选清单**（防幻觉路径），再经 `validateDir`（allowedRoots）校验；
-- **交互**：先回「识别中」占位卡，随后 patch 为**建议卡**（✅ 创建并发送 / ❌ 取消）；待办条目持久化在 `feishu:v2:quicknew:<id>`（TTL 1 小时，过期点击提示重发）；
-- **创建**：一键 = 建会话（权限预设「可编辑」）+ 对用户原消息 `reply_in_thread` 开话题 + 原消息作为首条 prompt 发送；
-- **回退**：闲聊 / 解析失败 / 目录不匹配 / 无候选目录 → 管理台提示卡（旧行为）；任何异常都不阻断消息。
+- **意图识别**：`generate.text`（无会话上下文、秒级）输出严格 JSON
+  `{intent:"create|list|chat", dir, title, perm, model, reason}`；
+  - `create` → 建会话；`list` → 列会话；`chat` → 回管理台提示卡；
+- **候选与防幻觉**：目录候选 = 最近使用目录（`RecentStore`）+ 本机全部会话目录（标题作语义线索），
+  去重限 40 条；模型候选 = `ctx.model.list()`；解析结果必须命中候选（目录再过 `validateDir` / allowedRoots）；
+- **就地卡片**：先发「🤔 正在识别」占位卡，分析完成后 **patch 成最终卡片**（不产生第二张消息）：
+  - `list` → 会话列表卡（等同 `/sessions`，翻页/进话题/新建按钮全部可用）；
+  - `create` → **AI 预填表单**（`buildPrefilledSetupForm`：写入向导状态 title/dir/model/perm 后返回表单卡）；
+  - `chat`/失败 → 管理台提示卡；
+- **表单确认**：建会话**必须**经表单提交（`applySetupFormSubmit`）——用户可确认或修改 AI 的预填；
+  提交后锚点 = 表单消息本身，建会话 + 自动开话题；AI 解析不了的字段留空由用户补全。
 
-## /sessions 数据源与恢复卡
+## /sessions 数据源与恢复卡## /sessions 数据源与恢复卡
 
 `/sessions` 列出 opencode **本机全部**会话（按更新时间倒序，分页 8 条可配）：
 

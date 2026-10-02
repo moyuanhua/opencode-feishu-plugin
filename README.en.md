@@ -128,21 +128,22 @@ After configuring the menu (setup step 6), two quick buttons stay pinned **above
 - After changing the menu, **re-publish the app version** (per the console: takes effect within ~5 minutes after publishing);
 - Message the bot at least once before using the menu (the plugin remembers the p2p chat from messages; any normal usage satisfies this).
 
-### One-sentence session creation (AI finds the directory)
+### AI session management (main chat)
 
-When you send plain text in the main chat, the AI first judges the **intent** and picks the best-matching working directory from candidates (recent dirs + local session dirs), then replies with a proposal card:
+Send plain text in the main chat and the AI judges the intent and handles it:
 
-```
-You: fix the zlib download bug
-→ 🆕 Suggested new session
-   Task: fix download bug | Dir: `/Users/code/zlib`
-   [✅ Create & send]  [❌ Cancel]
-```
+- **Create a session**: it parses directory / title / permission tier / model and turns the card in place into an **AI-prefilled create-session form** — confirm (or tweak) and tap "✅ 创建会话", and a topic opens with work started:
 
-"Create & send" = create the session + auto-open a topic + send your original message in to start working (permission defaults to "Editable"; adjust later with `/perm`).
+  ```
+  You: fix the zlib download bug, use high-risk approval
+  → 📝 Create-session form (AI prefilled: dir `/Users/code/zlib`, permission "High-risk approval")
+     [✅ 创建会话]   ← confirm to create + auto-open a topic
+  ```
 
-- Chat/unrecognized/dir-not-in-candidates → falls back to the console hint card, **never creates a wrong session**; the model's path must match a candidate (anti-hallucination);
-- Proposal cards are valid for 1 hour; set `quickNew: false` to go back to the console-only mode.
+- **List sessions**: say "what sessions do I have?" → a session list card appears directly (same as `/sessions`; paginate / enter / create);
+- **Chit-chat / other**: the usual console hint card.
+
+Guardrails: the directory must match a candidate (recent dirs + local session dirs) and pass allowedRoots validation; the model must be one from the available list; anything the AI cannot resolve is **left blank for you to fill in the form** — creation always goes through form confirmation. `quickNew: false` disables the whole thing.
 
 ### Inside a topic (work)
 

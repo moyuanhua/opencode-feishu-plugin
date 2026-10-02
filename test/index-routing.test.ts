@@ -495,12 +495,12 @@ describe("index 话题路由（集成）", () => {
     expect(h.created.length).toBe(before);
   });
 
-  // ── 主聊天流「一句话建会话」（issue #2）────────────────────────────────
+  // ── 主聊天流「AI 会话管理」（issue #2 演进）────────────────────────────
   /** 在全部 patch 中查找包含指定文案的卡片（避免受跨用例迟到 patch 影响）。 */
   const findPatched = (text: string): string =>
     JSON.stringify(h.patched.find((p) => JSON.stringify(p).includes(text)) ?? null);
 
-  test("主聊天流任务文本：AI 识别 → 建议卡 → 一键创建并发送", async () => {
+  test("任务文本：AI 识别 → AI 预填表单（目录/权限）→ 提交建会话", async () => {
     sessionListRaw = [
       {
         id: "ses_old",
@@ -509,76 +509,96 @@ describe("index 话题路由（集成）", () => {
         location: { directory: QN_DIR },
       },
     ];
-    // 先以「闲聊」识别完成 boot 消息（绑定 owner），再切换为任务识别。
     h.generateRaw = { text: '{"intent":"chat"}' };
     cleanup = await setup({ quickNew: true, allowedRoots: [QN_BASE] });
     await deliver(msg("你好", { messageId: "om_qn_boot" }));
-    await vi.waitFor(() => {
-      expect(findPatched("管理台")).toContain("管理台");
-    });
+    await vi.waitFor(() => expect(findPatched("管理台")).toContain("管理台"));
 
     h.generateRaw = {
       text: JSON.stringify({
-        intent: "task",
+        intent: "create",
         dir: QN_DIR,
         title: "修下载 bug",
+        perm: "askHigh",
         reason: "消息提到下载 bug",
       }),
     };
     await deliver(msg("帮我修一下下载的 bug", { messageId: "om_qn_1" }));
-    await vi.waitFor(() => {
-      expect(findPatched("建议新建会话")).toContain("建议新建会话");
-    });
-    const proposal = findPatched("建议新建会话");
-    expect(proposal).toContain(QN_DIR);
-    expect(proposal).toContain("修下载 bug");
-    // 识别 prompt 里带了候选目录（含会话标题线索）。
+    // 识别卡就地变为 AI 预填表单：解析卡片内容断言预填的目录与权限档位。
+    await vi.waitFor(() => expect(findPatched("setup_form")).toContain("setup_form"));
+    const formPatch = [...h.patched].reverse().find((p) => JSON.stringify(p).includes("setup_form")) as {
+      path: { message_id: string };
+      data: { content: string };
+    };
+    const formCard = JSON.parse(formPatch.data.content) as {
+      body: { elements: Array<Record<string, unknown>> };
+    };
+    const formEl = formCard.body.elements.find((e) => e.name === "setup_form") as
+      | { elements?: Array<Record<string, unknown>> }
+      | undefined;
+    const fields = formEl?.elements ?? [];
+    const dirInput = fields.find((e) => e.name === "dir") as { default_value?: string } | undefined;
+    const permSelect = fields.find((e) => e.name === "perm") as { initial_option?: string } | undefined;
+    expect(dirInput?.default_value).toBe(QN_DIR);
+    expect(permSelect?.initial_option).toBe("askHigh");
+    // 识别 prompt 带了候选目录（含会话标题线索）。
     expect(h.generateTextCalls.at(-1)).toContain(`- ${QN_DIR}（zlib 下载任务）`);
 
-    // 点击「创建并发送」。
-    const res = (await click({ cmd: "quicknew", op: "create", id: "qn_om_qn_1" })) as {
-      toast: { type: string };
-    };
-    expect(res.toast.type).toBe("success");
-    await vi.waitFor(() => {
-      expect(promptCalls.at(-1)).toEqual({ sessionID: "ses_0", text: "帮我修一下下载的 bug" });
+    // 用户确认提交表单 → 建会话（目录=预填值）+ 话题锚点 = 表单消息本身。
+    const formMsgId = formPatch.path.message_id;
+    await h.gatewayOptions!.onCardAction({
+      rawValue: {},
+      formValue: { dir: QN_DIR, perm: "askHigh" },
+      messageId: formMsgId,
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
     });
-    // 话题锚点 = 用户原消息；thread 映射建立。
-    expect((storage.raw("feishu:v2:root:om_qn_1") as { sessionID: string }).sessionID).toBe("ses_0");
-    expect((storage.raw("feishu:v2:thread:omt_new") as { sessionID: string }).sessionID).toBe("ses_0");
-    // 会话目录写入映射。
-    expect((storage.raw("feishu:v2:session:ses_0") as { dir?: string }).dir).toBe(QN_DIR);
-    await vi.waitFor(() => {
-      expect(findPatched("✅ 已创建")).toContain("✅ 已创建");
-    });
+    await vi.waitFor(() => expect(createSession).toHaveBeenCalled());
+    const createdInput = createSession.mock.calls.at(-1)?.[0] as { location?: { directory?: string } };
+    expect(createdInput.location?.directory).toBe(QN_DIR);
+    expect((storage.raw(`feishu:v2:root:${formMsgId}`) as { sessionID: string }).sessionID).toBe(
+      `ses_${createSession.mock.calls.length - 1}`,
+    );
+    expect((storage.raw("feishu:v2:thread:omt_new") as { sessionID: string }).sessionID).toBe(
+      `ses_${createSession.mock.calls.length - 1}`,
+    );
   });
 
-  test("主聊天流闲聊文本：识别为 chat → 回退管理台提示卡", async () => {
+  test("「列会话」：AI 识别为 list → 就地切换为会话列表卡", async () => {
     sessionListRaw = [
-      { id: "ses_x", title: "某会话", time: { updated: 1 }, location: { directory: "/home/ubuntu" } },
+      { id: "ses_a", title: "会话A", time: { updated: 2 }, location: { directory: QN_DIR } },
     ];
+    h.generateRaw = { text: '{"intent":"list"}' };
+    cleanup = await setup({ quickNew: true, allowedRoots: [QN_BASE] });
+    await deliver(msg("我有哪些会话？", { messageId: "om_qn_list" }));
+    await vi.waitFor(() => {
+      expect(findPatched("新建会话")).toContain("新建会话");
+    });
+    expect(findPatched("新建会话")).toContain("会话A");
+    // 不是管理台提示卡
+    expect(findPatched("管理台")).toBe("null");
+  });
+
+  test("闲聊文本：识别为 chat → 回退管理台提示卡", async () => {
+    sessionListRaw = [{ id: "ses_x", title: "某会话", time: { updated: 1 }, location: { directory: QN_DIR } }];
     h.generateRaw = { text: '{"intent":"chat"}' };
-    cleanup = await setup({ quickNew: true, allowedRoots: ["/home/ubuntu"] });
+    cleanup = await setup({ quickNew: true, allowedRoots: [QN_BASE] });
     await deliver(msg("你好", { messageId: "om_qn_boot2" }));
     await vi.waitFor(() => {
       expect(findPatched("管理台")).toContain("管理台");
     });
-    // 没有创建任何会话，也没有 prompt。
     expect(promptCalls).toHaveLength(0);
   });
 
-  test("主聊天流任务文本但目录不在候选：回退管理台提示卡（防幻觉）", async () => {
-    sessionListRaw = [
-      { id: "ses_y", title: "某会话", time: { updated: 1 }, location: { directory: "/home/ubuntu/work" } },
-    ];
+  test("目录不在候选（防幻觉）：仍出表单但不预填该路径", async () => {
+    sessionListRaw = [{ id: "ses_y", title: "某会话", time: { updated: 1 }, location: { directory: QN_DIR } }];
     h.generateRaw = {
-      text: JSON.stringify({ intent: "task", dir: "/etc/evil", title: "x", reason: "r" }),
+      text: JSON.stringify({ intent: "create", dir: "/etc/evil", title: "x" }),
     };
-    cleanup = await setup({ quickNew: true, allowedRoots: ["/home/ubuntu"] });
+    cleanup = await setup({ quickNew: true, allowedRoots: [QN_BASE] });
     await deliver(msg("帮我搞点事情", { messageId: "om_qn_boot3" }));
-    await vi.waitFor(() => {
-      expect(findPatched("管理台")).toContain("管理台");
-    });
+    await vi.waitFor(() => expect(findPatched("setup_form")).toContain("setup_form"));
+    expect(findPatched("setup_form")).not.toContain("/etc/evil");
     expect(promptCalls).toHaveLength(0);
   });
 

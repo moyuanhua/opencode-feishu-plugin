@@ -99,17 +99,27 @@ Once menu items are configured in the developer console, a click in the bot chat
 
 **chatId source**: the menu event carries **no chat_id**. The plugin remembers each user's most recent p2p chat id (`feishu:v2:menu-chat:<openId>`, persisted in local storage), so the menu can only work **after the user has messaged the bot at least once** (always true in normal use); if unknown, the click is logged with a `warn` and ignored.
 
-## One-sentence session creation (issue #2)
+## AI session management (issue #2 evolution)
 
 AI routing for plain text in the main chat (`quickNew`, on by default):
 
-- **Candidates**: recent dirs (`RecentStore`) + every local session's directory (session titles act as semantic hints), deduped, capped at 40;
-- **Analysis**: `generate.text` (no session context, sub-second) returns strict JSON `{intent, dir, title, reason}`; `dir` **must match a candidate** (anti-hallucination), then goes through `validateDir` (allowedRoots);
-- **Interaction**: a "recognizing" placeholder card is patched into a **proposal card** (✅ Create & send / ❌ Cancel); the pending entry is persisted at `feishu:v2:quicknew:<id>` (1-hour TTL; expired clicks ask you to resend);
-- **Creation**: one tap = create the session (permission preset "Editable") + `reply_in_thread` a ready card under your original message + send the original text as the first prompt;
-- **Fallback**: chat / parse failure / no matching dir / no candidates → the console hint card (old behavior); no exception ever blocks the message.
+- **Intent recognition**: `generate.text` (no session context, sub-second) returns strict JSON
+  `{intent:"create|list|chat", dir, title, perm, model, reason}`;
+  `create` → new session; `list` → session list; `chat` → console hint card;
+- **Candidates & anti-hallucination**: directory candidates = recent dirs (`RecentStore`) + every local
+  session directory (titles as semantic hints), deduped, capped at 40; model candidates = `ctx.model.list()`;
+  results must match a candidate (dirs also pass `validateDir` / allowedRoots);
+- **In-place cards**: a "🤔 recognizing" placeholder card is sent first, then **patched in place** into the
+  final card (no second message):
+  - `list` → session list card (same as `/sessions`; paginate / enter / create all work);
+  - `create` → **AI-prefilled form** (`buildPrefilledSetupForm`: writes title/dir/model/perm into the wizard
+  state and returns the form card);
+  - `chat`/failure → console hint card;
+- **Form confirmation**: creation **always** goes through form submission (`applySetupFormSubmit`) — the user
+  confirms or edits the AI prefill; the anchor is the form message itself, and a topic opens on submit.
+  Anything the AI cannot resolve is left blank for the user to fill in.
 
-## `/sessions` data source & resume card
+## `/sessions` data source & resume card## `/sessions` data source & resume card
 
 `/sessions` lists **all local opencode sessions** (newest first, 8 per page, configurable):
 

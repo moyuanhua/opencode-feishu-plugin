@@ -36,6 +36,7 @@ import {
   toast,
   type SessionCommandsDeps,
   type SessionContext,
+  type SetupFormPrefill,
 } from "./session/context.js";
 import { createSessionListApi } from "./session/session-list.js";
 import { createSetupWizardApi } from "./session/setup-wizard.js";
@@ -58,6 +59,25 @@ export class SessionCommands {
       createModelPermApi(ctx),
     );
     this.ctx = ctx;
+  }
+
+  /** AI 管理台：构建会话列表卡（不发送；调用方自行 patch / 发送）。 */
+  async buildSessionListCard(chatId: string, page = 0): Promise<object> {
+    const entries = await this.ctx.loadSessionEntries(chatId);
+    const active = await this.ctx.deps.sessionMap.getActive(chatId);
+    return this.ctx.buildListCard(chatId, entries, page, active?.sessionID);
+  }
+
+  /**
+   * AI 管理台：构建 AI 预填的建会话表单卡（写入向导状态，**不发送**）。
+   * 表单消息 id 即后续话题锚点；用户确认/修改后提交走既有表单流程。
+   */
+  async buildPrefilledSetupForm(
+    chatId: string,
+    anchorMessageId: string,
+    prefill: SetupFormPrefill,
+  ): Promise<object> {
+    return this.ctx.buildPrefilledSetupForm(chatId, anchorMessageId, prefill);
   }
 
   /**

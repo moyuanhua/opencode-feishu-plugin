@@ -198,6 +198,14 @@ export interface SessionListApi {
   patchListCard(chatId: string, messageId: string, page?: number): Promise<void>;
 }
 
+/** AI 预填的建会话字段（表单最终仍由用户确认/修改后提交）。 */
+export interface SetupFormPrefill {
+  readonly title?: string;
+  readonly dir?: string;
+  readonly model?: ModelRef;
+  readonly perm?: PermissionPreset;
+}
+
 /** 建会话向导 / 表单（`setup-wizard.ts`）。 */
 export interface SetupWizardApi {
   cmdNew(message: IncomingMessage, args: string): Promise<void>;
@@ -209,6 +217,15 @@ export interface SetupWizardApi {
   applySetupCardAction(action: CardAction, value: SetupCardValue): Promise<void>;
   applySetupFormSubmit(action: CardAction): Promise<void>;
   sendSetupFormForChat(chatId: string, anchorMessageId: string, openId: string): Promise<void>;
+  /**
+   * AI 预填：写入向导状态（title/dir/model/perm）并返回表单卡，**不发送**——
+   * 调用方自行发送或就地 patch（如把「识别中」卡变成表单，表单消息即话题锚点）。
+   */
+  buildPrefilledSetupForm(
+    chatId: string,
+    anchorMessageId: string,
+    prefill: SetupFormPrefill,
+  ): Promise<object>;
 }
 
 /** 会话运维命令（`session-ops.ts`）。 */

@@ -9,7 +9,6 @@ import type { CardAction, Logger } from "../types.js";
 import { parseStopActionValue } from "../feishu/run-stop.js";
 import { parseSessionCardValue } from "../feishu/session-cards.js";
 import { parseCompactActionValue } from "../session/compact.js";
-import { parseQuickNewActionValue } from "../feishu/quick-new-cards.js";
 import { isSetupFormAction, parseSetupCardValue } from "../feishu/setup-cards.js";
 
 export interface CardActionRouterDeps {
@@ -52,9 +51,7 @@ export function routeCardAction(
     hasForm ||
     isSetupFormAction(value) ||
     Boolean(parseSessionCardValue(value)) ||
-    Boolean(parseSetupCardValue(value)) ||
-    // 「一句话建会话」建议卡按钮（issue #2）。
-    Boolean(parseQuickNewActionValue(value));
+    Boolean(parseSetupCardValue(value));
   deps.log.debug("卡片回调路由", {
     hasForm,
     hasValue: value !== undefined,
