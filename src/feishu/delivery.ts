@@ -16,8 +16,13 @@
 export type Delivery = "steer" | "queue";
 
 /** 纯决策：正在跑 → queue；空闲 → steer。 */
-export function decideDelivery(running: boolean): Delivery {
-  return running ? "queue" : "steer";
+/**
+ * 排队决策：空闲 → `steer`（直接执行）；忙时按 `busyDelivery` 偏好：
+ * - `busyDelivery="steer"`（默认，Roadmap）：新消息**立即插队**，打断当前步骤优先执行；
+ * - `busyDelivery="queue"`：原生排队，等当前步骤结束后处理（更温和，适合长命令场景）。
+ */
+export function decideDelivery(running: boolean, busyDelivery: Delivery = "queue"): Delivery {
+  return running ? busyDelivery : "steer";
 }
 
 export class ExecutionTracker {

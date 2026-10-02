@@ -188,6 +188,12 @@ export interface ResolvedConfig {
    * 闲聊/未识别到目录时回退到管理台提示卡。
    */
   readonly quickNew: boolean;
+  /**
+   * 忙时新消息的投递方式（Roadmap 项）：
+   * - `steer`（默认）：立即插队，打断当前步骤优先执行；
+   * - `queue`：原生排队，等当前步骤结束后处理（长命令场景更温和）。
+   */
+  readonly busyDelivery: "steer" | "queue";
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -273,6 +279,7 @@ export function resolveConfig(
   const attachmentTimeoutMs = clamp(asNumber(merged.attachmentTimeoutMs, 30_000), 5_000, 120_000);
   const attachmentsDirRaw = asString(merged.attachmentsDir).trim();
   const quickNew = asBoolean(merged.quickNew, true);
+  const busyDelivery = merged.busyDelivery === "queue" ? "queue" : "steer";
   const keepaliveIntervalMs = clamp(
     asNumber(merged.keepaliveIntervalMs, 20 * 60 * 1000),
     5 * 60 * 1000,
@@ -343,6 +350,7 @@ export function resolveConfig(
     attachmentTimeoutMs,
     ...(attachmentsDirRaw ? { attachmentsDir: attachmentsDirRaw } : {}),
     quickNew,
+    busyDelivery,
   };
 }
 

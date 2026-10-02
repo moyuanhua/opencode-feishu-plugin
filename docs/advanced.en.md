@@ -54,6 +54,8 @@ The watchdog (a 60s sweep) force-interrupts a session in two cases: "no progress
 
 ## Queued-card lifecycle (measured semantics)
 
+> Busy-time delivery now defaults to `steer` (cut in immediately); this section describes the receipt-card lifecycle under `busyDelivery: "queue"`.
+
 An opencode `delivery:"queue"` message is injected for processing **at the next step of the currently running execution** (**no** new `execution.started` is emitted — confirmed by a controlled experiment, 2026-10). The plugin manages receipt cards accordingly:
 
 - New message while busy → its receipt card enters the "waiting" queue;
@@ -178,6 +180,7 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `approvalTtlMs` | number | `600000` | Approval token / card validity |
 | `staleExecutionMs` | number | `300000` | Watchdog threshold (clamped 0–60 min; **0 = disabled**; see "Watchdog staleness rules") |
 | `quickNew` | boolean | `true` | Main-chat "one-sentence session" (AI judges intent + finds the dir; proposal card creates in one tap); `false` disables |
+| `busyDelivery` | `steer`\|`queue` | `steer` | Delivery for new messages while busy: `steer` = cut in (default); `queue` = native queueing, see "Queued-card lifecycle" |
 | `maxResourcesShown` | number | `8` | Max resource rows shown on approval cards |
 | `sessionAllowButton` | boolean | `true` | Show the "allow this tool in this session" button |
 | `resumeSummary` | boolean | `true` | Show session summary on resume card |

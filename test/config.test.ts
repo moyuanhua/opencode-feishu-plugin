@@ -456,6 +456,17 @@ describe("quickNew（一句话建会话）", () => {
   });
 });
 
+describe("busyDelivery（忙时投递偏好）", () => {
+  const base = { appId: "a", appSecret: "b", logFile: false };
+  test("默认 steer（忙时新消息默认插队）", () => {
+    expect(resolveConfig(base, {}, noFile()).busyDelivery).toBe("steer");
+  });
+  test("可切回 queue；非法值回退 steer", () => {
+    expect(resolveConfig({ ...base, busyDelivery: "queue" }, {}, noFile()).busyDelivery).toBe("queue");
+    expect(resolveConfig({ ...base, busyDelivery: "whatever" }, {}, noFile()).busyDelivery).toBe("steer");
+  });
+});
+
 describe("gatewayMatchGraceMs（精确匹配宽限）", () => {
   const base = { appId: "a", appSecret: "b", logFile: false };
   test("默认 3000ms", () => {

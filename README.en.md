@@ -20,7 +20,7 @@ Connect [OpenCode](https://opencode.ai) to Feishu/Lark: **one Feishu topic = one
 | 🚀 **One-shot session** | `/new` opens a single form (directory + model + permission preset); submit to create a session and auto-open a topic |
 | ✅ **Card approvals** | Permission requests become cards: allow once / always / this session only / deny — signed tokens prevent forgery and replay |
 | 📊 **Real-time visible** | "Thinking" receipt → live tool-call cards → streaming text updates; footer shows the current model |
-| ⏹ **Controllable** | Every reply card has a "force stop" button; a watchdog auto-interrupts stuck sessions; native queue with `/steer` `/now` to cut in |
+| ⏹ **Controllable** | Every reply card has a "force stop" button; a watchdog auto-interrupts stuck sessions; new messages **cut in by default** when busy (configurable to queue), `/steer` `/now` always available |
 | 📎 **Images / files** | Images and files sent in Feishu are downloaded and attached to the session, so vision/file-capable models can see and read them |
 | 🧭 **One-sentence session** | Send a task in the main chat — the AI judges intent, finds the right working directory, and creates + starts the session in one tap |
 | 🖱 **Main-window menu** | Two fixed quick buttons above the chat input — "New session" and "Session list" (bot custom menu) — one tap to fire them |
@@ -192,6 +192,7 @@ When the agent asks via `question` or other form tools, the form becomes a Feish
 | `approvalTtlMs` | number | `600000` | Approval token / card validity |
 | `staleExecutionMs` | number | `300000` | Watchdog threshold (0–60 min; **0 = disabled**; sessions waiting on a form / pending approval are never killed) |
 | `quickNew` | boolean | `true` | Main-chat "one-sentence session": AI judges intent + finds the directory, proposal card creates in one tap; `false` = console-only mode |
+| `busyDelivery` | `steer`\|`queue` | `steer` | Delivery for new messages while busy: `steer` = cut in and interrupt the current step; `queue` = native queueing (gentler for long commands) |
 | `gatewayLocation` | string | — | Only start the gateway at this location (or its subdirectories); empty = any location |
 
 Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepalive*`, `gatewayMatchGraceMs`) → [docs/advanced.en.md](./docs/advanced.en.md#full-configuration).
@@ -225,7 +226,7 @@ Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepa
 Iterating from real usage feedback; current plan:
 
 - [x] **Accept images / files**: done — downloaded automatically into the session working directory at `.opencode/temp/opencode-feishu-plugin/` (with a built-in `.gitignore`, so `git status` stays clean; override with `attachmentsDir`; default max 20MB per attachment).
-- [ ] **New messages cut in by default when busy**: currently new messages queue natively while a session is busy (manual cut-in via `/steer`, `/now`). Planned: new messages default to **cutting in immediately**, interrupting the current step to run first.
+- [x] **New messages cut in by default when busy**: done — while busy, new messages **cut in immediately** (interrupting the current step to run first); set `busyDelivery: "queue"` to go back to native queueing (gentler for long-running commands).
 
 ## Advanced topics & development
 

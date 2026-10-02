@@ -1273,8 +1273,8 @@ async function start(
     replyToMessageId?: string,
     forceDelivery?: Delivery,
   ): Promise<void> {
-    // 原生排队：该 session 正在跑 execution 就 queue，否则 steer。`/steer` 强制 steer。
-    const delivery: Delivery = forceDelivery ?? decideDelivery(executions.isRunning(sessionID));
+    // 原生投递：空闲 → steer；忙时按 `busyDelivery` 偏好（默认 steer = 立即插队）。`/steer` 强制 steer。
+    const delivery: Delivery = forceDelivery ?? decideDelivery(executions.isRunning(sessionID), config.busyDelivery);
     // P6：运行卡页脚展示当前模型。以**读回的真实值**为准（读回失败才回退记录值）。
     const link = await sessionMap.resolveBySession(sessionID);
     const modelRef = (await readSessionModelQuiet(sessionID, link?.dir)) ?? link?.model;

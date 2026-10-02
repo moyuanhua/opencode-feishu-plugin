@@ -54,6 +54,8 @@ opencode 会**回收空闲的 location**，这会连带卸载插件、关闭飞�
 
 ## 排队卡生命周期（实测语义）
 
+> 忙时投递默认已改为 `steer`（立即插队）；本节描述 `busyDelivery: "queue"`（排队偏好）下的回执卡生命周期。
+
 opencode 的 `delivery:"queue"` 消息会在**当前执行的下一个步骤**被注入处理（**不会**产生新的 `execution.started`，2026-10 受控实验确认）。插件据此管理回执卡：
 
 - 会话忙时新消息 → 回执卡进入「等待中」队列；
@@ -180,6 +182,7 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
 | `staleExecutionMs` | number | `300000` | 看门狗阈值（夹取 0–60 分钟；**0 = 关闭**；见「看门狗判活规则」） |
 | `quickNew` | boolean | `true` | 主聊天流「一句话建会话」（AI 判意图 + 找目录，建议卡一键创建）；`false` 关闭 |
+| `busyDelivery` | `steer`\|`queue` | `steer` | 忙时新消息投递方式：`steer` = 立即插队（默认）；`queue` = 原生排队，见「排队卡生命周期」 |
 | `maxResourcesShown` | number | `8` | 审批卡最多展示的资源行数 |
 | `sessionAllowButton` | boolean | `true` | 审批卡是否显示「本会话内允许该工具」按钮 |
 | `resumeSummary` | boolean | `true` | 恢复卡是否展示会话摘要 |

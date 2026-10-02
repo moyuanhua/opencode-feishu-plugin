@@ -2,9 +2,17 @@ import { describe, expect, test } from "vitest";
 import { decideDelivery, ExecutionTracker, SessionParentLinks } from "../src/feishu/delivery.js";
 
 describe("decideDelivery", () => {
-  test("空闲 → steer；运行中 → queue", () => {
+  test("空闲 → steer；运行中 → queue（缺省偏好，向后兼容）", () => {
     expect(decideDelivery(false)).toBe("steer");
     expect(decideDelivery(true)).toBe("queue");
+  });
+
+  test("busyDelivery 偏好生效（Roadmap：忙时默认 steer 插队）", () => {
+    expect(decideDelivery(true, "steer")).toBe("steer");
+    expect(decideDelivery(true, "queue")).toBe("queue");
+    // 空闲时无论偏好都是 steer（无队可插）
+    expect(decideDelivery(false, "queue")).toBe("steer");
+    expect(decideDelivery(false, "steer")).toBe("steer");
   });
 });
 
