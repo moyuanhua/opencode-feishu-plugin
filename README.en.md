@@ -144,7 +144,7 @@ Send plain text in the main chat and the AI judges the intent and handles it:
      [✅ 创建会话]
   ```
 
-  Directory decision order: ① a path you gave explicitly → ② semantic match against recent / existing session dirs → ③ otherwise **create a new one under an allowed root** (`<allowed root>/<kebab-case topic>`) → ④ fall back to the allowed root. **The form always carries a directory** — never empty.
+  Directory decision order: ① a path you gave explicitly → ② semantic match against an **existing directory** (the AI looks at the **allowed root's first-level subdirectories first**, then recent / session dirs) → ③ otherwise **create a new one under an allowed root** (`<allowed root>/<kebab-case topic>`) → ④ fall back to the allowed root. **The form always carries a directory** — never empty.
 
 - **List sessions**: say "what sessions do I have?" → a session list card appears directly (same as `/sessions`; paginate / enter / create);
 - **Chit-chat / other**: the usual console hint card.

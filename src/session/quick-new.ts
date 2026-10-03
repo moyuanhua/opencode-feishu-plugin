@@ -56,9 +56,10 @@ export const QUICK_NEW_INSTRUCTION = [
   "- 列出/查看会话 → intent=list，其余字段留空。",
   "- 需要新建会话执行的开发/操作任务 → intent=create；闲聊、问候、询问用法 → chat。",
   "- **目录规则（create 时 dir 绝不允许为空，按优先级）：**",
+  "  候选目录包括：最近使用目录、**允许根目录的一级子目录**、历史会话目录（可能带标题线索）。",
   "  ① 用户消息里明确给了路径 → dir=该路径，dir_source=\"given\"；",
-  "  ② 否则从候选目录中选语义最匹配的 → dir=该候选路径原文，dir_source=\"existing\"；",
-  "  ③ 都不匹配 → 新建：dir=<允许根目录下、英文小写短横线的主题目录>（如 /Users/code/stock-research），dir_source=\"new\"；",
+  "  ② 否则先看候选里有没有语义匹配的现成目录（尤其允许根目录的一级子目录）→ dir=该候选路径原文，dir_source=\"existing\"；",
+  "  ③ 都不匹配才新建：dir=<允许根目录下、英文小写短横线的主题目录>（如 /Users/code/stock-research），dir_source=\"new\"；",
   "  ④ 实在难以命名 → dir=<第一个允许根目录>，dir_source=\"new\"。",
   "- perm 依据用户表述（只读→readonly、可编辑→edit、高风险→askHigh、完全信任→trust）；用户没说就留空。",
   "- model 只能从候选模型中精确复制 providerID/modelID；用户没说就留空。",
@@ -73,7 +74,7 @@ export function buildQuickNewPrompt(input: {
 }): string {
   const roots = (input.allowedRoots ?? []).slice(0, 8).map((r) => `- ${r}`).join("\n");
   const dirs = input.candidates
-    .slice(0, 40)
+    .slice(0, 60)
     .map((c) => `- ${c.path}${c.label ? `（${c.label}）` : ""}`)
     .join("\n");
   const models = (input.models ?? [])

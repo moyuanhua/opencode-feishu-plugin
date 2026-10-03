@@ -109,7 +109,8 @@ opencode 的 `delivery:"queue"` 消息会在**当前执行的下一个步骤**�
   `{intent:"create|list|chat", dir, dir_source, title, perm, model, reason}`；
   - `create` → 建会话；`list` → 列会话；`chat` → 回管理台提示卡；
 - **目录优先（重要）**：`create` 时 dir 绝不允许为空，AI 按优先级给出确定目录：
-  ① `given` 用户消息里明确给的路径；② `existing` 命中候选（最近使用 + 全部会话目录，标题作语义线索）；
+  ① `given` 用户消息里明确给的路径；② `existing` 命中候选（**允许根目录一级子目录**
+  （`scanRootSubdirs`，上限 50）+ 最近使用 + 全部会话目录（标题作语义线索）；prompt 候选上限 60）；
   ③ `new` 都不命中 → 在允许根目录下按主题新建（`<allowedRoot>/<kebab-case 主题>`）；④ 兜底允许根目录。
   预填前用 `validateDirectory(..., { create: false })` **干校验**（不落盘：越界 / 系统目录拒绝、允许范围内可不存在），
   只有提交表单时才会真正 `mkdir -p`；

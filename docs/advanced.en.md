@@ -107,8 +107,9 @@ AI routing for plain text in the main chat (`quickNew`, on by default):
   `{intent:"create|list|chat", dir, dir_source, title, perm, model, reason}`;
   `create` → new session; `list` → session list; `chat` → console hint card;
 - **Directory first (important)**: for `create`, `dir` is never empty — the AI resolves it in priority order:
-  ① `given` — a path the user explicitly provided; ② `existing` — matches a candidate (recent dirs + all session
-  dirs, titles as semantic hints); ③ `new` — otherwise create a topic-named dir under an allowed root
+  ① `given` — a path the user explicitly provided; ② `existing` — matches a candidate (**the allowed root's
+  first-level subdirectories** (`scanRootSubdirs`, limit 50) + recent dirs + all session dirs, titles as semantic
+  hints; prompt candidates capped at 60); ③ `new` — otherwise create a topic-named dir under an allowed root
   (`<allowedRoot>/<kebab-case topic>`); ④ fall back to the allowed root. Before prefilling, validation runs via
   `validateDirectory(..., { create: false })` — a **dry check** (no disk writes; out-of-range/system dirs are
   rejected, in-range paths may not exist yet); the actual `mkdir -p` happens only on form submit;

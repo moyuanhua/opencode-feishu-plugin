@@ -62,6 +62,7 @@ import {
   type QuickNewModelOption,
 } from "./session/quick-new.js";
 import { isUnder, validateDirectory } from "./feishu/dirs.js";
+import { scanRootSubdirs } from "./feishu/root-scan.js";
 import { WizardStore } from "./feishu/wizard.js";
 import { RecentStore } from "./feishu/recent.js";
 import {
@@ -1056,15 +1057,16 @@ async function start(
       if (!res.ok) log.warn("管理台提示卡发送失败", { error: res.error ?? "unknown" });
     };
     try {
-      // 1) 候选目录（最近使用 + 本机会话）与候选模型。
+      // 1) 候选目录（最近使用 + 允许根目录一级子目录 + 本机会话目录）与候选模型。
+      //    「一级子目录」让 AI 先看一眼根目录下现成的目录（含从未用过的新项目），避免一律新建。
       const candidates: QuickNewCandidate[] = [];
       const seen = new Set<string>();
-      for (const dir of await recent.listDirs()) {
-        if (!seen.has(dir)) {
-          seen.add(dir);
-          candidates.push({ path: dir });
-        }
-      }
+      const pushCandidate = (path: string, label?: string): void => {
+        const trimmed = path.trim();
+        if (!trimmed || seen.has(trimmed)) return;
+        seen.add(trimmed);
+        candidates.push({ path: trimmed, ...(label ? { label } : {}) });
+      };
       let entries: SessionListEntry[] = [];
       try {
         const raw = (await listAllSessionsRaw()) ?? (await listSessionsOverHttp({}, { log }));
@@ -1072,11 +1074,23 @@ async function start(
       } catch (err) {
         log.debug("quick-new 会话列表读取失败", { error: errorMessage(err) });
       }
+      const sessionLabelByDir = new Map<string, string>();
       for (const entry of entries) {
-        if (entry.directory && !seen.has(entry.directory)) {
-          seen.add(entry.directory);
-          candidates.push({ path: entry.directory, ...(entry.title ? { label: entry.title } : {}) });
+        if (entry.directory && entry.title) sessionLabelByDir.set(entry.directory, entry.title);
+      }
+      for (const dir of await recent.listDirs()) pushCandidate(dir);
+      for (const root of config.allowedRoots.slice(0, 3)) {
+        try {
+          const subdirs = await scanRootSubdirs(root, { limit: 50 });
+          for (const sub of subdirs) {
+            pushCandidate(sub.path, sessionLabelByDir.get(sub.path) ?? (sub.isRepo ? "git 仓库" : undefined));
+          }
+        } catch (err) {
+          log.debug("quick-new 一级目录扫描失败", { root, error: errorMessage(err) });
         }
+      }
+      for (const entry of entries) {
+        if (entry.directory) pushCandidate(entry.directory, entry.title);
       }
       const routingSessionID = entries[0]?.sessionID;
       if (!routingSessionID) {

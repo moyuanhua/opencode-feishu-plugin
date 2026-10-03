@@ -48,6 +48,18 @@ describe("scanRootSubdirs（P6.3 目录下拉来源）", () => {
     expect(subs.map((s) => s.name)).toEqual(names.slice(0, MAX_ROOT_SUBDIRS));
   });
 
+  test("limit 可自定义（AI 候选放宽；非法值夹取到至少 1）", async () => {
+    const names = Array.from({ length: 20 }, (_, i) => `d${String(i).padStart(2, "0")}`);
+    const fake = new FakeReadDir().set(
+      "/root",
+      names.map((n) => dir(n)),
+    );
+    const subs = await scanRootSubdirs("/root", { readdir: fake.fn, limit: 18 });
+    expect(subs).toHaveLength(18);
+    expect(subs.map((s) => s.name)).toEqual(names.slice(0, 18));
+    expect(await scanRootSubdirs("/root", { readdir: fake.fn, limit: 0 })).toHaveLength(1);
+  });
+
   test("含 .git 的子目录标记 isRepo（只判断存在性）", async () => {
     const fake = new FakeReadDir()
       .set("/root", [dir("repo"), dir("plain"), dir("broken")])

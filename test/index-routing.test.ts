@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { CardAction, IncomingMessage } from "../src/types.js";
@@ -627,6 +627,26 @@ describe("index 话题路由（集成）", () => {
     const dirInput = fields.find((e) => e.name === "dir") as { default_value?: string } | undefined;
     expect(dirInput?.default_value).toBe(target);
     expect(json).toContain("AI 新建");
+  });
+
+  test("根目录一级子目录进候选：AI 说 existing 时命中现成目录（不再一律新建）", async () => {
+    // 名字排序靠前，确保在扫描上限内（测试与系统临时目录共用 QN_BASE）。
+    const stockDir = join(QN_BASE, "000-stock-research");
+    mkdirSync(stockDir, { recursive: true });
+    sessionListRaw = [{ id: "ses_root", title: "别的会话", time: { updated: 1 }, location: { directory: QN_BASE } }];
+    h.generateRaw = {
+      text: JSON.stringify({ intent: "create", dir: stockDir, dir_source: "existing", title: "股票研究" }),
+    };
+    cleanup = await setup({ quickNew: true, allowedRoots: [QN_BASE] });
+    await deliver(msg("股票研究", { messageId: "om_qn_root" }));
+    await vi.waitFor(() => expect(findPatched("setup_form")).toContain("setup_form"));
+    const { json, fields } = lastFormCard();
+    const dirInput = fields.find((e) => e.name === "dir") as { default_value?: string } | undefined;
+    expect(dirInput?.default_value).toBe(stockDir);
+    // 命中候选（来自一级目录扫描）→ 来源说明是「匹配」
+    expect(json).toContain("匹配");
+    // 识别 prompt 里也带上了这个一级子目录
+    expect(h.generateTextCalls.at(-1)).toContain(stockDir);
   });
 
   test("用户指定路径越界：不预填 + 警示（不静默替换）", async () => {

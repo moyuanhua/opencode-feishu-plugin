@@ -35,6 +35,8 @@ export type ReadDirFn = (
 export interface ScanRootDeps {
   /** 默认 `node:fs/promises.readdir`；测试注入假实现。 */
   readonly readdir?: ReadDirFn;
+  /** 返回条数上限（默认 `MAX_ROOT_SUBDIRS`；AI 候选场景可放宽到几十条）。 */
+  readonly limit?: number;
 }
 
 /**
@@ -57,7 +59,7 @@ export async function scanRootSubdirs(root: string, deps: ScanRootDeps = {}): Pr
     .filter((e) => e.isDirectory() && !e.name.startsWith(".") && e.name !== "node_modules")
     .map((e) => e.name)
     .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
-    .slice(0, MAX_ROOT_SUBDIRS);
+    .slice(0, Math.max(1, deps.limit ?? MAX_ROOT_SUBDIRS));
 
   const out: RootSubdir[] = [];
   for (const name of names) {
