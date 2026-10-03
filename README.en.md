@@ -235,6 +235,22 @@ Iterating from real usage feedback; current plan:
 - [x] **Accept images / files**: done — downloaded automatically into the session working directory at `.opencode/temp/opencode-feishu-plugin/` (with a built-in `.gitignore`, so `git status` stays clean; override with `attachmentsDir`; default max 20MB per attachment).
 - [x] **New messages cut in by default when busy**: done — while busy, new messages **cut in immediately** (interrupting the current step to run first); set `busyDelivery: "queue"` to go back to native queueing (gentler for long-running commands).
 
+## 8. Changelog
+
+| Version | Highlights |
+|---|---|
+| **v0.2.16** | Session creation is **directory-first**: the AI pins the working directory before prefilling the form, so the form never has an empty directory; directory candidates now include the **first-level subdirectories of allowed roots**, preferring an existing directory before creating a new one |
+| **v0.2.15** | **AI session management** (the main chat lets the AI judge intent and return a prefilled form / session list); **new messages cut in by default when busy** (`busyDelivery: "queue"` to queue instead); fix transient generation always failing under opencode-go |
+| **v0.2.14** | **One-sentence session creation**; fix duplicated / overlapping streaming text |
+| **v0.2.13** | Fix the queued receipt card stuck on "waiting" after its terminal state; add execution-event diagnostics |
+| **v0.2.12** | Fix watchdog false kills (no longer kills while a subagent / question / approval is pending); the watchdog can be disabled |
+| **v0.2.11** | **Bot custom menu** (quick `/new`, `/sessions` buttons above the input); support the SDK's flattened event shape |
+| **v0.2.10** | Attachments now land in the session working directory `.opencode/temp/opencode-feishu-plugin/` (with built-in `.gitignore`) |
+| **v0.2.9** | **Receive images / files** (downloaded and attached to the session; requires `im:message:readonly`) |
+| **v0.2.8** | **Event subscription auto-reconnect** (exponential backoff on stream drop, no more permanent blindness); auto-open a topic when resuming a session; fallback summary extraction |
+
+Full history: [GitHub Releases](https://github.com/moyuanhua/opencode-feishu-plugin/releases).
+
 ## Advanced topics & development
 
 Security model, location keep-alive, card guard, session resume, multi-instance gateway election, full config reference, and development architecture → [docs/advanced.en.md](./docs/advanced.en.md).
