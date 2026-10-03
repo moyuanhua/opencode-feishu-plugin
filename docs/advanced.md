@@ -105,19 +105,23 @@ opencode 的 `delivery:"queue"` 消息会在**当前执行的下一个步骤**�
 
 主聊天流普通文本的 AI 路由（`quickNew`，默认开启）：
 
-- **意图识别**：`generate.text`（无会话上下文、秒级）输出严格 JSON
-  `{intent:"create|list|chat", dir, title, perm, model, reason}`；
+- **意图识别**：临时生成通道（无会话上下文、秒级）输出严格 JSON
+  `{intent:"create|list|chat", dir, dir_source, title, perm, model, reason}`；
   - `create` → 建会话；`list` → 列会话；`chat` → 回管理台提示卡；
-- **候选与防幻觉**：目录候选 = 最近使用目录（`RecentStore`）+ 本机全部会话目录（标题作语义线索），
-  去重限 40 条；模型候选 = `ctx.model.list()`；解析结果必须命中候选（目录再过 `validateDir` / allowedRoots）；
-- **就地卡片**：先发「🤔 正在识别」占位卡，分析完成后 **patch 成最终卡片**（不产生第二张消息）：
+- **目录优先（重要）**：`create` 时 dir 绝不允许为空，AI 按优先级给出确定目录：
+  ① `given` 用户消息里明确给的路径；② `existing` 命中候选（最近使用 + 全部会话目录，标题作语义线索）；
+  ③ `new` 都不命中 → 在允许根目录下按主题新建（`<allowedRoot>/<kebab-case 主题>`）；④ 兜底允许根目录。
+  预填前用 `validateDirectory(..., { create: false })` **干校验**（不落盘：越界 / 系统目录拒绝、允许范围内可不存在），
+  只有提交表单时才会真正 `mkdir -p`；
+- **预填表单（目录已填）**：表单只在目录确定后出现，顶部附来源说明
+  （「✓ 匹配历史/最近目录」/「➕ AI 新建」/「✍️ 你指定」）；用户明确指定但越界的路径**不静默替换**——
+  不预填 + 警示文案，由用户在表单里改；
   - `list` → 会话列表卡（等同 `/sessions`，翻页/进话题/新建按钮全部可用）；
-  - `create` → **AI 预填表单**（`buildPrefilledSetupForm`：写入向导状态 title/dir/model/perm 后返回表单卡）；
   - `chat`/失败 → 管理台提示卡；
 - **表单确认**：建会话**必须**经表单提交（`applySetupFormSubmit`）——用户可确认或修改 AI 的预填；
-  提交后锚点 = 表单消息本身，建会话 + 自动开话题；AI 解析不了的字段留空由用户补全。
+  提交后锚点 = 表单消息本身，建会话 + 自动开话题；模型/权限等由用户在表单里选。
 
-## /sessions 数据源与恢复卡## /sessions 数据源与恢复卡
+## /sessions 数据源与恢复卡
 
 `/sessions` 列出 opencode **本机全部**会话（按更新时间倒序，分页 8 条可配）：
 

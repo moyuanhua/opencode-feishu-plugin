@@ -103,21 +103,23 @@ Once menu items are configured in the developer console, a click in the bot chat
 
 AI routing for plain text in the main chat (`quickNew`, on by default):
 
-- **Intent recognition**: `generate.text` (no session context, sub-second) returns strict JSON
-  `{intent:"create|list|chat", dir, title, perm, model, reason}`;
+- **Intent recognition**: the temporary-generation channel (no session context, sub-second) returns strict JSON
+  `{intent:"create|list|chat", dir, dir_source, title, perm, model, reason}`;
   `create` → new session; `list` → session list; `chat` → console hint card;
-- **Candidates & anti-hallucination**: directory candidates = recent dirs (`RecentStore`) + every local
-  session directory (titles as semantic hints), deduped, capped at 40; model candidates = `ctx.model.list()`;
-  results must match a candidate (dirs also pass `validateDir` / allowedRoots);
-- **In-place cards**: a "🤔 recognizing" placeholder card is sent first, then **patched in place** into the
-  final card (no second message):
+- **Directory first (important)**: for `create`, `dir` is never empty — the AI resolves it in priority order:
+  ① `given` — a path the user explicitly provided; ② `existing` — matches a candidate (recent dirs + all session
+  dirs, titles as semantic hints); ③ `new` — otherwise create a topic-named dir under an allowed root
+  (`<allowedRoot>/<kebab-case topic>`); ④ fall back to the allowed root. Before prefilling, validation runs via
+  `validateDirectory(..., { create: false })` — a **dry check** (no disk writes; out-of-range/system dirs are
+  rejected, in-range paths may not exist yet); the actual `mkdir -p` happens only on form submit;
+- **Prefilled form (directory filled)**: the form appears only once the directory is resolved, with a source
+  note on top ("✓ matched existing/recent dir" / "➕ AI-created" / "✍️ you specified"). A path **you** gave that
+  is out of range is **never silently replaced** — no prefill plus a warning, for the user to fix in the form;
   - `list` → session list card (same as `/sessions`; paginate / enter / create all work);
-  - `create` → **AI-prefilled form** (`buildPrefilledSetupForm`: writes title/dir/model/perm into the wizard
-  state and returns the form card);
   - `chat`/failure → console hint card;
 - **Form confirmation**: creation **always** goes through form submission (`applySetupFormSubmit`) — the user
   confirms or edits the AI prefill; the anchor is the form message itself, and a topic opens on submit.
-  Anything the AI cannot resolve is left blank for the user to fill in.
+  Model/permission etc. are picked in the form.
 
 ## `/sessions` data source & resume card## `/sessions` data source & resume card
 

@@ -74,17 +74,29 @@ function isSystemPath(path: string): boolean {
   return SYSTEM_DIRS.some((dir) => isUnder(path, dir));
 }
 
+/** `validateDirectory` 选项。 */
+export interface ValidateDirectoryOptions {
+  /**
+   * 不存在时是否创建目录（默认 `true`）。
+   * 表单预填前的“干校验”传 `false`：只做绝对路径 / 禁区 / 白名单判定，不落盘
+   * （用户若取消也不留下空目录；提交表单时仍会真正创建）。
+   */
+  readonly create?: boolean;
+}
+
 /**
  * 校验路径是否可作工作目录。
  *
  * - `rawPath` 为空/空白 → 回退到 `allowedRoots[0]`；
  * - 不存在的绝对路径会在 allowedRoots 之下 `mkdir -p` 后继续校验（创建失败 → `create_failed`）；
- * - 逻辑路径与创建后的 `realpath` 都要通过禁区 + allowedRoots 校验。
+ * - 逻辑路径与创建后的 `realpath` 都要通过禁区 + allowedRoots 校验；
+ * - `opts.create=false` 时跳过创建（干校验），其余判定不变。
  */
 export function validateDirectory(
   rawPath: string,
   allowedRoots: readonly string[],
   deps: DirValidationDeps = {},
+  opts: ValidateDirectoryOptions = {},
 ): DirValidation {
   const raw = rawPath.trim();
   const roots = allowedRoots.map((r) => resolve(r)).filter((r) => r && r !== "");
@@ -120,11 +132,14 @@ export function validateDirectory(
     exists = false;
   }
   if (!exists) {
-    try {
-      mkdir(target, { recursive: true });
-    } catch {
-      return err("create_failed", `目录不存在且无法创建：\`${target}\`。请检查路径与权限。`);
+    if (opts.create ?? true) {
+      try {
+        mkdir(target, { recursive: true });
+      } catch {
+        return err("create_failed", `目录不存在且无法创建：\`${target}\`。请检查路径与权限。`);
+      }
     }
+    // 干校验（create=false）：不落盘，仅按逻辑路径继续校验。
   }
 
   // realpath 校验放在创建之后：真实路径可能经符号链接逃逸，需再次做禁区 + 白名单校验。

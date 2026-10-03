@@ -6,13 +6,22 @@
  * - `list`：列出会话（直接出会话列表卡）；
  * - `chat`：闲聊 / 其他（回管理台提示卡）。
  *
- * 防幻觉：目录必须命中候选清单；权限档位限定四档；模型必须命中可选列表。
- * 本模块只做纯逻辑（prompt 拼装 / 结果解析 / 匹配），模型调用与卡片由调用方注入。
+ * **目录优先（重要）**：`create` 时 dir 绝不允许留空，AI 必须给出一个确定目录：
+ * - `given`：用户消息里明确给的路径；
+ * - `existing`：命中候选清单（最近使用 / 历史会话目录，语义匹配）；
+ * - `new`：都不命中 → 在允许根目录下新建（`<允许根目录>/<主题英文短横线>`）。
+ * 表单只在目录确定后出现（目录已预填）；`existing/new` 的路径由调用方复核（防幻觉）。
+ * 权限档位限定四档；模型必须命中可选列表。
+ * 本模块只做纯逻辑（prompt 拼装 / 结果解析 / 匹配 / slug），模型调用与校验由调用方注入。
  */
 
 /** 建会话权限档位（与 `PermissionPreset` 一致；此处独立声明避免层间耦合）。 */
 export const QUICK_NEW_PERMS = ["readonly", "edit", "askHigh", "trust"] as const;
 export type QuickNewPerm = (typeof QUICK_NEW_PERMS)[number];
+
+/** 目录来源：用户指定 / 命中候选 / AI 新建。 */
+export const QUICK_NEW_DIR_SOURCES = ["given", "existing", "new"] as const;
+export type QuickNewDirSource = (typeof QUICK_NEW_DIR_SOURCES)[number];
 
 /** 候选工作目录：来自最近使用记录或本机会话（`label` 为会话标题，辅助语义匹配）。 */
 export interface QuickNewCandidate {
@@ -31,6 +40,8 @@ export interface QuickNewModelOption {
 export interface QuickNewDecision {
   readonly intent: "create" | "list" | "chat";
   readonly directory?: string;
+  /** 目录来源（create 时：given/existing/new）。 */
+  readonly dirSource?: QuickNewDirSource;
   readonly title?: string;
   readonly perm?: QuickNewPerm;
   readonly model?: string;
@@ -40,21 +51,27 @@ export interface QuickNewDecision {
 export const QUICK_NEW_INSTRUCTION = [
   "你是飞书 AI 助手「管理台」的意图识别器。用户在管理台（还没有会话）发来一条消息。",
   "判断意图并尽量解析建会话字段。只输出一个 JSON 对象，不要任何其他文字：",
-  '{"intent":"create|list|chat","dir":"<绝对路径或空字符串>","title":"<不超过20字的会话标题>","perm":"readonly|edit|askHigh|trust|空","model":"<providerID/modelID 或空>","reason":"<一句话理由>"}',
+  '{"intent":"create|list|chat","dir":"<绝对路径>","dir_source":"given|existing|new","title":"<不超过20字的会话标题>","perm":"readonly|edit|askHigh|trust|空","model":"<providerID/modelID 或空>","reason":"<一句话理由>"}',
   "规则：",
   "- 列出/查看会话 → intent=list，其余字段留空。",
   "- 需要新建会话执行的开发/操作任务 → intent=create；闲聊、问候、询问用法 → chat。",
-  "- dir 只能从候选目录中选择（语义最匹配的那个）；找不到合适的就留空字符串。",
+  "- **目录规则（create 时 dir 绝不允许为空，按优先级）：**",
+  "  ① 用户消息里明确给了路径 → dir=该路径，dir_source=\"given\"；",
+  "  ② 否则从候选目录中选语义最匹配的 → dir=该候选路径原文，dir_source=\"existing\"；",
+  "  ③ 都不匹配 → 新建：dir=<允许根目录下、英文小写短横线的主题目录>（如 /Users/code/stock-research），dir_source=\"new\"；",
+  "  ④ 实在难以命名 → dir=<第一个允许根目录>，dir_source=\"new\"。",
   "- perm 依据用户表述（只读→readonly、可编辑→edit、高风险→askHigh、完全信任→trust）；用户没说就留空。",
   "- model 只能从候选模型中精确复制 providerID/modelID；用户没说就留空。",
 ].join("\n");
 
-/** 拼装发给模型的 prompt（候选目录 + 候选模型 + 用户消息，均有截断保护）。 */
+/** 拼装发给模型的 prompt（允许根目录 + 候选目录 + 候选模型 + 用户消息，均有截断保护）。 */
 export function buildQuickNewPrompt(input: {
   readonly text: string;
   readonly candidates: readonly QuickNewCandidate[];
   readonly models?: readonly QuickNewModelOption[];
+  readonly allowedRoots?: readonly string[];
 }): string {
+  const roots = (input.allowedRoots ?? []).slice(0, 8).map((r) => `- ${r}`).join("\n");
   const dirs = input.candidates
     .slice(0, 40)
     .map((c) => `- ${c.path}${c.label ? `（${c.label}）` : ""}`)
@@ -65,6 +82,9 @@ export function buildQuickNewPrompt(input: {
     .join("\n");
   return [
     QUICK_NEW_INSTRUCTION,
+    "",
+    "允许根目录（新建目录时只能放在这些目录之下）：",
+    roots || "（无）",
     "",
     "候选目录：",
     dirs || "（无）",
@@ -79,6 +99,10 @@ export function buildQuickNewPrompt(input: {
 
 function isPerm(value: unknown): value is QuickNewPerm {
   return typeof value === "string" && (QUICK_NEW_PERMS as readonly string[]).includes(value);
+}
+
+function isDirSource(value: unknown): value is QuickNewDirSource {
+  return typeof value === "string" && (QUICK_NEW_DIR_SOURCES as readonly string[]).includes(value);
 }
 
 /**
@@ -104,6 +128,11 @@ export function parseQuickNewDecision(raw: string | undefined): QuickNewDecision
   if (!intent) return undefined;
   const dir =
     typeof obj.dir === "string" ? obj.dir.trim() : typeof obj.directory === "string" ? obj.directory.trim() : "";
+  const dirSource = isDirSource(obj.dir_source)
+    ? obj.dir_source
+    : isDirSource(obj.dirSource)
+      ? obj.dirSource
+      : undefined;
   const title = typeof obj.title === "string" ? obj.title.trim().slice(0, 30) : "";
   const perm = isPerm(obj.perm) ? obj.perm : undefined;
   const model = typeof obj.model === "string" ? obj.model.trim() : "";
@@ -111,11 +140,25 @@ export function parseQuickNewDecision(raw: string | undefined): QuickNewDecision
   return {
     intent,
     ...(dir ? { directory: dir } : {}),
+    ...(dirSource ? { dirSource } : {}),
     ...(title ? { title } : {}),
     ...(perm ? { perm } : {}),
     ...(model ? { model } : {}),
     ...(reason ? { reason } : {}),
   };
+}
+
+/**
+ * 标题 → ASCII 目录 slug（小写、非字母数字转 `-`、截断 40）。
+ * 中文标题（无 ASCII 字符）返回空串，由调用方改用允许根目录兜底。
+ */
+export function slugifyTitle(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40)
+    .replace(/-+$/g, "");
 }
 
 /**

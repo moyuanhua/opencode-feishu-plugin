@@ -161,6 +161,16 @@ describe("buildSetupFormCard（P6.1 表单卡）", () => {
     expect((card as { config: { update_multi: boolean } }).config.update_multi).toBe(true);
   });
 
+  test("notice：表单顶部渲染说明（目录来源等）", () => {
+    const card = JSON.stringify(
+      buildSetupFormCard({ models: MODELS, recent: MODELS.slice(0, 3), notice: "➕ **AI 新建目录**（不存在时会在创建时自动创建）" }),
+    );
+    expect(card).toContain("AI 新建目录");
+    // 无 notice 时不渲染
+    const plain = JSON.stringify(buildSetupFormCard({ models: MODELS, recent: MODELS.slice(0, 3) }));
+    expect(plain).not.toContain("AI 新建目录");
+  });
+
   test("交互组件 name 全局唯一 + input 可留空 + 提交按钮带提交行为", () => {
     const card = buildSetupFormCard({ models: MODELS, recent: MODELS.slice(0, 3) });
     const form = formRoot(card);

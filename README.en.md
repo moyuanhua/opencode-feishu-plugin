@@ -132,18 +132,24 @@ After configuring the menu (setup step 6), two quick buttons stay pinned **above
 
 Send plain text in the main chat and the AI judges the intent and handles it:
 
-- **Create a session**: it parses directory / title / permission tier / model and turns the card in place into an **AI-prefilled create-session form** — confirm (or tweak) and tap "✅ 创建会话", and a topic opens with work started:
+- **Create a session (directory first)**: the AI first determines the **working directory**, then turns the card in place into a **prefilled form** — confirm (or tweak) and tap "✅ 创建会话" to create the session and auto-open a topic:
 
   ```
   You: fix the zlib download bug, use high-risk approval
-  → 📝 Create-session form (AI prefilled: dir `/Users/code/zlib`, permission "High-risk approval")
-     [✅ 创建会话]   ← confirm to create + auto-open a topic
+  → 📝 Create-session form (dir `/Users/code/zlib` ✓ matched an existing dir; permission "High-risk approval")
+     [✅ 创建会话]
+
+  You: stock research
+  → 📝 Create-session form (dir `/Users/code/stock-research` ➕ AI-created; auto-created on submit)
+     [✅ 创建会话]
   ```
+
+  Directory decision order: ① a path you gave explicitly → ② semantic match against recent / existing session dirs → ③ otherwise **create a new one under an allowed root** (`<allowed root>/<kebab-case topic>`) → ④ fall back to the allowed root. **The form always carries a directory** — never empty.
 
 - **List sessions**: say "what sessions do I have?" → a session list card appears directly (same as `/sessions`; paginate / enter / create);
 - **Chit-chat / other**: the usual console hint card.
 
-Guardrails: the directory must match a candidate (recent dirs + local session dirs) and pass allowedRoots validation; the model must be one from the available list; anything the AI cannot resolve is **left blank for you to fill in the form** — creation always goes through form confirmation. `quickNew: false` disables the whole thing.
+Guardrails: AI-proposed paths must fall under the allowed roots (`allowedRoots`) and models must be from the available list; a path **you** gave that is out of range is **never silently replaced** — the form warns and lets you fix it. Creation always goes through form confirmation. `quickNew: false` disables the whole thing.
 
 ### Inside a topic (work)
 

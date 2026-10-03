@@ -138,7 +138,9 @@ export async function buildPrefilledSetupForm(
     ...(prefill.perm !== undefined ? { perm: prefill.perm } : {}),
   };
   await ctx.deps.wizard.set(chatId, next);
-  return renderFormCard(ctx, next);
+  return renderFormCard(ctx, next, {
+    ...(prefill.notice ? { notice: prefill.notice } : {}),
+  });
 }
 
 /**
@@ -594,7 +596,7 @@ async function createSessionFromSetup(
 async function renderFormCard(
   ctx: SessionPrimitives,
   state: WizardStateLike | undefined,
-  over?: { readonly error?: string; readonly values?: SetupFormValuesInput },
+  over?: { readonly error?: string; readonly values?: SetupFormValuesInput; readonly notice?: string },
 ): Promise<object> {
   const models = await ctx.loadModels();
   const recent = await ctx.deps.recent.listModels();
@@ -611,6 +613,7 @@ async function renderFormCard(
     ...(rootSubdirs.length > 0 ? { rootSubdirs } : {}),
     ...(ctx.deps.allowedRoots ? { allowedRoots: ctx.deps.allowedRoots } : {}),
     ...(over?.error ? { error: over.error } : {}),
+    ...(over?.notice ? { notice: over.notice } : {}),
     values,
   });
 }

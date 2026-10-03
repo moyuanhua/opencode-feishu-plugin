@@ -56,7 +56,9 @@ import {
   matchCandidateDirectory,
   matchModelOption,
   parseQuickNewDecision,
+  slugifyTitle,
   type QuickNewCandidate,
+  type QuickNewDecision,
   type QuickNewModelOption,
 } from "./session/quick-new.js";
 import { isUnder, validateDirectory } from "./feishu/dirs.js";
@@ -986,12 +988,67 @@ async function start(
 
   // ── 主聊天流「AI 会话管理」（issue #2 演进）────────────────────────────
   /**
+   * 建会话的**目录决策**（「目录优先」：目录必须先定下来，表单永不空目录）。
+   *
+   * - `given`：用户明确给的路径 → 干校验（不落盘）；不可用则不预填 + 警示（不静默替换）；
+   * - `existing`：命中候选（最近使用 / 历史会话目录）→ 直接用；
+   * - `new`：AI 提议的新路径（允许根目录之下）→ 干校验；缺失/不可用 → 标题 slug 兜底 → 允许根目录兜底。
+   */
+  function resolveConsoleDir(
+    decision: QuickNewDecision,
+    candidates: readonly QuickNewCandidate[],
+  ): {
+    readonly dir?: string;
+    readonly notice: string;
+    readonly source: "given" | "existing" | "new" | "invalid";
+  } {
+    const dry = (path: string) => validateDirectory(path, config.allowedRoots, {}, { create: false });
+    const root = config.allowedRoots[0];
+    const newNotice = "➕ **AI 新建目录**（不存在时会在创建时自动创建；可在下方修改）";
+    const fallbackNew = (): { dir?: string; notice: string; source: "new" | "invalid" } => {
+      if (!root) return { notice: "⚠️ 未配置允许的根目录，请在下方填写目录。", source: "invalid" };
+      const slug = slugifyTitle(decision.title ?? "");
+      const candidate = slug ? `${root.replace(/\/+$/, "")}/${slug}` : root;
+      const check = dry(candidate);
+      if (check.ok) {
+        return {
+          dir: check.path,
+          notice: slug ? newNotice : "🏠 使用**允许根目录**（可在下方修改）",
+          source: "new",
+        };
+      }
+      return { dir: root, notice: "🏠 使用**允许根目录**（可在下方修改）", source: "new" };
+    };
+
+    if (decision.dirSource === "given" && decision.directory) {
+      const check = dry(decision.directory);
+      return check.ok
+        ? { dir: check.path, notice: "✍️ 目录由**你指定**（可在下方修改）", source: "given" }
+        : {
+            notice: `⚠️ 你指定的目录 \`${decision.directory}\` 不可用：${check.message}`,
+            source: "invalid",
+          };
+    }
+    const matched = matchCandidateDirectory(decision.directory, candidates);
+    if (matched) {
+      return { dir: matched, notice: "✓ 已匹配**历史 / 最近目录**（可在下方修改）", source: "existing" };
+    }
+    const proposed = decision.directory?.trim();
+    if (proposed) {
+      const check = dry(proposed);
+      if (check.ok) return { dir: check.path, notice: newNotice, source: "new" };
+    }
+    return fallbackNew();
+  }
+
+  /**
    * 主聊天流普通文本 → AI 会话管理：
    * - `create`：AI 解析 目录/标题/权限/模型 → 把「识别中」卡**就地变成 AI 预填表单卡**，
    *   用户确认/修改后提交（表单提交后建会话并开话题，锚点 = 表单消息本身）；
    * - `list`：就地变成会话列表卡（等同 `/sessions`）；
    * - `chat` / 解析失败 / 异常：回管理台提示卡。
-   * 防幻觉：目录必须命中候选 + allowedRoots 复核；模型必须命中可选列表。
+   * 防幻觉：目录走「目录优先」三级决策（given/existing/new）并经 allowedRoots 干校验（预填不落盘）；
+   * 模型必须命中可选列表。
    */
   async function handleQuickNew(message: IncomingMessage): Promise<void> {
     const hint = async (): Promise<void> => {
@@ -1064,7 +1121,12 @@ async function start(
       const outcome = await quickGenerateWithSession(
         { log, generateText },
         {
-          prompt: buildQuickNewPrompt({ text: message.text, candidates, models }),
+          prompt: buildQuickNewPrompt({
+            text: message.text,
+            candidates,
+            models,
+            allowedRoots: config.allowedRoots,
+          }),
           sessionID: routingSessionID,
           ...(genModel ? { model: genModel } : {}),
         },
@@ -1090,12 +1152,12 @@ async function start(
         return;
       }
 
-      const dir = matchCandidateDirectory(decision.directory, candidates);
-      const validation = dir ? validateDir(dir) : undefined;
+      // create：**先定目录**（given/existing/new，表单永不空目录），再就地变成 AI 预填表单。
+      const resolution = resolveConsoleDir(decision, candidates);
       const model = matchModelOption(decision.model, models);
       const prefill = {
         title: decision.title || topicTitle(message.text),
-        ...(validation?.ok ? { dir: validation.path } : {}),
+        ...(resolution.dir ? { dir: resolution.dir } : {}),
         ...(model
           ? {
               model: {
@@ -1106,12 +1168,14 @@ async function start(
             }
           : {}),
         ...(decision.perm ? { perm: decision.perm } : {}),
+        notice: resolution.notice,
       };
       const form = await commands.buildPrefilledSetupForm(message.chatId, ack.messageId, prefill);
       await sender.patchCard(ack.messageId, form);
       log.info("quick-new：AI 预填建会话表单已发送（就地）", {
         title: prefill.title,
-        dir: validation?.ok ? validation.path : undefined,
+        dir: resolution.dir,
+        dirSource: resolution.source,
         perm: decision.perm,
         model: model ? `${model.providerID}/${model.id}` : undefined,
       });

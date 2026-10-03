@@ -204,6 +204,8 @@ export interface SetupFormPrefill {
   readonly dir?: string;
   readonly model?: ModelRef;
   readonly perm?: PermissionPreset;
+  /** 表单顶部说明（如目录来源：“✓ 匹配历史目录”“➕ AI 新建”等）。 */
+  readonly notice?: string;
 }
 
 /** 建会话向导 / 表单（`setup-wizard.ts`）。 */

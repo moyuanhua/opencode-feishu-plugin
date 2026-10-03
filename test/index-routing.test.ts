@@ -500,6 +500,18 @@ describe("index 话题路由（集成）", () => {
   const findPatched = (text: string): string =>
     JSON.stringify(h.patched.find((p) => JSON.stringify(p).includes(text)) ?? null);
 
+  /** 解析最近的 setup_form 表单卡：返回整卡 JSON 与表单字段元素。 */
+  const lastFormCard = (): { json: string; fields: Array<Record<string, unknown>> } => {
+    const patch = [...h.patched].reverse().find((p) => JSON.stringify(p).includes("setup_form")) as {
+      data: { content: string };
+    };
+    const card = JSON.parse(patch.data.content) as { body: { elements: Array<Record<string, unknown>> } };
+    const formEl = card.body.elements.find((e) => e.name === "setup_form") as
+      | { elements?: Array<Record<string, unknown>> }
+      | undefined;
+    return { json: patch.data.content, fields: formEl?.elements ?? [] };
+  };
+
   test("任务文本：AI 识别 → AI 预填表单（目录/权限）→ 提交建会话", async () => {
     sessionListRaw = [
       {
@@ -528,19 +540,14 @@ describe("index 话题路由（集成）", () => {
     await vi.waitFor(() => expect(findPatched("setup_form")).toContain("setup_form"));
     const formPatch = [...h.patched].reverse().find((p) => JSON.stringify(p).includes("setup_form")) as {
       path: { message_id: string };
-      data: { content: string };
     };
-    const formCard = JSON.parse(formPatch.data.content) as {
-      body: { elements: Array<Record<string, unknown>> };
-    };
-    const formEl = formCard.body.elements.find((e) => e.name === "setup_form") as
-      | { elements?: Array<Record<string, unknown>> }
-      | undefined;
-    const fields = formEl?.elements ?? [];
+    const { json: formJson, fields } = lastFormCard();
     const dirInput = fields.find((e) => e.name === "dir") as { default_value?: string } | undefined;
     const permSelect = fields.find((e) => e.name === "perm") as { initial_option?: string } | undefined;
     expect(dirInput?.default_value).toBe(QN_DIR);
     expect(permSelect?.initial_option).toBe("askHigh");
+    // 目录来源说明：命中候选
+    expect(formJson).toContain("匹配");
     // 识别 prompt 带了候选目录（含会话标题线索）。
     expect(h.generateTextCalls.at(-1)).toContain(`- ${QN_DIR}（zlib 下载任务）`);
 
@@ -590,7 +597,7 @@ describe("index 话题路由（集成）", () => {
     expect(promptCalls).toHaveLength(0);
   });
 
-  test("目录不在候选（防幻觉）：仍出表单但不预填该路径", async () => {
+  test("AI 路径越界（防幻觉）：不预填该路径，回退为允许根下的新建目录", async () => {
     sessionListRaw = [{ id: "ses_y", title: "某会话", time: { updated: 1 }, location: { directory: QN_DIR } }];
     h.generateRaw = {
       text: JSON.stringify({ intent: "create", dir: "/etc/evil", title: "x" }),
@@ -599,7 +606,42 @@ describe("index 话题路由（集成）", () => {
     await deliver(msg("帮我搞点事情", { messageId: "om_qn_boot3" }));
     await vi.waitFor(() => expect(findPatched("setup_form")).toContain("setup_form"));
     expect(findPatched("setup_form")).not.toContain("/etc/evil");
+    // 兜底：允许根 + 标题 slug，并给出「AI 新建」说明
+    const { json, fields } = lastFormCard();
+    const dirInput = fields.find((e) => e.name === "dir") as { default_value?: string } | undefined;
+    expect(dirInput?.default_value).toBe(`${QN_BASE}/x`);
+    expect(json).toContain("AI 新建");
     expect(promptCalls).toHaveLength(0);
+  });
+
+  test("AI 新建目录（dir_source=new）：表单预填新路径 + 新建说明", async () => {
+    sessionListRaw = [{ id: "ses_new", title: "股票", time: { updated: 1 }, location: { directory: QN_BASE } }];
+    const target = `${QN_BASE}/stock-research`;
+    h.generateRaw = {
+      text: JSON.stringify({ intent: "create", dir: target, dir_source: "new", title: "股票研究" }),
+    };
+    cleanup = await setup({ quickNew: true, allowedRoots: [QN_BASE] });
+    await deliver(msg("股票研究", { messageId: "om_qn_new" }));
+    await vi.waitFor(() => expect(findPatched("setup_form")).toContain("setup_form"));
+    const { json, fields } = lastFormCard();
+    const dirInput = fields.find((e) => e.name === "dir") as { default_value?: string } | undefined;
+    expect(dirInput?.default_value).toBe(target);
+    expect(json).toContain("AI 新建");
+  });
+
+  test("用户指定路径越界：不预填 + 警示（不静默替换）", async () => {
+    sessionListRaw = [{ id: "ses_g", title: "某会话", time: { updated: 1 }, location: { directory: QN_BASE } }];
+    h.generateRaw = {
+      text: JSON.stringify({ intent: "create", dir: "/mnt/proj", dir_source: "given", title: "x" }),
+    };
+    cleanup = await setup({ quickNew: true, allowedRoots: [QN_BASE] });
+    await deliver(msg("用 /mnt/proj 建个会话", { messageId: "om_qn_given" }));
+    await vi.waitFor(() => expect(findPatched("setup_form")).toContain("setup_form"));
+    const { json, fields } = lastFormCard();
+    const dirInput = fields.find((e) => e.name === "dir") as { default_value?: string } | undefined;
+    expect(dirInput?.default_value ?? "").toBe("");
+    expect(json).toContain("不可用");
+    expect(json).toContain("/mnt/proj");
   });
 
   // ── 任务 B：/model 切换后读回校验（集成） ─────────────────────────────

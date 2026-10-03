@@ -66,6 +66,22 @@ describe("validateDirectory（目录容错：空=允许根 / 不存在=创建）
     expect(d.created).toEqual([`${HOME}/work/new-app`]);
   });
 
+  test("干校验（create=false）：范围内新目录 → ok 且不创建（表单预填用）", () => {
+    const d = deps({ [HOME]: true });
+    const res = validateDirectory(`${HOME}/work/dry`, ROOTS, d, { create: false });
+    expect(res).toEqual({ ok: true, path: `${HOME}/work/dry` });
+    expect(d.created).toEqual([]);
+  });
+
+  test("干校验（create=false）：越界依旧拒绝，不创建", () => {
+    const d = deps({ [HOME]: true });
+    expect(validateDirectory("/data/proj", ROOTS, d, { create: false })).toMatchObject({
+      ok: false,
+      reason: "outside_allowed",
+    });
+    expect(d.created).toEqual([]);
+  });
+
   test("不存在的目录但越出允许根 → 拒绝且**不创建**", () => {
     const d = deps({ [HOME]: true });
     expect(validateDirectory("/data/proj", ROOTS, d)).toMatchObject({ ok: false, reason: "outside_allowed" });

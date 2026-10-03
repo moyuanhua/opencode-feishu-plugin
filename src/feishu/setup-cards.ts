@@ -228,6 +228,8 @@ export interface SetupFormCardInput {
   readonly allowedRoots?: readonly string[];
   /** 校验失败时的错误说明（会保留 `values` 已填项）。 */
   readonly error?: string;
+  /** 顶部说明（如目录来源：“✓ 匹配历史目录”“➕ AI 新建”等），可选。 */
+  readonly notice?: string;
   /** 预填/回显值。 */
   readonly values?: SetupFormValuesInput;
 }
@@ -331,6 +333,9 @@ export function buildSetupFormCard(input: SetupFormCardInput): object {
   const formElements: object[] = [];
   if (input.error) {
     formElements.push({ tag: "markdown", content: truncateCardContent(`⚠️ **提交失败**：${input.error}`) });
+  }
+  if (input.notice) {
+    formElements.push({ tag: "markdown", content: truncateCardContent(input.notice) });
   }
   formElements.push(
     { tag: "markdown", content: truncateCardContent(lines.join("\n")) },
