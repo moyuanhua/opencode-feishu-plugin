@@ -14,20 +14,20 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("touchLocationOverHttp", () => {
-  test("双通道：会话级 GET（LayerMap）+ 探针会话（LocationActivity）", async () => {
-    const calls: Array<{ method: string; url: string; body?: unknown }> = [];
+  test("主力位置通道：GET /api/plugin（query+头双重绑定）+ 辅助探针会话", async () => {
+    const calls: Array<{ method: string; url: string; headers: Record<string, string>; body?: unknown }> = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
       calls.push({
         method: init?.method ?? "GET",
         url,
+        headers,
         ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
       });
-      if (url.includes("/api/session?") && (init?.method ?? "GET") === "GET") {
-        return jsonResponse({ data: [{ id: "ses_existing" }], cursor: {} });
+      if (init?.method === "POST" && url.endsWith("/api/session")) {
+        return jsonResponse({ data: { id: "ses_probe" } });
       }
-      if (init?.method === "POST") return jsonResponse({ data: { id: "ses_probe" } });
-      if (init?.method === "DELETE") return new Response(null, { status: 204 });
-      return jsonResponse({ data: { id: "ses_existing" } });
+      return jsonResponse({ data: [{ id: "plugin-1" }] });
     }) as unknown as typeof fetch;
 
     const ok = await touchLocationOverHttp("/home/ubuntu", {
@@ -37,28 +37,27 @@ describe("touchLocationOverHttp", () => {
     });
 
     expect(ok).toBe(true);
-    // ① 列出该 location 的会话（带 directory 过滤）
-    expect(calls[0]!.url).toContain("/api/session?");
-    expect(calls[0]!.url).toContain("directory=%2Fhome%2Fubuntu");
-    // ② 会话级 GET（LayerMap.get → 续期/重建）
-    expect(calls[1]!.method).toBe("GET");
-    expect(calls[1]!.url).toContain("/api/session/ses_existing");
-    // ③ 探针创建（session.created 事件）
-    expect(calls[2]!.method).toBe("POST");
-    expect(calls[2]!.url).toBe("http://127.0.0.1:3000/api/session");
-    expect(calls[2]!.body).toMatchObject({ location: { directory: "/home/ubuntu" } });
-    // ④ 探针也走一次会话级 GET（location 重建触发点），再删除
-    expect(calls[3]!.method).toBe("GET");
-    expect(calls[3]!.url).toContain("/api/session/ses_probe");
-    expect(calls[4]!.method).toBe("DELETE");
-    expect(calls[4]!.url).toContain("/api/session/ses_probe");
+    // ① 主力：/api/plugin + location 绑定（query 参数 + x-opencode-directory 头，实测均有效）
+    expect(calls[0]!.method).toBe("GET");
+    expect(calls[0]!.url).toBe(
+      "http://127.0.0.1:3000/api/plugin?location%5Bdirectory%5D=%2Fhome%2Fubuntu",
+    );
+    expect(calls[0]!.headers["x-opencode-directory"]).toBe(encodeURIComponent("/home/ubuntu"));
+    expect(calls[0]!.headers.authorization).toContain("Basic ");
+    // ② 辅助：探针会话创建（带 location 绑定头 + body location），随后删除
+    expect(calls[1]!.method).toBe("POST");
+    expect(calls[1]!.url).toBe("http://127.0.0.1:3000/api/session");
+    expect(calls[1]!.body).toMatchObject({ location: { directory: "/home/ubuntu" } });
+    expect(calls[1]!.headers["x-opencode-directory"]).toBe(encodeURIComponent("/home/ubuntu"));
+    expect(calls[2]!.method).toBe("DELETE");
+    expect(calls[2]!.url).toContain("/api/session/ses_probe");
   });
 
-  test("无可选会话时仍走探针事件通道", async () => {
+  test("位置探针失败时仍可依赖探针会话（touched 取并集）", async () => {
     const calls: string[] = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
       calls.push(`${init?.method ?? "GET"} ${url}`);
-      if (url.includes("/api/session?") && init?.method !== "POST") return jsonResponse({ data: [] });
+      if (url.includes("/api/plugin")) return new Response("nope", { status: 503 });
       if (init?.method === "POST") return jsonResponse({ data: { id: "ses_probe" } });
       return new Response(null, { status: 204 });
     }) as unknown as typeof fetch;
@@ -70,6 +69,28 @@ describe("touchLocationOverHttp", () => {
     });
     expect(ok).toBe(true);
     expect(calls.some((c) => c.startsWith("POST"))).toBe(true);
+  });
+
+  test("无 directory：不带 location 绑定（查询串/头/body 均为空）", async () => {
+    const calls: Array<{ url: string; headers: Record<string, string>; body?: unknown }> = [];
+    const fetchImpl = (async (url: string, init?: RequestInit) => {
+      calls.push({
+        url,
+        headers: (init?.headers ?? {}) as Record<string, string>,
+        ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
+      });
+      return jsonResponse({ data: [] });
+    }) as unknown as typeof fetch;
+
+    const ok = await touchLocationOverHttp("", {
+      log,
+      discover: async () => ({ url: "http://127.0.0.1:3000" }),
+      fetchImpl,
+    });
+    expect(ok).toBe(true);
+    expect(calls[0]!.url).toBe("http://127.0.0.1:3000/api/plugin");
+    expect(calls[0]!.headers["x-opencode-directory"]).toBeUndefined();
+    expect(calls[1]!.body).not.toHaveProperty("location");
   });
 
   test("全部请求失败 → false（不抛错）", async () => {
@@ -183,6 +204,51 @@ describe("ensureGatewayWatchdog（进程级）", () => {
     await vi.advanceTimersByTimeAsync(1200);
     expect(newProbe).toHaveBeenCalled();
     expect(oldProbe).not.toHaveBeenCalled();
+  });
+
+  test("独立日志 sink：只创建一次、不被后续登记替换、定时器里持续写入", async () => {
+    vi.useFakeTimers();
+    const lines: string[] = [];
+    const closes: number[] = [];
+    let sinks = 0;
+    const makeSink = (): { sink: (line: string) => void; close: () => void } => {
+      sinks += 1;
+      return { sink: (line) => lines.push(line), close: () => closes.push(1) };
+    };
+    const fetchImpl = (async () => jsonResponse({ data: [] })) as unknown as typeof fetch;
+    const started = ensureGatewayWatchdog({
+      log,
+      directory: "/gw",
+      intervalMs: 1000,
+      immediateDelayMs: 10,
+      logFile: "/tmp/watchdog-test.log",
+      logLevel: "debug",
+      makeSink,
+      touchDeps: { discover: async () => ({ url: "http://127.0.0.1:3000" }), fetchImpl },
+    });
+    expect(started).toBe(true);
+    expect(sinks).toBe(1);
+
+    // 重复登记（模拟热重载）：不重建 sink、不关闭、沿用注入依赖
+    ensureGatewayWatchdog({
+      log,
+      directory: "/gw",
+      intervalMs: 1000,
+      logFile: "/tmp/watchdog-test.log",
+      makeSink,
+    });
+    expect(sinks).toBe(1);
+    expect(closes).toHaveLength(0);
+
+    // 定时器触发：默认探针把「启动」与「心跳」写进独立 sink（实例 logger 不参与）
+    await vi.advanceTimersByTimeAsync(1200);
+    const joined = lines.join("\n");
+    expect(joined).toContain("网关看门狗已启动");
+    expect(joined).toContain("保活心跳已发送");
+
+    // reset 才关闭独立 sink
+    resetGatewayWatchdogForTest();
+    expect(closes).toHaveLength(1);
   });
 
   test("探测失败不抛错", async () => {

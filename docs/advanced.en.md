@@ -25,22 +25,29 @@ opencode **recycles idle locations**, which disposes the plugin and closes the F
 
 | Mechanism | Where | Trigger | Behavior |
 |---|---|---|---|
-| LayerMap `idleTimeToLive` | `packages/core/src/location-services.ts` (hardcoded `60 minutes`) | No **session-level request** for 60 min | Location services destroyed (silent) |
-| `@opencode/LocationActivity` | Also hardcoded 60 min | No **durable event with location** for 60 min | Interrupts active sessions, then `invalidate(location)`; logs `location services evicted` |
+| LayerMap `idleTimeToLive` | `packages/core/src/location-services.ts` (hardcoded `60 minutes`) | No **location-bound base-route request** for 60 min (`locations.get()`) | Location services destroyed (silent) |
+| `@opencode/LocationActivity` | Also hardcoded 60 min | No **event carrying that location** for 60 min | Interrupts active sessions, then `invalidate(location)`; logs `location services evicted` |
 
 Either one disposes the plugin (Feishu long connection closes). **After that, if the location gets no further requests the plugin won't self-recover → the bot goes permanently silent** (upstream issues: [#51343](https://github.com/anomalyco/opencode/issues/51343), [#51891→#48691](https://github.com/anomalyco/opencode/issues/48691), [#51828](https://github.com/anomalyco/opencode/issues/51828); the TTL has no config option).
 
-The plugin ships two built-in defenses (both on by default, **no external script required**):
+### Measured locally (v2.0.16, decompiled + verified point by point)
 
-1. **Gateway keep-alive** (every 20 min, `keepaliveIntervalMs`): ① a session-level `GET /api/session/{id}` → `locations.get()` renews LayerMap, rebuilding the location if it was already reclaimed; ② create + GET + delete a probe session → renews `LocationActivity` (via the `session.created` event).
-2. **Process-level gateway watchdog** (also every 20 min, one timer per process): every plugin instance in any location registers; it periodically issues a session-level GET against the gateway location. Effects:
-   - Even if the gateway instance was reclaimed, as long as **another location** in the process is alive (e.g. you opened TUI/Web in another project), the gateway gets revived automatically;
-   - **After a service restart**, the watchdog starts the first time you use any location (and probes once ~3 seconds later), bringing the gateway back online;
-   - The first probe has a 3-second delay, so recovery after restart is quick.
+- Session routes (`GET/POST /api/session*`) do **not** call `locations.get()`: they can neither renew LayerMap nor **rebuild** a reclaimed location (the old "keep-alive/rebuild via session requests" assumption was wrong);
+- `GET /api/plugin` **does** call `locations.get()`: it renews LayerMap and **directly rebuilds** a reclaimed location (log `location services booted`; the plugin reloads and the long connection reconnects). Bind the location with either the `location[directory]` query parameter or the `x-opencode-directory` header — both verified;
+- The `globalThis` slot is **shared across locations within the process** (verified: an instance in another location can see the first instance's process guard) → **the process-level timer lives as long as the process**.
 
-> **No external scripts / cron / systemd needed**: both defenses run inside the plugin process.
+### Two defenses (on by default, **no external script required**)
+
+1. **Gateway keep-alive** (every 20 min, `keepaliveIntervalMs`): `GET /api/plugin` (location-bound) → renews LayerMap; plus create + delete a probe session (auxiliary, to attempt a `LocationActivity` renewal).
+2. **Process-level gateway watchdog** (also every 20 min, one timer per process): every plugin instance in any location registers; the timer lives on process-wide `globalThis` and **survives the instance**. Effects:
+   - After the gateway location is reclaimed (including the **single-location / headless** case), the next heartbeat uses `GET /api/plugin` to **rebuild the location** → the plugin reloads and the Feishu connection reconnects (self-heal within ≤ `keepaliveIntervalMs`);
+   - The watchdog holds an **independent log sink** (not closed by instance cleanup, not replaced by later hot-reload instances' loggers), so post-eviction heartbeat logs still reach disk for diagnostics;
+   - After a service restart, it starts on the first plugin load (probing once ~3 seconds later).
+
+> **No external scripts / cron / systemd needed**: all of the above runs inside the plugin process.
 > The only uncovered case is "the whole opencode process is down and nobody uses it for a long time" — no plugin can act then;
-> the watchdog restores automatically when opencode is used again. `keepalive: false` disables all keep-alive.
+> it recovers when opencode is used again. `keepalive: false` disables all keep-alive.
+> Note: the `LocationActivity` 60-minute recycle **cannot be reliably prevented from the plugin side**; the guarantee here is "self-heal within one heartbeat interval after eviction".
 
 ## Watchdog staleness rules
 
@@ -211,7 +218,7 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `attachmentMaxBytes` | number | `20971520` | Max size per attachment (1–100MB); larger ones are rejected with a notice |
 | `attachmentTimeoutMs` | number | `30000` | Attachment download timeout (5–120s) |
 | `attachmentsDir` | string | `<session workdir>/.opencode/temp/opencode-feishu-plugin` | Attachment directory; an explicit value is used verbatim (no extra subdir). When unset and the session directory is unknown, falls back to `<tmp>/opencode-feishu-plugin` |
-| `keepalive` | boolean | `true` | **Location keep-alive**: periodically sends activity to opencode to prevent the 60-min idle recycling (which would close the Feishu connection and silence the bot) |
+| `keepalive` | boolean | `true` | **Location keep-alive**: periodically `GET /api/plugin` to renew the location; after eviction the **process-level watchdog** rebuilds it within one heartbeat interval (self-heal, incl. single-location / headless) |
 | `keepaliveIntervalMs` | number | `1200000` | Keep-alive interval (default 20 min, clamped 5–45); must stay well below opencode's hardcoded 60-min TTL |
 
 ## Development

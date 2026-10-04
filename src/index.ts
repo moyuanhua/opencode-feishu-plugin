@@ -13,12 +13,10 @@
  * 进程级幂等：opencode 会随不同 location 多次 setup，这里用 `SetupGuard` 保证只启动一份。
  */
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { createWriteStream, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Plugin } from "@opencode/plugin";
 import { hasSecret, resolveConfig } from "./config.js";
-import { createLogger, errorMessage, maskId } from "./logger.js";
+import { createLogger, createLogSink, errorMessage, maskId } from "./logger.js";
 import {
   acquireProcessGuard,
   markExactGateway,
@@ -131,9 +129,11 @@ export default Plugin.define({
     });
 
     // 进程级网关看门狗（P8.1）：**每个** location 的实例都登记，但整个进程只跑一个定时器，
-    // 周期性对网关 location 做一次会话级 GET（续期 LayerMap；若已被回收则重建 location）。
-    // 这样即便网关实例已随之销毁，只要还有任意 location 存活（或服务重启后首次使用
-    // 任意 location），网关就会被自动救活——无需外部 cron。
+    // 周期性对网关 location 发一次 `GET /api/plugin`（base location 路由，实测唯一能触发
+    // `locations.get()` 的通道）：续期 LayerMap；若已被回收则**重建 location**。
+    // 定时器挂在进程级 globalThis 上（跨 location 共享），**与进程同寿**——即使唯一实例
+    // 随 location 被销毁，看门狗仍会把它救回来（无需外部 cron）。独立日志 sink 保证
+    // 实例卸载后的心跳日志仍能落盘。
     const here = (ctx.location as { directory?: string } | undefined)?.directory;
     let startedWatchdog = false;
     if (config.keepalive) {
@@ -144,6 +144,8 @@ export default Plugin.define({
             log,
             directory: watchdogTarget,
             intervalMs: config.keepaliveIntervalMs,
+            logFile: config.logFile,
+            logLevel: config.logLevel,
           });
         } catch (err) {
           // 保活是**辅助能力**：任何异常都绝不能影响插件加载（飞书长连接）。
@@ -1427,13 +1429,13 @@ async function start(
   }
 
   /**
-   * 位置保活（P8）：opencode 的 `LocationActivity` 对每个 location 有 60 分钟
-   * 空闲 TTL，到期会回收 location 服务（卸载插件 → 飞书长连接被关闭），且此后
-   * 若无请求就不再恢复 → 机器人永久沉默。周期性发一次带 location 的事件即可保活。
+   * 位置保活（P8）：opencode 对每个 location 有两条 60 分钟空闲回收路径（LayerMap /
+   * LocationActivity），到期会卸载插件（飞书长连接被关闭）。周期性 `GET /api/plugin`
+   * 续期；已被回收时该请求直接重建 location（看门狗随进程存活，装卸后仍能自愈）。
    */
   const here = (ctx.location as { directory?: string } | undefined)?.directory;
   const keepaliveDirectory = here ?? config.gatewayLocation;
-  // 网关实例「权威」更新看门狗目标为自身实际目录（会话按该目录检索最准）。
+  // 网关实例「权威」更新看门狗目标为自身实际目录。
   if (config.keepalive && keepaliveDirectory) {
     try {
       ensureGatewayWatchdog({
@@ -1442,6 +1444,8 @@ async function start(
         intervalMs: config.keepaliveIntervalMs,
         authoritative: true,
         immediateDelayMs: 0,
+        logFile: config.logFile,
+        logLevel: config.logLevel,
       });
     } catch (err) {
       log.warn("网关看门狗登记失败（已忽略）", { error: errorMessage(err) });
@@ -1483,29 +1487,8 @@ async function start(
 /**
  * opencode 以服务方式运行时，插件 stderr 会被丢弃（fd 2 是 socket，fd 1 是 /dev/null），
  * 所以 `logFile` 配置时把日志同时追加写入文件。写入失败只回退 stderr，绝不影响插件。
+ * （实现在 `logger.ts`：进程级看门狗也用它创建**独立于实例**的 sink。）
  */
-function createLogSink(logFile: string | undefined): { sink: (line: string) => void; close: () => void } | undefined {
-  if (!logFile) return undefined;
-  try {
-    mkdirSync(dirname(logFile), { recursive: true });
-    const stream = createWriteStream(logFile, { flags: "a", mode: 0o600 });
-    stream.on("error", () => {});
-    return {
-      sink: (line: string) => {
-        stream.write(line);
-      },
-      close: () => {
-        try {
-          stream.end();
-        } catch {
-          /* ignore */
-        }
-      },
-    };
-  } catch {
-    return undefined;
-  }
-}
 
 /**
  * 插件层字段名是 `reply`，HTTP 层是 `decision`（见 OPENCODE_PERMISSION_API.md §3.3）。

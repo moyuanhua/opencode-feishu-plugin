@@ -4,6 +4,8 @@
  * 安全红线：任何 secret（appSecret / token）都不允许进入日志字段。
  * 需要表达「有没有」时只记录布尔值（见 config.ts 的 `hasAppSecret`）。
  */
+import { createWriteStream, mkdirSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Logger, LogLevel } from "./types.js";
 
 const LEVEL_ORDER: Record<LogLevel, number> = {
@@ -80,4 +82,40 @@ export function errorMessage(err: unknown): string {
   if (err instanceof Error) return err.message;
   if (isRecord(err) && typeof err.msg === "string") return err.msg;
   return String(err);
+}
+
+/** 文件日志 sink（append 模式）。`close()` 只应在确定不再写入时调用。 */
+export interface LogSink {
+  readonly sink: (line: string) => void;
+  readonly close: () => void;
+}
+
+/**
+ * opencode 以服务方式运行时，插件 stderr 会被丢弃（fd 2 是 socket，fd 1 是 /dev/null），
+ * 所以 `logFile` 配置时把日志同时追加写入文件。写入失败只回退 stderr，绝不影响插件。
+ *
+ * 除插件实例外，**进程级看门狗**也会用本函数创建**一口独立的** sink——
+ * 前者随实例 cleanup `close()`，后者与进程同寿、绝不随实例销毁关闭。
+ */
+export function createLogSink(logFile: string | undefined): LogSink | undefined {
+  if (!logFile) return undefined;
+  try {
+    mkdirSync(dirname(logFile), { recursive: true });
+    const stream = createWriteStream(logFile, { flags: "a", mode: 0o600 });
+    stream.on("error", () => {});
+    return {
+      sink: (line: string) => {
+        stream.write(line);
+      },
+      close: () => {
+        try {
+          stream.end();
+        } catch {
+          /* ignore */
+        }
+      },
+    };
+  } catch {
+    return undefined;
+  }
 }

@@ -25,22 +25,29 @@ opencode 会**回收空闲的 location**，这会连带卸载插件、关闭飞�
 
 | 机制 | 位置 | 触发条件 | 表现 |
 |---|---|---|---|
-| LayerMap `idleTimeToLive` | `packages/core/src/location-services.ts`（硬编码 `60 minutes`） | 60 分钟内无**会话级请求** | location 服务被销毁（静默） |
-| `@opencode/LocationActivity` | 同为硬编码 60 分钟 | 60 分钟内无**带 location 的 durable 事件** | 先 interrupt 活动会话，再 `invalidate(location)`，日志 `location services evicted` |
+| LayerMap `idleTimeToLive` | `packages/core/src/location-services.ts`（硬编码 `60 minutes`） | 60 分钟内无**带 location 的 base 路由请求**（`locations.get()`） | location 服务被销毁（静默） |
+| `@opencode/LocationActivity` | 同为硬编码 60 分钟 | 60 分钟内无**带该 location 的事件** | 先 interrupt 活动会话，再 `invalidate(location)`，日志 `location services evicted` |
 
 两者都会让插件被 dispose（飞书长连接关闭）。**此后若该 location 再无请求，插件不会自行恢复 → 机器人永久沉默**（官方 issue：[#51343](https://github.com/anomalyco/opencode/issues/51343)、[#51891→#48691](https://github.com/anomalyco/opencode/issues/48691)、[#51828](https://github.com/anomalyco/opencode/issues/51828)；TTL 无配置项）。
 
-插件内置两道防线（都是默认开启，**无需任何外部脚本**）：
+### 本机实测（v2.0.16，源码反编译 + 逐项验证）
 
-1. **网关保活**（每 20 分钟，`keepaliveIntervalMs`）：① 会话级 `GET /api/session/{id}` → `locations.get()` 续期 LayerMap，若已被回收则**重建 location**；② 创建 + GET + 删除一个探针会话 → 续期 `LocationActivity`（`session.created` 事件）。
-2. **进程级网关看门狗**（同样每 20 分钟，每进程仅一个定时器）：**任意** location 的插件实例都会登记，周期性对网关 location 做会话级 GET。效果：
-   - 网关实例即使已被回收，只要进程里还有**别的** location 存活（例如你在别的项目里开了 TUI/Web），网关会被自动救活；
-   - **服务重启后**，你第一次使用任意 location 时看门狗即启动（并在约 3 秒后立即探测一次），网关随之上线；
-   - 首次探测带 3 秒延迟，重启后恢复很快。
+- 会话路由（`GET/POST /api/session*`）**不**调用 `locations.get()`：既不能续期 LayerMap，也**不能重建**已回收的 location（旧实现"用会话请求保活 / 重建"的假设不成立）；
+- `GET /api/plugin` 会调用 `locations.get()`：**续期 LayerMap；location 已回收时直接重建**（日志 `location services booted`，插件重新加载、长连接重连）。location 绑定用 `location[directory]` 查询参数或 `x-opencode-directory` 头，二者均实测有效；
+- `globalThis` 槽位在本进程内**跨 location 共享**（实测：另一个 location 的实例能看到首个实例的进程守卫）→ **进程级定时器与进程同寿**。
 
-> **不需要任何外部脚本 / cron / systemd 配置**：以上两道防线都在插件进程内完成。
+### 两道防线（默认开启，**无需任何外部脚本**）
+
+1. **网关保活**（每 20 分钟，`keepaliveIntervalMs`）：`GET /api/plugin`（带 location 绑定）→ 续期 LayerMap；另创建 + 删除一个探针会话（辅助，尝试触发 `LocationActivity` 续期）。
+2. **进程级网关看门狗**（同样每 20 分钟，每进程仅一个定时器）：**任意** location 的插件实例都会登记；定时器挂在进程级 `globalThis` 上，**与进程同寿**。效果：
+   - 网关 location 被回收后（含**单 location / headless** 场景），下一拍心跳即用 `GET /api/plugin` **重建 location** → 插件重新加载、飞书长连接重连（自愈间隔 ≤ `keepaliveIntervalMs`）；
+   - 看门狗持有**独立的日志 sink**（不随实例 cleanup 关闭、也不会被后续热重载实例的 logger 覆盖），被回收后的心跳日志仍会落盘，便于事后诊断；
+   - 服务重启后，第一次加载插件即启动（约 3 秒后立即探测一次）。
+
+> **不需要任何外部脚本 / cron / systemd 配置**：以上机制都在插件进程内完成。
 > 唯一无法覆盖的是「opencode 进程整个挂掉且长时间无人使用」——此时任何插件都无从执行；
-> 重新使用 opencode 时会由看门狗自动恢复。`keepalive: false` 可关闭全部保活。
+> 重新使用 opencode 时会恢复。`keepalive: false` 可关闭全部保活。
+> 注意：`LocationActivity` 的 60 分钟回收**无法从插件侧可靠阻止**，本插件的保证是「被回收后一个心跳间隔内自愈」。
 
 ## 看门狗判活规则
 
@@ -211,7 +218,7 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `attachmentMaxBytes` | number | `20971520` | 单附件大小上限（1–100MB），超限拒绝并提示 |
 | `attachmentTimeoutMs` | number | `30000` | 附件下载超时（5–120s） |
 | `attachmentsDir` | string | `<会话工作目录>/.opencode/temp/opencode-feishu-plugin` | 附件落盘目录；显式配置则精确使用（不再附加子目录），未配置时无法确定会话目录则回退系统临时目录 `<tmp>/opencode-feishu-plugin` |
-| `keepalive` | boolean | `true` | **位置保活**：周期性向 opencode 发一次活动，阻止 60 分钟空闲回收 location（会关掉飞书长连接、机器人失联） |
+| `keepalive` | boolean | `true` | **位置保活**：周期性 `GET /api/plugin` 续期 location；被回收后由**进程级看门狗**在一个心跳间隔内重建（自愈，含单 location / headless 场景） |
 | `keepaliveIntervalMs` | number | `1200000` | 保活间隔（默认 20 分钟，夹取 5–45）；必须显著小于 opencode 硬编码的 60 分钟 TTL |
 
 ## 开发
