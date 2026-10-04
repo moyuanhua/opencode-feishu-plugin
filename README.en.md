@@ -216,7 +216,8 @@ Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepa
 | Button click says invalid credential | Token expired (10 min default) or clicker not in allowlist |
 | Session seems stuck, messages only queue | Watchdog auto-interrupts after 5 min (never while a form / approval is pending; `staleExecutionMs: 0` disables it); or tap "⏹ force stop" / send `/stop` |
 | Bot goes silent after ~1h idle | opencode recycles idle locations; the built-in watchdog rebuilds it within one heartbeat interval (incl. single-location), see [docs/advanced.en.md](./docs/advanced.en.md#location-keep-alive) |
-| Can't see plugin logs | stderr is discarded in server mode; set `logFile: true` |
+| Plugin reloads frequently / WS reconnects repeatedly | `logFile` points inside the opencode **config directory** (writing logs there counts as a config change → a reload per log write). Use the default, or move the log outside the config dir (default `~/.local/state/opencode/feishu-plugin.log`) |
+| Can't see plugin logs | stderr is discarded in server mode; set `logFile: true` (writes `~/.local/state/opencode/feishu-plugin.log` by default) |
 | Multiple long connections / duplicate replies | Set `gatewayLocation` to a common working directory, see [docs/advanced.en.md](./docs/advanced.en.md#multiple-instances-and-gateway-election) |
 
 ## 6. Known limitations
@@ -239,6 +240,7 @@ Iterating from real usage feedback; current plan:
 
 | Version | Highlights |
 |---|---|
+| **v0.2.18** | Fix the **log-triggered plugin reload storm**: the default log moves to `~/.local/state/opencode/feishu-plugin.log` (opencode watches the whole config directory; writing any file there counts as a config change → a plugin reload per log write and constant WS reconnects); explicitly putting the log inside the config dir now raises a warning |
 | **v0.2.17** | Location keep-alive rebuilt: the probe now uses `GET /api/plugin` (measured as the only channel that renews / rebuilds a location); the process-level watchdog holds an **independent log sink**, so a **single-location / headless** server self-heals within one heartbeat interval after eviction (no external cron) |
 | **v0.2.16** | Session creation is **directory-first**: the AI pins the working directory before prefilling the form, so the form never has an empty directory; directory candidates now include the **first-level subdirectories of allowed roots**, preferring an existing directory before creating a new one |
 | **v0.2.15** | **AI session management** (the main chat lets the AI judge intent and return a prefilled form / session list); **new messages cut in by default when busy** (`busyDelivery: "queue"` to queue instead); fix transient generation always failing under opencode-go |

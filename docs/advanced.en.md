@@ -194,7 +194,7 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `topicGuidance` | boolean | `true` | Injects a lightweight system note into Feishu sessions (off-topic → `/new`), non-blocking; never for local sessions |
 | `recentDirsLimit` / `recentModelsLimit` | number | `5` | Form "recently used" count (1–20) |
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | Log level |
-| `logFile` | string \| boolean | — | `true` = write `<configDir>/plugins/feishu.log`; recommended in server mode |
+| `logFile` | string \| boolean | — | `true` = write `<stateDir>/opencode/feishu-plugin.log` (default `~/.local/state/opencode/`); **never put it inside the opencode config directory** — writing any file there counts as a config change and reloads the plugin (every log write reloads; self-amplifying during activity); recommended in server mode |
 | `gatewayLocation` | string | — | Only start the gateway at this location (or **subdirectories** as fallback); `~` expands, relative / trailing slash normalized. Empty = any location works |
 | `gatewayMatchGraceMs` | number | `3000` | **Exact-match-first** grace window: subdirectory candidates wait this long for a `here === gatewayLocation` instance (0 = no wait, immediate fallback) |
 | `approvalTtlMs` | number | `600000` | Approval token / card validity |

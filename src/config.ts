@@ -8,11 +8,18 @@
 import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import type { LogLevel, PermissionGate, RawOptions } from "./types.js";
 
-/** 默认日志文件（相对 configDir）：`<configDir>/plugins/feishu.log`。 */
-const LOG_FILE_RELATIVE = ["plugins", "feishu.log"] as const;
+/**
+ * 默认日志文件：`<stateDir>/opencode/feishu-plugin.log`（默认 `~/.local/state/opencode/`）。
+ *
+ * **绝不要放进 opencode 配置目录内**：opencode 监听整个 `<configDir>`，在其中写任何文件
+ * 都会被当成配置变更 → 触发**插件重载**；日志每次写入都触发一次重载（活跃期自放大成
+ * "写日志 → 重载 → 再写日志"的风暴，长连接反复断开重连）。实测（v2.0.16 / v2.0.18）：
+ * 往 `<configDir>` 写一个文件约 0.2s 内插件即被重载；写 state/data 目录无此现象。
+ */
+const LOG_FILE_STATE_RELATIVE = ["opencode", "feishu-plugin.log"] as const;
 
 export interface ResolvedConfig {
   readonly enabled: boolean;
@@ -210,6 +217,8 @@ const CONFIG_FILE_RELATIVE = ["plugins", "feishu.json"] as const;
 export interface ResolveConfigDeps {
   /** 显式覆盖 configDir；默认取 `OPENCODE_CONFIG_DIR` 或 `~/.config/opencode`。 */
   readonly configDir?: string;
+  /** 显式覆盖 stateDir；默认取 `XDG_STATE_HOME` 或 `~/.local/state`（默认日志路径基座）。 */
+  readonly stateDir?: string;
   /** 读取文本文件；默认 `fs.readFileSync(path, "utf8")`。 */
   readonly readFile?: (path: string) => string;
 }
@@ -286,7 +295,7 @@ export function resolveConfig(
     45 * 60 * 1000,
   );
   const domain = merged.domain === "lark" ? "lark" : "feishu";
-  const logFile = resolveLogFile(merged.logFile, env, deps);
+  const logFile = resolveLogFile(merged.logFile, env, deps, warnings);
   const gatewayLocation = normalizeGatewayLocation(asString(merged.gatewayLocation));
   const gatewayMatchGraceMs = clamp(asNumber(merged.gatewayMatchGraceMs, 3000), 0, 10_000);
 
@@ -411,6 +420,14 @@ function resolveConfigDir(env: NodeJS.ProcessEnv, explicit: string | undefined):
   return join(homedir(), ".config", "opencode");
 }
 
+/** state 目录基座（与 `serviceStatePath` 一致）：`$XDG_STATE_HOME` 或 `~/.local/state`。 */
+function resolveStateDir(env: NodeJS.ProcessEnv, explicit: string | undefined): string {
+  if (explicit && explicit.trim()) return explicit.trim();
+  const fromEnv = asString(env.XDG_STATE_HOME).trim();
+  if (fromEnv) return fromEnv;
+  return join(homedir(), ".local", "state");
+}
+
 /**
  * 归一化 `gatewayLocation`：展开 `~`、转绝对路径、去尾斜杠，并尽力解析软链。
  *
@@ -447,14 +464,31 @@ export function resolveLogFile(
   raw: unknown,
   env: NodeJS.ProcessEnv,
   deps: ResolveConfigDeps,
+  warnings?: string[],
 ): string | undefined {
-  if (raw === true) return join(resolveConfigDir(env, deps.configDir), ...LOG_FILE_RELATIVE);
-  if (typeof raw !== "string") return undefined;
-  const expanded = expandEnv(raw.trim(), env);
-  if (!expanded) return undefined;
-  if (expanded === "true") return join(resolveConfigDir(env, deps.configDir), ...LOG_FILE_RELATIVE);
-  if (expanded.startsWith("~/")) return join(homedir(), expanded.slice(2));
-  return isAbsolute(expanded) ? expanded : join(resolveConfigDir(env, deps.configDir), expanded);
+  const stateDefault = (): string => join(resolveStateDir(env, deps.stateDir), ...LOG_FILE_STATE_RELATIVE);
+  let resolved: string | undefined;
+  if (raw === true) {
+    resolved = stateDefault();
+  } else if (typeof raw === "string") {
+    const expanded = expandEnv(raw.trim(), env);
+    if (expanded) {
+      if (expanded === "true") resolved = stateDefault();
+      else if (expanded.startsWith("~/")) resolved = join(homedir(), expanded.slice(2));
+      else resolved = isAbsolute(expanded) ? expanded : join(resolveConfigDir(env, deps.configDir), expanded);
+    }
+  }
+  if (resolved) {
+    // 兜底告警：日志落在 opencode 配置目录内 = 每次写日志都会触发配置变更 → 插件重载风暴。
+    const cfgDir = resolveConfigDir(env, deps.configDir);
+    if (resolved === cfgDir || resolved.startsWith(`${cfgDir}${sep}`)) {
+      warnings?.push(
+        `logFile 位于 opencode 配置目录内（${resolved}）：在配置目录中写日志会触发插件重载风暴，` +
+          `建议改用默认路径或配置目录之外的路径。`,
+      );
+    }
+  }
+  return resolved;
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

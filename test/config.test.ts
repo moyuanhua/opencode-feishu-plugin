@@ -496,3 +496,37 @@ describe("运行卡瘦身 / 最终答案拆分（P8.3）", () => {
     expect(resolveConfig({ ...base, finalAnswerFileMinBytes: 1 }, {}, noFile()).finalAnswerFileMinBytes).toBe(8192);
   });
 });
+
+describe("logFile（默认落 state 目录，绝不进配置监听目录）", () => {
+  const base = { appId: "a", appSecret: "b" };
+  const deps: ResolveConfigDeps = { configDir: "/cfg/opencode", stateDir: "/state", readFile: () => "" };
+
+  test("true → <stateDir>/opencode/feishu-plugin.log（写配置目录会触发插件重载风暴）", () => {
+    const cfg = resolveConfig({ ...base, logFile: true }, {}, deps);
+    expect(cfg.logFile).toBe("/state/opencode/feishu-plugin.log");
+    expect(cfg.warnings.join("\n")).not.toContain("配置目录");
+  });
+
+  test('字符串 "true" 同默认；相对路径仍相对 configDir（向后兼容）', () => {
+    expect(resolveConfig({ ...base, logFile: "true" }, {}, deps).logFile).toBe(
+      "/state/opencode/feishu-plugin.log",
+    );
+    expect(resolveConfig({ ...base, logFile: "my.log" }, {}, deps).logFile).toBe("/cfg/opencode/my.log");
+  });
+
+  test("绝对路径原样使用", () => {
+    expect(resolveConfig({ ...base, logFile: "/var/log/feishu.log" }, {}, deps).logFile).toBe(
+      "/var/log/feishu.log",
+    );
+  });
+
+  test("显式把日志放进配置目录 → 告警（避免重载风暴）", () => {
+    const cfg = resolveConfig(
+      { ...base, logFile: "/cfg/opencode/plugins/feishu.log" },
+      {},
+      deps,
+    );
+    expect(cfg.logFile).toBe("/cfg/opencode/plugins/feishu.log");
+    expect(cfg.warnings.join("\n")).toContain("配置目录");
+  });
+});

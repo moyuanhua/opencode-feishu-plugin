@@ -194,7 +194,7 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `topicGuidance` | boolean | `true` | 对飞书会话注入一句轻量 system 说明（离题可 `/new`），不拦截；本地会话绝不注入 |
 | `recentDirsLimit` / `recentModelsLimit` | number | `5` | 表单「最近使用」条数（1–20） |
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | 日志级别 |
-| `logFile` | string \| boolean | — | `true` = 写 `<configDir>/plugins/feishu.log`；服务模式建议开启 |
+| `logFile` | string \| boolean | — | `true` = 写 `<stateDir>/opencode/feishu-plugin.log`（默认 `~/.local/state/opencode/`）；**切勿放进 opencode 配置目录**——在其中写任何文件都会被当成配置变更并触发插件重载（日志每次写入都会重载，活跃期自放大）；服务模式建议开启 |
 | `gatewayLocation` | string | — | 只在该 location（或其**子目录**兜底）启动网关；`~` 自动展开、相对路径/尾斜杠会归一化。留空 = 任意 location 生效 |
 | `gatewayMatchGraceMs` | number | `3000` | **精确匹配优先**的宽限窗口：子目录候选先等这么久，出现 `here === gatewayLocation` 就让位（0 = 不等待，子目录立即兜底） |
 | `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |

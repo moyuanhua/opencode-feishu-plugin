@@ -216,7 +216,8 @@ agent 反问时表单会变成飞书卡片，**点按钮或在话题里直接发
 | 点按钮提示凭证无效 | token 过期（默认 10 分钟）或点击者不在白名单 |
 | 会话像卡死、只排队 | 看门狗默认 5 分钟后自动中断（**待答表单 / 未决审批期间不中断**；`staleExecutionMs: 0` 可关闭）；也可点「⏹ 强制停止」或发 `/stop` |
 | 空闲约 1 小时后失联 | opencode 会回收空闲 location；内置看门狗会在一个心跳间隔内自动重建恢复（含单 location 场景），见 [docs/advanced.md](./docs/advanced.md#位置保活) |
-| 看不到插件日志 | 服务模式下 stderr 被丢弃，设 `logFile: true` |
+| 插件频繁重载 / 长连接反复重连 | `logFile` 落在了 opencode **配置目录**内（写日志会被当成配置变更 → 每次写日志都触发重载）。改用默认值，或把日志移到配置目录之外（默认 `~/.local/state/opencode/feishu-plugin.log`） |
+| 看不到插件日志 | 服务模式下 stderr 被丢弃，设 `logFile: true`（默认写 `~/.local/state/opencode/feishu-plugin.log`） |
 | 多个长连接 / 重复回复 | 设置 `gatewayLocation` 为常用工作目录，见 [docs/advanced.md](./docs/advanced.md#多实例与网关选举) |
 
 ## 六、已知限制
@@ -239,6 +240,7 @@ agent 反问时表单会变成飞书卡片，**点按钮或在话题里直接发
 
 | 版本 | 亮点 |
 |---|---|
+| **v0.2.18** | 修复**日志触发的插件重载风暴**：默认日志改为 `~/.local/state/opencode/feishu-plugin.log`（opencode 监听整个配置目录，在其中写文件会被当成配置变更 → 每次写日志都重载插件、长连接反复重连）；显式把日志放进配置目录会给出告警 |
 | **v0.2.17** | 位置保活重做：探针改用 `GET /api/plugin`（实测唯一能续期 / 重建 location 的通道）；进程级看门狗持**独立日志 sink**，**单 location / headless** 被回收后一个心跳间隔内自愈（无需外部 cron） |
 | **v0.2.16** | 建会话**目录优先**：AI 先定好工作目录再预填表单，表单永不空目录；目录候选新增「允许根目录的一级子目录」，先复用现成目录，找不到才按主题新建 |
 | **v0.2.15** | **AI 会话管理**（主聊天流由 AI 判意图，直接给预填表单 / 会话列表）；**忙时默认插队**（`busyDelivery: "queue"` 可切回排队）；修复 opencode-go 下临时生成必失败 |
