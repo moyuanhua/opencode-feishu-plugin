@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "vitest";
 import {
   ensureGatewayWatchdog,
+  resetFastReviveForTest,
   resetGatewayWatchdogForTest,
+  scheduleFastRevive,
   startKeepalive,
   touchLocationOverHttp,
 } from "../src/session/keepalive.js";
@@ -282,5 +284,55 @@ describe("ensureGatewayWatchdog 向后兼容", () => {
     ).not.toThrow();
     await vi.advanceTimersByTimeAsync(1200);
     expect(probe).toHaveBeenCalledWith("/gw");
+  });
+});
+
+describe("scheduleFastRevive（被驱逐后秒级复活）", () => {
+  afterEach(() => {
+    resetFastReviveForTest();
+    vi.useRealTimers();
+  });
+
+  test("按延迟序列多次探测（默认 1s/5s/20s）", async () => {
+    vi.useFakeTimers();
+    const touch = vi.fn(async () => true);
+    scheduleFastRevive({ log, directory: "/gw", touch });
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(touch).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(4000);
+    expect(touch).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(15000);
+    expect(touch).toHaveBeenCalledTimes(3);
+    expect(touch).toHaveBeenCalledWith("/gw");
+  });
+
+  test("幂等：已有计划在跑时不重复安排", async () => {
+    vi.useFakeTimers();
+    const touch = vi.fn(async () => true);
+    scheduleFastRevive({ log, directory: "/gw", touch });
+    scheduleFastRevive({ log, directory: "/gw", touch });
+    await vi.advanceTimersByTimeAsync(1200);
+    expect(touch).toHaveBeenCalledTimes(1);
+  });
+
+  test("计划结束后可再次安排（下一轮驱逐）", async () => {
+    vi.useFakeTimers();
+    const touch = vi.fn(async () => true);
+    scheduleFastRevive({ log, directory: "/gw", touch, delaysMs: [100] });
+    await vi.advanceTimersByTimeAsync(6000); // 100ms 尝试 + 5s 清理
+    const touch2 = vi.fn(async () => true);
+    scheduleFastRevive({ log, directory: "/gw", touch: touch2, delaysMs: [100] });
+    await vi.advanceTimersByTimeAsync(200);
+    expect(touch2).toHaveBeenCalledTimes(1);
+  });
+
+  test("探测失败不抛错", async () => {
+    vi.useFakeTimers();
+    const touch = vi.fn(async () => {
+      throw new Error("boom");
+    });
+    scheduleFastRevive({ log, directory: "/gw", touch, delaysMs: [50] });
+    await vi.advanceTimersByTimeAsync(100);
+    expect(touch).toHaveBeenCalled();
   });
 });

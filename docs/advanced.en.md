@@ -39,7 +39,8 @@ Either one disposes the plugin (Feishu long connection closes). **After that, if
 ### Two defenses (on by default, **no external script required**)
 
 1. **Gateway keep-alive** (every 20 min, `keepaliveIntervalMs`): `GET /api/plugin` (location-bound) → renews LayerMap; plus create + delete a probe session (auxiliary, to attempt a `LocationActivity` renewal).
-2. **Process-level gateway watchdog** (also every 20 min, one timer per process): every plugin instance in any location registers; the timer lives on process-wide `globalThis` and **survives the instance**. Effects:
+2. **Second-scale revive after eviction** (v0.2.20): on dispose the plugin immediately schedules three probes (+1s / +5s / +20s). Those timers live on the host process (they survive location teardown), so the location is re-created within **seconds** → plugin reloaded → WS reconnected. Outage per eviction drops from "up to one heartbeat (20 min)" to **~10 seconds** (hourly availability ~75% → ~99.7%).
+3. **Process-level gateway watchdog** (also every 20 min, one timer per process): every plugin instance in any location registers; the timer lives on process-wide `globalThis` and **survives the instance**. Effects:
    - After the gateway location is reclaimed (including the **single-location / headless** case), the next heartbeat uses `GET /api/plugin` to **rebuild the location** → the plugin reloads and the Feishu connection reconnects (self-heal within ≤ `keepaliveIntervalMs`);
    - The watchdog holds an **independent log sink** (not closed by instance cleanup, not replaced by later hot-reload instances' loggers), so post-eviction heartbeat logs still reach disk for diagnostics;
    - After a service restart, it starts on the first plugin load (probing once ~3 seconds later).
@@ -47,7 +48,7 @@ Either one disposes the plugin (Feishu long connection closes). **After that, if
 > **No external scripts / cron / systemd needed**: all of the above runs inside the plugin process.
 > The only uncovered case is "the whole opencode process is down and nobody uses it for a long time" — no plugin can act then;
 > it recovers when opencode is used again. `keepalive: false` disables all keep-alive.
-> Note: the `LocationActivity` 60-minute recycle **cannot be reliably prevented from the plugin side**; the guarantee here is "self-heal within one heartbeat interval after eviction".
+> Note: the `LocationActivity` 60-minute recycle **cannot be prevented from the plugin side** (measured on v2.0.18: location-carrying events a plugin can produce — `session.created` / `session.renamed` — do **not** renew its deadline, and the TTL has no config knob). The guarantee here is "**second-scale self-heal after eviction**" (since v0.2.20).
 
 ## Watchdog staleness rules
 
@@ -217,7 +218,7 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `attachmentMaxBytes` | number | `20971520` | Max size per attachment (1–100MB); larger ones are rejected with a notice |
 | `attachmentTimeoutMs` | number | `30000` | Attachment download timeout (5–120s) |
 | `attachmentsDir` | string | `<session workdir>/.opencode/temp/opencode-feishu-plugin` | Attachment directory; an explicit value is used verbatim (no extra subdir). When unset and the session directory is unknown, falls back to `<tmp>/opencode-feishu-plugin` |
-| `keepalive` | boolean | `true` | **Location keep-alive**: periodically `GET /api/plugin` to renew the location; after eviction the **process-level watchdog** rebuilds it within one heartbeat interval (self-heal, incl. single-location / headless) |
+| `keepalive` | boolean | `true` | **Location keep-alive**: periodically `GET /api/plugin` to renew the location; after eviction a **fast revive** rebuilds it within seconds (v0.2.20), with the **process-level watchdog** as a 20-min backstop |
 | `keepaliveIntervalMs` | number | `1200000` | Keep-alive interval (default 20 min, clamped 5–45); must stay well below opencode's hardcoded 60-min TTL |
 
 ## Development

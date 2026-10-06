@@ -39,7 +39,7 @@ import { startWatchdog } from "./feishu/watchdog.js";
 import { FormRelay, type FormReplyInput } from "./feishu/form-relay.js";
 import { cancelFormOverHttp, replyFormOverHttp } from "./feishu/form-reply.js";
 import { listSessionsOverHttp } from "./session/session-list-http.js";
-import { ensureGatewayWatchdog, startKeepalive } from "./session/keepalive.js";
+import { ensureGatewayWatchdog, scheduleFastRevive, startKeepalive } from "./session/keepalive.js";
 import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, parseCommand, topicTitle, type CommandName } from "./feishu/commands.js";
 import { decideRoute } from "./feishu/routing.js";
@@ -1513,6 +1513,15 @@ async function start(
     if (cleanedUp) return;
     cleanedUp = true;
     log.info("飞书插件卸载中");
+    // 位置驱逐无法阻止（opencode 硬编码 60 分钟 TTL）→ 卸载后立刻安排秒级复活，
+    // 把空窗从「最多 20 分钟」压到秒级。
+    if (config.keepalive && keepaliveDirectory) {
+      try {
+        scheduleFastRevive({ log, directory: keepaliveDirectory });
+      } catch (err) {
+        log.debug("快速复活安排失败（忽略）", { error: errorMessage(err) });
+      }
+    }
     abort.abort();
     stopWatchdog();
     stopKeepalive?.();

@@ -338,3 +338,81 @@ export function startKeepalive(deps: KeepaliveDeps): () => void {
     clearIntervalImpl(timer);
   };
 }
+
+/**
+ * 被驱逐后**快速复活**（P8.4）。
+ *
+ * 背景（实测 + 取证）：opencode 的 `LocationActivity` 对 location 有硬编码 60 分钟
+ * 空闲 TTL，且插件侧无法为其续期（`session.created` 等带 location 的事件不奏效）。
+ * 因此**驱逐无法阻止**；但插件被 dispose 后，其注册的 host 级定时器仍存活——
+ * 只要在 dispose 后立刻安排几次探针，就能把「空窗」从**最多 20 分钟**（等看门狗
+ * 下一拍）压缩到**秒级**。
+ *
+ * 注意：定时器挂在 `globalThis`（同进程只保留一组），回调只依赖传入的 log/目录，
+ * 不引用已销毁的插件状态；`unref()` 不阻塞进程退出。
+ */
+const FAST_REVIVE_SLOT = Symbol.for("opencode-feishu-v2/fast-revive");
+
+export interface FastReviveInput {
+  readonly log: Logger;
+  /** 目标 location 目录。 */
+  readonly directory: string;
+  /** 复活尝试的延迟序列（默认 1s / 5s / 20s）。 */
+  readonly delaysMs?: readonly number[];
+  /** 覆盖探测实现（测试用）。 */
+  readonly touch?: (directory: string) => Promise<boolean>;
+  readonly setTimeoutImpl?: typeof setTimeout;
+  readonly clearTimeoutImpl?: typeof clearTimeout;
+}
+
+/**
+ * 安排快速复活（幂等：已有待执行的复活计划时不重复安排）。返回取消函数。
+ */
+export function scheduleFastRevive(input: FastReviveInput): () => void {
+  const g = globalThis as unknown as Record<symbol, { timers: ReturnType<typeof setTimeout>[] } | undefined>;
+  if (g[FAST_REVIVE_SLOT]) return () => undefined; // 已有计划在跑
+
+  const setTimeoutImpl = input.setTimeoutImpl ?? setTimeout;
+  const clearTimeoutImpl = input.clearTimeoutImpl ?? clearTimeout;
+  const touch = input.touch ?? ((dir: string) => touchLocationOverHttp(dir, { log: input.log }));
+  const delays = input.delaysMs ?? [1_000, 5_000, 20_000];
+  const slot = { timers: [] as ReturnType<typeof setTimeout>[] };
+  g[FAST_REVIVE_SLOT] = slot;
+
+  for (const delay of delays) {
+    const timer = setTimeoutImpl(() => {
+      void touch(input.directory).then(
+        (ok) => {
+          if (ok) input.log.info("位置快速复活探针已发送", { directory: input.directory, delayMs: delay });
+        },
+        (err) => input.log.debug("位置快速复活失败", { error: errorMessage(err) }),
+      );
+    }, delay);
+    (timer as unknown as { unref?: () => void }).unref?.();
+    slot.timers.push(timer);
+  }
+
+  // 最后一次尝试结束后清理槽位，允许下一轮驱逐再安排。
+  const last = slot.timers[slot.timers.length - 1];
+  if (last) {
+    const cleanup = setTimeoutImpl(() => {
+      if (g[FAST_REVIVE_SLOT] === slot) delete g[FAST_REVIVE_SLOT];
+    }, (delays[delays.length - 1] ?? 0) + 5_000);
+    (cleanup as unknown as { unref?: () => void }).unref?.();
+    slot.timers.push(cleanup);
+  }
+
+  return () => {
+    for (const t of slot.timers) clearTimeoutImpl(t);
+    if (g[FAST_REVIVE_SLOT] === slot) delete g[FAST_REVIVE_SLOT];
+  };
+}
+
+/** 仅供测试：清空快速复活状态。 */
+export function resetFastReviveForTest(): void {
+  const g = globalThis as unknown as Record<symbol, { timers: ReturnType<typeof setTimeout>[] } | undefined>;
+  const slot = g[FAST_REVIVE_SLOT];
+  if (!slot) return;
+  for (const t of slot.timers) clearTimeout(t);
+  delete g[FAST_REVIVE_SLOT];
+}
