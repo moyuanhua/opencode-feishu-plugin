@@ -22,8 +22,7 @@ Connect [OpenCode](https://opencode.ai) to Feishu/Lark: **one Feishu topic = one
 | 📊 **Real-time visible** | "Thinking" receipt → live tool-call cards → streaming text updates; footer shows the current model |
 | ⏹ **Controllable** | Every reply card has a "force stop" button; a watchdog auto-interrupts stuck sessions; new messages **cut in by default** when busy (configurable to queue), `/steer` `/now` always available |
 | 📎 **Images / files** | Images and files sent in Feishu are downloaded and attached to the session, so vision/file-capable models can see and read them |
-| 🧭 **One-sentence session** | Send a task in the main chat — the AI judges intent, finds the right working directory, and creates + starts the session in one tap |
-| 🖱 **Main-window menu** | Two fixed quick buttons above the chat input — "New session" and "Session list" (bot custom menu) — one tap to fire them |
+| 🧭 **AI session management (main chat)** | Send a task or a creation/management command (`/new` `/sessions` `/use` `/resume`…) in the main chat — the AI judges intent and finds the working directory; when unsure it **asks you back in conversation**, then creates + starts the session |
 | 🚫 **No ports** | Full long-connection; no inbound port needed on the server |
 
 ## 1. Feishu app setup (~3 minutes)
@@ -40,12 +39,8 @@ Connect [OpenCode](https://opencode.ai) to Feishu/Lark: **one Feishu topic = one
    > ⚠️ Without `im:message:readonly`: images/files are **not downloaded** — the message still reaches the AI, but with placeholder text ("…download failed…"). After enabling it, **re-create and publish an app version** for it to take effect.
 4. **Events & Callbacks → Event configuration**: subscription method **"Use long connection to receive events"** (do **not** pick Webhook), add event `im.message.receive_v1`.
 5. **Events & Callbacks → Callback configuration**: same long-connection method, add callback `card.action.trigger` (zero permission requirement).
-6. **Bot menu (optional, recommended)**: **App capabilities → Bot → Bot custom menu** — enable the menu, pick the **floating menu** style, and add two items (any name/icon, **action = push event**):
-   - "➕ New session" → `event_key` = `new`
-   - "📋 Session list" → `event_key` = `sessions`
-   Then add the event `application.bot.menu_v6` under **Event configuration** (zero permission requirement). Result: two quick buttons above the chat input that act like sending `/new` / `/sessions`.
-7. **Version management & release**: availability = **only yourself**, create a version and **publish**. ⚠️ Without publishing the app stays in "development" state and the long connection cannot connect — the bot will never respond.
-8. Note down the **App ID** (`cli_…`) and **App Secret**.
+6. **Version management & release**: availability = **only yourself**, create a version and **publish**. ⚠️ Without publishing the app stays in "development" state and the long connection cannot connect — the bot will never respond.
+7. Note down the **App ID** (`cli_…`) and **App Secret**.
 
 > **Why no group permission?** This plugin is a "single-user remote control". Without group permission the bot **physically cannot receive group messages** — the single-user boundary is guaranteed by the platform scope layer, not only by code.
 
@@ -98,7 +93,7 @@ Then send a message to the bot in Feishu. **The first person to message is auto-
 
 ### Main chat (console)
 
-The main chat **only manages**; plain text never enters any session.
+The main chat **only manages**; plain text never enters any session. Creation / management commands (below) — like plain text — are **first handed to the AI** for intent recognition, which drives the flow forward (and asks you back in conversation when unsure):
 
 | Command | Effect |
 |---|---|
@@ -112,25 +107,9 @@ The main chat **only manages**; plain text never enters any session.
 
 ![Create-session form card: directory, model, permission](image/new.png)  ![Session list card: paginate, enter/reopen, create](image/sessions.png)
 
-### Bot menu (quick buttons above the input box)
-
-![Configure the bot custom menu in the developer console (floating menu): the phone preview shows "new" / "sessions" pinned above the input box; the right panel is the item config (action = push event)](image/btns.png)
-
-After configuring the menu (setup step 6), two quick buttons stay pinned **above the chat input** in the bot window:
-
-| Button | Equivalent command | Effect |
-|---|---|---|
-| `new` | `/new` | Opens the create-session form card |
-| `sessions` | `/sessions` | Opens the session list card |
-
-- Menu `event_key`s must be **`new` / `sessions`** (the literal `/new`, `/sessions` also accepted);
-- Clicks arrive over the long connection (`application.bot.menu_v6`, zero permission requirement); the plugin synthesizes an **equivalent command message** — allowlist, dedup and command matrix behave exactly like typed commands; unknown keys are ignored silently;
-- After changing the menu, **re-publish the app version** (per the console: takes effect within ~5 minutes after publishing);
-- Message the bot at least once before using the menu (the plugin remembers the p2p chat from messages; any normal usage satisfies this).
-
 ### AI session management (main chat)
 
-Send plain text in the main chat and the AI judges the intent and handles it:
+Send plain text or a **creation / management command** (`/new` `/form` `/dir` `/model` `/perm` `/sessions` `/use` `/resume`) in the main chat and the AI judges the intent and handles it:
 
 - **Create a session (directory first)**: the AI first determines the **working directory**, then turns the card in place into a **prefilled form** — confirm (or tweak) and tap "✅ 创建会话" to create the session and auto-open a topic:
 
@@ -146,10 +125,21 @@ Send plain text in the main chat and the AI judges the intent and handles it:
 
   Directory decision order: ① a path you gave explicitly → ② semantic match against an **existing directory** (the AI looks at the **allowed root's first-level subdirectories first**, then recent / session dirs) → ③ otherwise **create a new one under an allowed root** (`<allowed root>/<kebab-case topic>`) → ④ fall back to the allowed root. **The form always carries a directory** — never empty.
 
-- **List sessions**: say "what sessions do I have?" → a session list card appears directly (same as `/sessions`; paginate / enter / create);
+- **Unsure about the directory → asks back in conversation**: when the AI can't determine which directory to use (vague wording, or both an existing dir and a new one seem plausible), it **never picks one for you** — it sends a **plain-text follow-up** (listing candidates or asking whether to create a new one). Just reply, and the AI continues (the next message is treated as the answer even if it looks like `/path`):
+
+  ```
+  You: set me up a stock project
+  → Which directory should I use? Reply with a directory, or "new stock-research"
+
+  You: new stock-research
+  → 📝 Create-session form (dir `/Users/code/stock-research` ➕ AI-created)
+     [✅ 创建会话]
+  ```
+
+- **List / enter sessions**: "what sessions do I have?" → session list card; "continue the last one" / `/resume` → enter the topic directly;
 - **Chit-chat / other**: the usual console hint card.
 
-Guardrails: AI-proposed paths must fall under the allowed roots (`allowedRoots`) and models must be from the available list; a path **you** gave that is out of range is **never silently replaced** — the form warns and lets you fix it. Creation always goes through form confirmation. `quickNew: false` disables the whole thing.
+Guardrails: AI-proposed paths must fall under the allowed roots (`allowedRoots`) and models must be from the available list; a path **you** gave that is out of range is **never silently replaced** — the form warns and lets you fix it. Creation always goes through form confirmation. `quickNew: false` disables the whole thing (back to the plain command matrix).
 
 ### Inside a topic (work)
 
@@ -198,7 +188,7 @@ When the agent asks via `question` or other form tools, the form becomes a Feish
 | `logFile` | string \| boolean | — | `true` = write `<configDir>/plugins/feishu.log`; recommended in server mode |
 | `approvalTtlMs` | number | `600000` | Approval token / card validity |
 | `staleExecutionMs` | number | `300000` | Watchdog threshold (0–60 min; **0 = disabled**; sessions waiting on a form / pending approval are never killed) |
-| `quickNew` | boolean | `true` | Main-chat "one-sentence session": AI judges intent + finds the directory, proposal card creates in one tap; `false` = console-only mode |
+| `quickNew` | boolean | `true` | Main-chat "AI session management": AI handles plain text and creation/management commands, judges intent + finds the directory (asks back in conversation when unsure); `false` disables |
 | `busyDelivery` | `steer`\|`queue` | `steer` | Delivery for new messages while busy: `steer` = cut in and interrupt the current step; `queue` = native queueing (gentler for long commands) |
 | `gatewayLocation` | string | — | Only start the gateway at this location (or its subdirectories); empty = any location |
 
@@ -224,7 +214,7 @@ Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepa
 
 - Image / file messages are **downloaded and attached to the session** (requires `im:message:readonly`); audio / video / stickers still get a text placeholder.
 - Only takes over approvals for **Feishu-originated sessions**; local TUI sessions are unaffected.
-- One main path to create a session: the `/new` / `/form` form card.
+- Session creation always goes through the **form card for confirmation** (AI prefills directory / model / permission): `/new`, `/form`, or describing a task all lead to this card.
 - Forms are JSON 2.0; old clients need ≥ V3.7.0 for `select_static`.
 - A topic's first message may lack `thread_id`: the plugin falls back to `root_id` routing; if a command lands in the main chat from a new topic, just send it inside the topic.
 - There is another `opencode-feishu` (V1 plugin); it is incompatible and shares no code with this one.
@@ -240,6 +230,7 @@ Iterating from real usage feedback; current plan:
 
 | Version | Highlights |
 |---|---|
+| **v0.2.19** | **Main chat goes fully AI-driven**: creation / management commands (`/new` `/form` `/dir` `/model` `/perm` `/sessions` `/use` `/resume`) are no longer executed directly — like plain text they are **handed to the AI for intent recognition** first, which drives the flow forward; when unsure about the working directory the AI **no longer picks one silently, but asks back in conversation** (listing candidates or offering to create a new one), and the next message is taken as the answer; **removed the bot custom menu** (the `/new` `/sessions` quick buttons above the input box); approval cards are now **withdrawn automatically** after being acted on (falling back to a result card only past Feishu's recall window) |
 | **v0.2.18** | Fix the **log-triggered plugin reload storm**: the default log moves to `~/.local/state/opencode/feishu-plugin.log` (opencode watches the whole config directory; writing any file there counts as a config change → a plugin reload per log write and constant WS reconnects); explicitly putting the log inside the config dir now raises a warning |
 | **v0.2.17** | Location keep-alive rebuilt: the probe now uses `GET /api/plugin` (measured as the only channel that renews / rebuilds a location); the process-level watchdog holds an **independent log sink**, so a **single-location / headless** server self-heals within one heartbeat interval after eviction (no external cron) |
 | **v0.2.16** | Session creation is **directory-first**: the AI pins the working directory before prefilling the form, so the form never has an empty directory; directory candidates now include the **first-level subdirectories of allowed roots**, preferring an existing directory before creating a new one |
