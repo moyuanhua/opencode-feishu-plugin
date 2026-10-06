@@ -1,17 +1,16 @@
 /**
  * 飞书长连接网关：WSClient + EventDispatcher。
  *
- * 注册三个 handler：
+ * 注册两个 handler：
  * - `im.message.receive_v1`      → 归一化后交给 onMessage；
- * - `card.action.trigger`        → 归一化后交给 onCardAction，并同步返回回调响应（<3s）；
- * - `application.bot.menu_v6`    → 机器人自定义菜单点击，归一化后交给 onBotMenu。
+ * - `card.action.trigger`        → 归一化后交给 onCardAction，并同步返回回调响应（<3s）。
  *
  * 不监听端口、不暴露公网地址。
  */
 import * as Lark from "@larksuiteoapi/node-sdk";
-import { errorMessage, maskId } from "../logger.js";
-import type { BotMenuClick, CardAction, IncomingMessage, LogLevel, Logger } from "../types.js";
-import { parseBotMenuEvent, parseCardAction, parseIncomingMessage, describeCardActionEvent } from "./events.js";
+import { errorMessage } from "../logger.js";
+import type { CardAction, IncomingMessage, LogLevel, Logger } from "../types.js";
+import { parseCardAction, parseIncomingMessage, describeCardActionEvent } from "./events.js";
 
 export interface GatewayOptions {
   readonly appId: string;
@@ -28,8 +27,6 @@ export interface GatewayOptions {
    * 作为回调响应，因此仍应在 3s 内 resolve。
    */
   readonly onCardAction: (action: CardAction) => object | void | Promise<object | void>;
-  /** 机器人自定义菜单点击（`application.bot.menu_v6`）；缺省忽略。 */
-  readonly onBotMenu?: (click: BotMenuClick) => void | Promise<void>;
 }
 
 export interface Gateway {
@@ -87,31 +84,6 @@ export function startGateway(options: GatewayOptions): Gateway {
       } catch (err) {
         log.error("卡片回调处理异常", { error: errorMessage(err) });
         return { toast: { type: "error", content: "处理失败，请重试" } };
-      }
-    },
-
-    "application.bot.menu_v6": (data: unknown) => {
-      try {
-        const click = parseBotMenuEvent(data);
-        if (!click) {
-          log.debug("菜单事件解析失败", {
-            shape:
-              typeof data === "object" && data !== null
-                ? Object.keys(data as Record<string, unknown>).slice(0, 20)
-                : typeof data,
-          });
-          return;
-        }
-        log.debug("收到机器人菜单点击", {
-          eventKey: click.eventKey,
-          operator: maskId(click.operatorOpenId),
-        });
-        if (!options.onBotMenu) return;
-        void Promise.resolve(options.onBotMenu(click)).catch((err) => {
-          log.error("菜单点击处理失败", { eventKey: click.eventKey, error: errorMessage(err) });
-        });
-      } catch (err) {
-        log.error("菜单 handler 异常", { error: errorMessage(err) });
       }
     },
   });

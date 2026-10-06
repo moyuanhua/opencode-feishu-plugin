@@ -16,11 +16,6 @@ const h = vi.hoisted(() => ({
     | {
         onMessage: (m: IncomingMessage) => void | Promise<void>;
         onCardAction: (a: CardAction) => object | void | Promise<object | void>;
-        onBotMenu?: (c: {
-          eventId: string;
-          eventKey: string;
-          operatorOpenId: string;
-        }) => void | Promise<void>;
       }
     | undefined,
   created: [] as unknown[],
@@ -244,15 +239,6 @@ async function click(rawValue: unknown, operatorOpenId = "ou_1"): Promise<object
   );
 }
 
-/** 模拟机器人菜单点击（application.bot.menu_v6）。 */
-async function clickMenu(eventKey: string, operatorOpenId = "ou_1"): Promise<void> {
-  await h.gatewayOptions!.onBotMenu?.({
-    eventId: `evt_menu_${eventKey}_${h.created.length}`,
-    eventKey,
-    operatorOpenId,
-  });
-}
-
 describe("index 话题路由（集成）", () => {
   let cleanup: (() => Promise<void>) | undefined;
 
@@ -466,35 +452,6 @@ describe("index 话题路由（集成）", () => {
     expect(h.resourceGets).toHaveLength(1);
   });
 
-  // ── 机器人自定义菜单（application.bot.menu_v6）────────────────────────
-  test("菜单「新建会话」：等价执行 /new（发出建会话表单卡）", async () => {
-    cleanup = await setup();
-    await deliver(msg("你好", { messageId: "om_menu_boot" }));
-    await clickMenu("new");
-    await vi.waitFor(() => {
-      expect(JSON.stringify(h.created.at(-1))).toContain("setup_form");
-    });
-  });
-
-  test("菜单「会话列表」：等价执行 /sessions（发出会话列表卡）", async () => {
-    cleanup = await setup();
-    await deliver(msg("你好", { messageId: "om_menu_boot2" }));
-    await clickMenu("sessions");
-    await vi.waitFor(() => {
-      expect(JSON.stringify(h.created.at(-1))).toContain("新建会话");
-    });
-  });
-
-  test("未知菜单 key / 非 owner 点击：均静默忽略", async () => {
-    cleanup = await setup();
-    await deliver(msg("你好", { messageId: "om_menu_boot3" }));
-    const before = h.created.length;
-    await clickMenu("whatever");
-    await clickMenu("new", "ou_other");
-    await new Promise((r) => setTimeout(r, 20));
-    expect(h.created.length).toBe(before);
-  });
-
   // ── 主聊天流「AI 会话管理」（issue #2 演进）────────────────────────────
   /** 在全部 patch 中查找包含指定文案的卡片（避免受跨用例迟到 patch 影响）。 */
   const findPatched = (text: string): string =>
@@ -662,6 +619,57 @@ describe("index 话题路由（集成）", () => {
     expect(dirInput?.default_value ?? "").toBe("");
     expect(json).toContain("不可用");
     expect(json).toContain("/mnt/proj");
+  });
+
+  test("目录拿不准：AI 返回 clarify → 纯文本追问并记住上下文；下一条回答后出表单", async () => {
+    sessionListRaw = [{ id: "ses_c", title: "某会话", time: { updated: 1 }, location: { directory: QN_DIR } }];
+    h.generateRaw = {
+      text: JSON.stringify({
+        intent: "clarify",
+        question: "你想用哪个目录？回复目录名，或回复「新建 stock-research」",
+      }),
+    };
+    cleanup = await setup({ quickNew: true, allowedRoots: [QN_BASE] });
+    await deliver(msg("帮我搞个股票项目", { messageId: "om_clar_1" }));
+    await vi.waitFor(() =>
+      expect(JSON.stringify(h.created.some((c) => JSON.stringify(c).includes("你想用哪个目录")))).toBe("true"),
+    );
+    // 追问阶段不出表单
+    expect(findPatched("setup_form")).toBe("null");
+
+    // 下一条消息作为回答继续同一轮对话（即使形如目录路径）。
+    h.generateRaw = {
+      text: JSON.stringify({
+        intent: "create",
+        dir: `${QN_BASE}/stock-research`,
+        dir_source: "new",
+        title: "股票研究",
+      }),
+    };
+    await deliver(msg("新建 stock-research", { messageId: "om_clar_2" }));
+    await vi.waitFor(() => expect(findPatched("setup_form")).toContain("setup_form"));
+    // 第二轮识别 prompt 带上了历史追问与回答。
+    expect(h.generateTextCalls.at(-1)).toContain("历史对话");
+    expect(h.generateTextCalls.at(-1)).toContain("你想用哪个目录");
+  });
+
+  test("主聊天流 /sessions：quickNew 开启时也交给 AI（intent=list → 会话列表卡）", async () => {
+    sessionListRaw = [{ id: "ses_s", title: "会话S", time: { updated: 2 }, location: { directory: QN_DIR } }];
+    h.generateRaw = { text: '{"intent":"list"}' };
+    cleanup = await setup({ quickNew: true, allowedRoots: [QN_BASE] });
+    await deliver(msg("/sessions", { messageId: "om_cmd_sessions" }));
+    await vi.waitFor(() => expect(findPatched("会话S")).toContain("会话S"));
+    expect(promptCalls).toHaveLength(0);
+  });
+
+  test("主聊天流 /resume：AI 识别 enter → 直接进入话题（恢复卡 + 绑 root）", async () => {
+    sessionListRaw = [
+      { id: "ses_r1", title: "最近的", time: { updated: 1_700_000_000_000 }, location: { directory: QN_DIR } },
+    ];
+    h.generateRaw = { text: JSON.stringify({ intent: "enter", target: "1" }) };
+    cleanup = await setup({ quickNew: true, allowedRoots: [QN_BASE] });
+    await deliver(msg("/resume", { messageId: "om_cmd_resume" }));
+    await vi.waitFor(() => expect(JSON.stringify(h.created.at(-1))).toContain("🔄 最近的"));
   });
 
   // ── 任务 B：/model 切换后读回校验（集成） ─────────────────────────────

@@ -93,43 +93,42 @@ A long turn (dozens of tool calls) can push a single run card to its limits (28K
 - **Limits**: max 20MB per attachment by default (`attachmentMaxBytes`, clamped 1–100MB); 30s timeout (`attachmentTimeoutMs`); on failure the message is still delivered, with a "download failed: reason" note.
 - **Boundaries**: audio / video / stickers are not downloaded (placeholders remain); merged-forward and in-card resources cannot be downloaded via the API. Feishu's own per-resource cap is 100MB.
 
-## Bot menu (main-window quick entries)
-
-Once menu items are configured in the developer console, a click in the bot chat window triggers them (`application.bot.menu_v6` event, zero permission requirement):
-
-| Item (suggested name) | Event key | Equivalent command |
-|---|---|---|
-| New session | `new` (also accepts `/new`) | `/new` |
-| Session list | `sessions` (also accepts `/sessions`) | `/sessions` |
-
-**Implementation**: the gateway registers an `application.bot.menu_v6` handler → normalizes to `{ eventId, eventKey, operatorOpenId }` → synthesizes an **equivalent command message** that reuses the existing `handleMessage` routing (allowlist, dedup, command matrix, main-chat decisions unchanged); unknown event keys are ignored silently.
-
-**chatId source**: the menu event carries **no chat_id**. The plugin remembers each user's most recent p2p chat id (`feishu:v2:menu-chat:<openId>`, persisted in local storage), so the menu can only work **after the user has messaged the bot at least once** (always true in normal use); if unknown, the click is logged with a `warn` and ignored.
-
 ## AI session management (issue #2 evolution)
 
-AI routing for plain text in the main chat (`quickNew`, on by default):
+**AI routing** for the main chat (`quickNew`, on by default) covers **plain text** and **creation / management
+commands** (`/new` `/form` `/dir` `/model` `/perm` `/sessions` `/use` `/resume`); other commands
+(`/help` `/stop` `/cancel`…) still go through the deterministic command matrix:
 
 - **Intent recognition**: the temporary-generation channel (no session context, sub-second) returns strict JSON
-  `{intent:"create|list|chat", dir, dir_source, title, perm, model, reason}`;
-  `create` → new session; `list` → session list; `chat` → console hint card;
+  `{intent:"create|list|enter|chat|clarify", dir, dir_source, title, perm, model, target, question, reason}`;
+- **Intent dispatch**:
+  - `create` → once the directory is resolved, turn the card in place into a prefilled form;
+  - `list` → session list card (same as `/sessions`);
+  - `enter` → resolve `target` (index / title keyword / id prefix) to a **unique** session and reuse `/resume` to
+    enter the topic; ambiguity or no match becomes a follow-up question;
+  - `clarify` → **conversational follow-up**: send a **plain-text** message (the AI's `question`) and remember the
+    context; the next message (even if it looks like `/path`) is treated as the answer and recognition continues;
+  - `chat` → console hint card;
+  - parse failure / exception → **fall back** to the deterministic command matrix (commands) or hint card (plain text).
 - **Directory first (important)**: for `create`, `dir` is never empty — the AI resolves it in priority order:
   ① `given` — a path the user explicitly provided; ② `existing` — matches a candidate (**the allowed root's
   first-level subdirectories** (`scanRootSubdirs`, limit 50) + recent dirs + all session dirs, titles as semantic
   hints; prompt candidates capped at 60); ③ `new` — otherwise create a topic-named dir under an allowed root
-  (`<allowedRoot>/<kebab-case topic>`); ④ fall back to the allowed root. Before prefilling, validation runs via
-  `validateDirectory(..., { create: false })` — a **dry check** (no disk writes; out-of-range/system dirs are
-  rejected, in-range paths may not exist yet); the actual `mkdir -p` happens only on form submit;
+  (`<allowedRoot>/<kebab-case topic>`); ④ fall back to the allowed root.
+  **When unsure** (both an existing and a new dir seem plausible, or vague wording) it does **not pick for you** —
+  it emits `clarify`, asking the user (listing candidates or offering to create a new one). Before prefilling,
+  validation runs via `validateDirectory(..., { create: false })` — a **dry check** (no disk writes; out-of-range/system
+  dirs are rejected, in-range paths may not exist yet); the actual `mkdir -p` happens only on form submit;
 - **Prefilled form (directory filled)**: the form appears only once the directory is resolved, with a source
   note on top ("✓ matched existing/recent dir" / "➕ AI-created" / "✍️ you specified"). A path **you** gave that
   is out of range is **never silently replaced** — no prefill plus a warning, for the user to fix in the form;
-  - `list` → session list card (same as `/sessions`; paginate / enter / create all work);
-  - `chat`/failure → console hint card;
 - **Form confirmation**: creation **always** goes through form submission (`applySetupFormSubmit`) — the user
   confirms or edits the AI prefill; the anchor is the form message itself, and a topic opens on submit.
   Model/permission etc. are picked in the form.
+- **Multi-turn clarification state**: kept in memory per `chatId` as `{originalText, turns}` (TTL 30 minutes); the
+  recognition prompt includes the history. `/cancel` clears a pending question.
 
-## `/sessions` data source & resume card## `/sessions` data source & resume card
+## `/sessions` data source & resume card
 
 `/sessions` lists **all local opencode sessions** (newest first, 8 per page, configurable):
 
@@ -199,7 +198,7 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `gatewayMatchGraceMs` | number | `3000` | **Exact-match-first** grace window: subdirectory candidates wait this long for a `here === gatewayLocation` instance (0 = no wait, immediate fallback) |
 | `approvalTtlMs` | number | `600000` | Approval token / card validity |
 | `staleExecutionMs` | number | `300000` | Watchdog threshold (clamped 0–60 min; **0 = disabled**; see "Watchdog staleness rules") |
-| `quickNew` | boolean | `true` | Main-chat "one-sentence session" (AI judges intent + finds the dir; proposal card creates in one tap); `false` disables |
+| `quickNew` | boolean | `true` | Main-chat "AI session management" (AI handles plain text and creation/management commands, judges intent + finds the dir; asks back in conversation when unsure); `false` disables |
 | `busyDelivery` | `steer`\|`queue` | `steer` | Delivery for new messages while busy: `steer` = cut in (default); `queue` = native queueing, see "Queued-card lifecycle" |
 | `maxResourcesShown` | number | `8` | Max resource rows shown on approval cards |
 | `sessionAllowButton` | boolean | `true` | Show the "allow this tool in this session" button |

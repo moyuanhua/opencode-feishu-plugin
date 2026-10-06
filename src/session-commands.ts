@@ -38,7 +38,7 @@ import {
   type SessionContext,
   type SetupFormPrefill,
 } from "./session/context.js";
-import { createSessionListApi } from "./session/session-list.js";
+import { createSessionListApi, loadSessionEntries } from "./session/session-list.js";
 import { createSetupWizardApi } from "./session/setup-wizard.js";
 import { createSessionOpsApi } from "./session/session-ops.js";
 import { createModelPermApi } from "./session/model-perm.js";
@@ -78,6 +78,21 @@ export class SessionCommands {
     prefill: SetupFormPrefill,
   ): Promise<object> {
     return this.ctx.buildPrefilledSetupForm(chatId, anchorMessageId, prefill);
+  }
+
+  /**
+   * AI 管理台：按会话 id 直接进入/续聊（复用 `/resume` 的「进入话题」流程）。
+   * 会话不存在时回提示，返回 false。
+   */
+  async openSessionByID(message: IncomingMessage, sessionID: string): Promise<boolean> {
+    const entries = await loadSessionEntries(this.ctx, message.chatId);
+    const index = entries.findIndex((e) => e.sessionID === sessionID);
+    if (index < 0) {
+      await this.ctx.reply(message, `⚠️ 会话 \`${sessionID}\` 不存在或不可见，可发送 \`/sessions\` 查看列表。`);
+      return false;
+    }
+    await this.ctx.cmdResume(message, String(index + 1));
+    return true;
   }
 
   /**

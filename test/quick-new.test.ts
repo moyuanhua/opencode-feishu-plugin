@@ -43,6 +43,20 @@ describe("buildQuickNewPrompt", () => {
       QUICK_NEW_INSTRUCTION.length + 2600,
     );
   });
+
+  test("携带历史对话（多轮澄清）", () => {
+    const prompt = buildQuickNewPrompt({
+      text: "新建 stock-research",
+      candidates: [],
+      history: [
+        { role: "assistant", text: "你想用哪个目录？" },
+        { role: "user", text: "拿不准" },
+      ],
+    });
+    expect(prompt).toContain("历史对话");
+    expect(prompt).toContain("助手：你想用哪个目录？");
+    expect(prompt).toContain("用户：拿不准");
+  });
 });
 
 describe("parseQuickNewDecision", () => {
@@ -93,6 +107,16 @@ describe("parseQuickNewDecision", () => {
     expect(parseQuickNewDecision("没有任何 JSON")).toBeUndefined();
     expect(parseQuickNewDecision("{坏 json}")).toBeUndefined();
     expect(parseQuickNewDecision(undefined)).toBeUndefined();
+  });
+
+  test("enter / clarify：target 与 question 解析与裁剪", () => {
+    expect(parseQuickNewDecision('{"intent":"enter","target":"2"}')).toEqual({ intent: "enter", target: "2" });
+    expect(parseQuickNewDecision('{"intent":"clarify","question":"用哪个目录？"}')).toEqual({
+      intent: "clarify",
+      question: "用哪个目录？",
+    });
+    // 无 question 的 clarify 也合法（调用方给默认文案）。
+    expect(parseQuickNewDecision('{"intent":"clarify"}')).toEqual({ intent: "clarify" });
   });
 
   test("```json 围栏 + 前后杂讯也能解析", () => {

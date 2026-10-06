@@ -41,7 +41,7 @@ import { cancelFormOverHttp, replyFormOverHttp } from "./feishu/form-reply.js";
 import { listSessionsOverHttp } from "./session/session-list-http.js";
 import { ensureGatewayWatchdog, startKeepalive } from "./session/keepalive.js";
 import { isP2PChat } from "./feishu/events.js";
-import { defaultSessionTitle, isCommand, topicTitle } from "./feishu/commands.js";
+import { defaultSessionTitle, isCommand, parseCommand, topicTitle, type CommandName } from "./feishu/commands.js";
 import { decideRoute } from "./feishu/routing.js";
 import { buildConsoleHintCard, buildFinalAnswerCard, buildStopNoticeCard } from "./feishu/cards.js";
 import {
@@ -58,6 +58,7 @@ import {
   type QuickNewCandidate,
   type QuickNewDecision,
   type QuickNewModelOption,
+  type QuickNewTurn,
 } from "./session/quick-new.js";
 import { isUnder, validateDirectory } from "./feishu/dirs.js";
 import { scanRootSubdirs } from "./feishu/root-scan.js";
@@ -88,7 +89,6 @@ import { CompactController } from "./session/compact.js";
 import { compactSessionHttp, fetchSessionMessagesHttp } from "./session/compact-http.js";
 import { quickGenerateWithSession } from "./session/quick-generate.js";
 import type {
-  BotMenuClick,
   CardAction,
   IncomingMessage,
   ModelRef,
@@ -822,8 +822,6 @@ async function start(
       log.debug("忽略非白名单用户", { sender: maskId(message.senderOpenId) });
       return;
     }
-    // 记住最近单聊 chatId：菜单点击事件不带 chat_id，需要靠它回推卡片（失败只降级日志）。
-    void rememberMenuChat(message.senderOpenId, message.chatId);
     if (!message.text) return;
 
     // 跨实例去重兜底：命中则直接丢弃（get-then-set 非原子，见 dedup.ts 注释）。
@@ -844,9 +842,26 @@ async function start(
       return;
     }
 
+    // 多轮澄清：主聊天流存在待澄清会话时，这条消息当作对上一轮追问的回答继续（即使形如 /路径）。
+    if (
+      !message.threadId &&
+      config.quickNew &&
+      hasConsolePending(message.chatId) &&
+      message.text.trim() !== "/cancel"
+    ) {
+      const handled = await handleConsoleAi(message);
+      if (handled) return;
+    }
+
     // 命令优先拦截：绝不把 `/xxx` 当 prompt 发给模型。
     // 话题内被禁命令（/new /sessions /use）由 SessionCommands 按 scope 回提示。
     if (isCommand(message.text)) {
+      // 主聊天流「建会话 / 管理类」命令（quickNew 开启时）先交给 AI 承接意图，再向下推进。
+      const parsed = parseCommand(message.text);
+      if (!message.threadId && config.quickNew && parsed && CONSOLE_AI_COMMANDS.has(parsed.name)) {
+        const handled = await handleConsoleAi(message);
+        if (handled) return;
+      }
       const handled = await commands.handleText(message);
       if (handled) return;
     }
@@ -868,10 +883,10 @@ async function start(
 
     if (decision.kind === "main-hint") {
       // 主聊天流 = 管理台：普通文本不进入任何会话（决策 1）。
-      // quickNew（默认开启）先做「一句话建会话」AI 识别；识别失败/闲聊回退提示卡。
+      // quickNew（默认开启）先做「AI 会话管理」意图识别；无法承接时回退提示卡。
       if (config.quickNew) {
-        await handleQuickNew(message);
-        return;
+        const handled = await handleConsoleAi(message);
+        if (handled) return;
       }
       const res = await sender.sendCard(message.chatId, buildConsoleHintCard());
       if (!res.ok) log.warn("管理台提示卡发送失败", { error: res.error ?? "unknown" });
@@ -917,79 +932,62 @@ async function start(
     await runInSession(message, created.id, message.messageId);
   }
 
-  // ── 机器人自定义菜单（application.bot.menu_v6）─────────────────────────
-  /** 菜单 event_key → 等价命令（在开发者后台为菜单项配置这些 Key）。 */
-  const MENU_COMMANDS: Record<string, { cmd: string; label: string }> = {
-    new: { cmd: "/new", label: "新建会话" },
-    sessions: { cmd: "/sessions", label: "会话列表" },
-    // 容忍把命令原文直接当 event_key 配置。
-    "/new": { cmd: "/new", label: "新建会话" },
-    "/sessions": { cmd: "/sessions", label: "会话列表" },
-  };
-  /** openId → 最近单聊 chatId（菜单事件不带 chat_id，需记住消息来源）。 */
-  const menuChatCache = new Map<string, string>();
-  const menuChatKey = (openId: string): string => `feishu:v2:menu-chat:${openId}`;
+  // ── 主聊天流「AI 会话管理」（issue #2 演进）────────────────────────────
+  /**
+   * 交给 AI 承接的主聊天流命令：建会话与**建会话所需/相关**的管理命令
+   * （`/new` `/form` `/dir` `/model` `/perm` `/sessions` `/use` `/resume`）。
+   * `/help` `/stop` `/cancel` 等仍走确定性命令矩阵。
+   */
+  const CONSOLE_AI_COMMANDS: ReadonlySet<CommandName> = new Set<CommandName>([
+    "new",
+    "form",
+    "dir",
+    "model",
+    "perm",
+    "sessions",
+    "use",
+    "resume",
+  ]);
 
-  async function rememberMenuChat(openId: string, chatId: string): Promise<void> {
-    if (!openId || !chatId || menuChatCache.get(openId) === chatId) return;
-    menuChatCache.set(openId, chatId);
-    try {
-      await ctx.storage.set(menuChatKey(openId), chatId);
-    } catch (err) {
-      log.debug("菜单 chatId 持久化失败", { error: errorMessage(err) });
+  /** 待澄清会话：主聊天流里 AI 反问了目录/目标，等用户下一条消息回答。 */
+  interface ConsolePending {
+    readonly originalText: string;
+    readonly turns: readonly QuickNewTurn[];
+    readonly updatedAt: number;
+  }
+  const consolePendings = new Map<string, ConsolePending>();
+  const CONSOLE_PENDING_TTL = 30 * 60 * 1000;
+
+  function hasConsolePending(chatId: string): boolean {
+    const pending = consolePendings.get(chatId);
+    if (!pending) return false;
+    if (Date.now() - pending.updatedAt > CONSOLE_PENDING_TTL) {
+      consolePendings.delete(chatId);
+      return false;
     }
+    return true;
   }
 
-  async function resolveMenuChat(openId: string): Promise<string | undefined> {
-    const cached = menuChatCache.get(openId);
-    if (cached) return cached;
-    try {
-      const stored = await ctx.storage.get(menuChatKey(openId));
-      if (typeof stored === "string" && stored) {
-        menuChatCache.set(openId, stored);
-        return stored;
-      }
-    } catch {
-      // 读失败按未找到处理（点击会被忽略并记日志）。
+  /** 把 AI 的 target（序号 / 标题关键词 / id 前缀）解析成唯一会话；歧义/未命中返回 undefined。 */
+  function resolveEnterTarget(
+    target: string | undefined,
+    entries: readonly SessionListEntry[],
+  ): SessionListEntry | undefined {
+    const query = (target ?? "").trim();
+    if (!query) return undefined;
+    if (/^\d+$/.test(query)) {
+      const index = Number.parseInt(query, 10) - 1;
+      return index >= 0 ? entries[index] : undefined;
     }
+    const lower = query.toLowerCase();
+    const byPrefix = entries.filter((e) => e.sessionID.toLowerCase().startsWith(lower));
+    if (byPrefix.length === 1) return byPrefix[0];
+    const byTitle = entries.filter((e) => (e.title ?? "").toLowerCase().includes(lower));
+    if (byTitle.length === 1) return byTitle[0];
     return undefined;
   }
 
-  /**
-   * 菜单点击 → 合成为等价命令消息，复用既有 `handleMessage` 路由
-   * （命令拦截 / 白名单 / 去重 / 主聊天流决策全部一致）。
-   */
-  async function handleBotMenu(click: BotMenuClick): Promise<void> {
-    if (!(await owner.admit(click.operatorOpenId))) {
-      log.debug("忽略非白名单用户的菜单点击", { operator: maskId(click.operatorOpenId) });
-      return;
-    }
-    const entry = MENU_COMMANDS[click.eventKey.trim()];
-    if (!entry) {
-      log.debug("未知菜单 event_key，忽略", { eventKey: click.eventKey });
-      return;
-    }
-    const chatId = await resolveMenuChat(click.operatorOpenId);
-    if (!chatId) {
-      log.warn("菜单点击缺少单聊上下文：请先给机器人发一条消息后再使用菜单", {
-        eventKey: click.eventKey,
-      });
-      return;
-    }
-    const synthetic: IncomingMessage = {
-      eventId: click.eventId,
-      messageId: `menu_${click.eventId || Date.now()}`,
-      chatId,
-      chatType: "p2p",
-      messageType: "text",
-      text: entry.cmd,
-      senderOpenId: click.operatorOpenId,
-    };
-    log.info("机器人菜单点击 → 执行命令", { eventKey: click.eventKey, cmd: entry.cmd, label: entry.label });
-    await handleMessage(synthetic);
-  }
-
-  // ── 主聊天流「AI 会话管理」（issue #2 演进）────────────────────────────
+  // ── 目录决策（「目录优先」）────────────────────────────────────────────
   /**
    * 建会话的**目录决策**（「目录优先」：目录必须先定下来，表单永不空目录）。
    *
@@ -1045,19 +1043,33 @@ async function start(
   }
 
   /**
-   * 主聊天流普通文本 → AI 会话管理：
-   * - `create`：AI 解析 目录/标题/权限/模型 → 把「识别中」卡**就地变成 AI 预填表单卡**，
-   *   用户确认/修改后提交（表单提交后建会话并开话题，锚点 = 表单消息本身）；
-   * - `list`：就地变成会话列表卡（等同 `/sessions`）；
-   * - `chat` / 解析失败 / 异常：回管理台提示卡。
-   * 防幻觉：目录走「目录优先」三级决策（given/existing/new）并经 allowedRoots 干校验（预填不落盘）；
-   * 模型必须命中可选列表。
+   * 主聊天流「AI 会话管理」：普通文本与建会话 / 管理类命令统一交给 AI 判断意图，再向下推进。
+   *
+   * - `create`：解析 目录/标题/权限/模型 → 就地变成 AI 预填表单卡（保留确认环节）；
+   * - `list`：就地变成会话列表卡；
+   * - `enter`：按 target 解析出唯一会话 → 复用 `/resume` 进入话题；
+   * - `clarify`：AI 拿不准（尤其目录）→ 发一条纯文本反问，记住待澄清状态，下一条消息继续；
+   * - `chat` / 解析失败 / 异常：返回 false，由调用方回退（命令矩阵 / 提示卡）。
+   *
+   * 返回 true 表示本次已承接处理（调用方不再推进）。
    */
-  async function handleQuickNew(message: IncomingMessage): Promise<void> {
-    const hint = async (): Promise<void> => {
-      const res = await sender.sendCard(message.chatId, buildConsoleHintCard());
-      if (!res.ok) log.warn("管理台提示卡发送失败", { error: res.error ?? "unknown" });
+  async function handleConsoleAi(message: IncomingMessage): Promise<boolean> {
+    const chatId = message.chatId;
+    const pending = hasConsolePending(chatId) ? consolePendings.get(chatId) : undefined;
+    const originalText = pending?.originalText ?? message.text;
+    const history: QuickNewTurn[] = pending ? [...pending.turns, { role: "user", text: message.text }] : [];
+    const setPending = (question: string): void => {
+      consolePendings.set(chatId, {
+        originalText,
+        turns: [...history, { role: "assistant", text: question }],
+        updatedAt: Date.now(),
+      });
     };
+    const askBack = async (question: string): Promise<void> => {
+      setPending(question);
+      await sender.sendText(chatId, question);
+    };
+    let ackMessageId: string | undefined;
     try {
       // 1) 候选目录（最近使用 + 允许根目录一级子目录 + 本机会话目录）与候选模型。
       //    「一级子目录」让 AI 先看一眼根目录下现成的目录（含从未用过的新项目），避免一律新建。
@@ -1074,7 +1086,7 @@ async function start(
         const raw = (await listAllSessionsRaw()) ?? (await listSessionsOverHttp({}, { log }));
         entries = normalizeSessionList(raw) ?? [];
       } catch (err) {
-        log.debug("quick-new 会话列表读取失败", { error: errorMessage(err) });
+        log.debug("console-ai 会话列表读取失败", { error: errorMessage(err) });
       }
       const sessionLabelByDir = new Map<string, string>();
       for (const entry of entries) {
@@ -1088,7 +1100,7 @@ async function start(
             pushCandidate(sub.path, sessionLabelByDir.get(sub.path) ?? (sub.isRepo ? "git 仓库" : undefined));
           }
         } catch (err) {
-          log.debug("quick-new 一级目录扫描失败", { root, error: errorMessage(err) });
+          log.debug("console-ai 一级目录扫描失败", { root, error: errorMessage(err) });
         }
       }
       for (const entry of entries) {
@@ -1096,9 +1108,8 @@ async function start(
       }
       const routingSessionID = entries[0]?.sessionID;
       if (!routingSessionID) {
-        log.debug("quick-new 无可用会话（生成通道缺少路由 sessionID），回退提示卡");
-        await hint();
-        return;
+        log.debug("console-ai 无可用会话（生成通道缺少路由 sessionID），回退");
+        return false;
       }
       let models: QuickNewModelOption[] = [];
       try {
@@ -1108,15 +1119,13 @@ async function start(
           ...(m.name ? { name: m.name } : {}),
         }));
       } catch (err) {
-        log.debug("quick-new 模型列表读取失败", { error: errorMessage(err) });
+        log.debug("console-ai 模型列表读取失败", { error: errorMessage(err) });
       }
 
-      // 2) 就地反馈：先发「识别中」占位卡，随后 patch 为最终卡片。
-      const ack = await sender.sendCard(message.chatId, buildQuickNewThinkingCard());
-      if (!ack.ok || !ack.messageId) {
-        await hint();
-        return;
-      }
+      // 2) 就地反馈：先发「识别中」占位卡，随后 patch 为最终卡片（或撤回后发纯文本追问）。
+      const ack = await sender.sendCard(chatId, buildQuickNewThinkingCard());
+      if (!ack.ok || !ack.messageId) return false;
+      ackMessageId = ack.messageId;
 
       // 3) 识别（无会话上下文的一次性生成；显式模型，服务端不支持"无模型"生成）。
       const genModel = await resolveGenerateModel(routingSessionID, entries[0]?.directory);
@@ -1138,66 +1147,104 @@ async function start(
         { log, generateText },
         {
           prompt: buildQuickNewPrompt({
-            text: message.text,
+            text: originalText,
             candidates,
             models,
             allowedRoots: config.allowedRoots,
+            ...(history.length > 0 ? { history } : {}),
           }),
           sessionID: routingSessionID,
           ...(genModel ? { model: genModel } : {}),
         },
       );
       const decision = parseQuickNewDecision(extractGeneratedText(outcome.result));
-      log.debug("quick-new 识别结果", {
+      log.debug("console-ai 识别结果", {
         intent: decision?.intent,
         dir: decision?.directory,
+        target: decision?.target,
+        question: decision?.question,
         perm: decision?.perm,
         model: decision?.model,
         reason: decision?.reason,
       });
 
-      // 4) 分流：list → 会话列表卡；create → AI 预填表单；其余/失败 → 提示卡。
-      if (!decision || decision.intent === "chat") {
-        await sender.patchCard(ack.messageId, buildConsoleHintCard());
-        return;
-      }
-      if (decision.intent === "list") {
-        const card = await commands.buildSessionListCard(message.chatId);
-        await sender.patchCard(ack.messageId, card);
-        log.info("quick-new：识别卡已就地切换为会话列表卡", { chatId: message.chatId });
-        return;
+      // 解析失败：撤回占位卡，交由调用方回退（命令矩阵 / 提示卡）。
+      if (!decision) {
+        consolePendings.delete(chatId);
+        await sender.deleteMessage(ack.messageId);
+        return false;
       }
 
-      // create：**先定目录**（given/existing/new，表单永不空目录），再就地变成 AI 预填表单。
-      const resolution = resolveConsoleDir(decision, candidates);
-      const model = matchModelOption(decision.model, models);
-      const prefill = {
-        title: decision.title || topicTitle(message.text),
-        ...(resolution.dir ? { dir: resolution.dir } : {}),
-        ...(model
-          ? {
-              model: {
-                providerID: model.providerID,
-                id: model.id,
-                ...(model.name ? { name: model.name } : {}),
-              },
-            }
-          : {}),
-        ...(decision.perm ? { perm: decision.perm } : {}),
-        notice: resolution.notice,
-      };
-      const form = await commands.buildPrefilledSetupForm(message.chatId, ack.messageId, prefill);
-      await sender.patchCard(ack.messageId, form);
-      log.info("quick-new：AI 预填建会话表单已发送（就地）", {
-        title: prefill.title,
-        dir: resolution.dir,
-        dirSource: resolution.source,
-        perm: decision.perm,
-        model: model ? `${model.providerID}/${model.id}` : undefined,
-      });
+      // 4) 分流。
+      switch (decision.intent) {
+        case "clarify": {
+          // AI 拿不准（尤其目录）→ 纯文本反问，记住上下文，下一条消息继续。
+          const question = decision.question?.trim() || "还需要确认几个信息，能再补充一下吗？";
+          await sender.deleteMessage(ack.messageId);
+          await askBack(question);
+          log.info("console-ai：向用户追问澄清", { chatId, question: question.slice(0, 80) });
+          return true;
+        }
+        case "list": {
+          consolePendings.delete(chatId);
+          await sender.patchCard(ack.messageId, await commands.buildSessionListCard(chatId));
+          log.info("console-ai：识别卡已就地切换为会话列表卡", { chatId });
+          return true;
+        }
+        case "enter": {
+          const entry = resolveEnterTarget(decision.target, entries);
+          if (!entry) {
+            await sender.deleteMessage(ack.messageId);
+            await askBack("你想进入哪个会话？请回复**序号**或标题关键词，或先发 `/sessions` 查看列表。");
+            return true;
+          }
+          consolePendings.delete(chatId);
+          await sender.deleteMessage(ack.messageId);
+          await commands.openSessionByID(message, entry.sessionID);
+          log.info("console-ai：进入指定会话", { chatId, sessionID: entry.sessionID });
+          return true;
+        }
+        case "chat": {
+          consolePendings.delete(chatId);
+          await sender.patchCard(ack.messageId, buildConsoleHintCard());
+          return true;
+        }
+        default: {
+          // create：**先定目录**（given/existing/new，表单永不空目录），再就地变成 AI 预填表单。
+          consolePendings.delete(chatId);
+          const resolution = resolveConsoleDir(decision, candidates);
+          const model = matchModelOption(decision.model, models);
+          const prefill = {
+            title: decision.title || topicTitle(originalText),
+            ...(resolution.dir ? { dir: resolution.dir } : {}),
+            ...(model
+              ? {
+                  model: {
+                    providerID: model.providerID,
+                    id: model.id,
+                    ...(model.name ? { name: model.name } : {}),
+                  },
+                }
+              : {}),
+            ...(decision.perm ? { perm: decision.perm } : {}),
+            notice: resolution.notice,
+          };
+          const form = await commands.buildPrefilledSetupForm(chatId, ack.messageId, prefill);
+          await sender.patchCard(ack.messageId, form);
+          log.info("console-ai：AI 预填建会话表单已发送（就地）", {
+            title: prefill.title,
+            dir: resolution.dir,
+            dirSource: resolution.source,
+            perm: decision.perm,
+            model: model ? `${model.providerID}/${model.id}` : undefined,
+          });
+          return true;
+        }
+      }
     } catch (err) {
-      log.warn("quick-new 处理失败，回退管理台提示", { error: errorMessage(err) });
-      await hint();
+      log.warn("console-ai 处理失败，回退", { error: errorMessage(err) });
+      if (ackMessageId) await sender.deleteMessage(ackMessageId);
+      return false;
     }
   }
 
@@ -1291,7 +1338,6 @@ async function start(
     log,
     logLevel: config.logLevel,
     onMessage: (message) => handleMessage(message),
-    onBotMenu: (click) => handleBotMenu(click),
     onCardAction: (action) =>
       routeCardAction(action, {
         log,

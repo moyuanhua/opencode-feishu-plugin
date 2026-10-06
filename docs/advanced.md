@@ -18,6 +18,7 @@ permission.evaluate (插件 hook)               permission.asked (事件流)
 - **三重单人边界**：可用范围「仅本人」+ 不申请群权限 + 代码层 open_id 白名单。
 - **`always` 语义**：仅当请求带 `save[]` 时才持久化，否则等价于「允许一次」。
 - **审批卡按钮**：默认 4 个（`✅ 允许一次` / `🔓 始终允许` / `✅ 本会话内允许该工具` / `❌ 拒绝`）。「始终允许」按命令前缀持久化；「本会话内允许」是中间粒度，只对当前会话生效（记入 `allowActions` 并追加会话级 ruleset）；换档（`/perm`）会清除「本会话内允许」授权，不需要时设 `sessionAllowButton: false` 回到三按钮。
+- **审批卡操作后自动撤回**：点击按钮或在 TUI 处答复（`permission.replied`）后，卡片直接撤回，不再残留影响话题查看；超出飞书撤回时限 / 无撤回权限时降级 patch 成结果卡（与表单卡一致）。
 
 ## 位置保活
 
@@ -95,39 +96,34 @@ opencode 的 `delivery:"queue"` 消息会在**当前执行的下一个步骤**�
 - **限制**：单附件默认 ≤20MB（`attachmentMaxBytes`，夹取 1–100MB）；超时默认 30s（`attachmentTimeoutMs`）；失败时消息照常投递，仅附「下载失败：原因」。
 - **边界**：音频 / 视频 / 表情包不下载（仍占位文本）；合并转发与卡片内资源飞书不支持直接下载。飞书侧单资源上限 100MB。
 
-## 机器人菜单（主窗口快捷入口）
-
-在开发者后台配置菜单项后，用户在机器人会话窗口点击即可触发（`application.bot.menu_v6` 事件，零权限要求）：
-
-| 菜单项（建议名） | 事件 Key | 等价命令 |
-|---|---|---|
-| 新建会话 | `new`（也接受 `/new`） | `/new` |
-| 会话列表 | `sessions`（也接受 `/sessions`） | `/sessions` |
-
-**实现**：网关注册 `application.bot.menu_v6` handler → 归一化为 `{ eventId, eventKey, operatorOpenId }` → 合成一条**等价命令消息**复用既有 `handleMessage` 路由（白名单、去重、命令矩阵、主聊天流决策完全一致）；未知 event_key 静默忽略。
-
-**chatId 来源**：菜单事件**不带 chat_id**。插件会记住每个用户最近一次单聊的 chatId（`feishu:v2:menu-chat:<openId>`，随本机 storage 持久化），因此**首次使用菜单前需先给机器人发过至少一条消息**（正常使用流程必然满足）；无记录时记 `warn` 并忽略本次点击。
-
 ## AI 会话管理（issue #2 演进）
 
-主聊天流普通文本的 AI 路由（`quickNew`，默认开启）：
+主聊天流的 **AI 路由**（`quickNew`，默认开启）覆盖**普通文本**与**建会话 / 管理类命令**
+（`/new` `/form` `/dir` `/model` `/perm` `/sessions` `/use` `/resume`）；其余命令（`/help` `/stop` `/cancel`…）仍走确定性命令矩阵：
 
 - **意图识别**：临时生成通道（无会话上下文、秒级）输出严格 JSON
-  `{intent:"create|list|chat", dir, dir_source, title, perm, model, reason}`；
-  - `create` → 建会话；`list` → 列会话；`chat` → 回管理台提示卡；
+  `{intent:"create|list|enter|chat|clarify", dir, dir_source, title, perm, model, target, question, reason}`；
+- **意图分流**：
+  - `create` → 目录确定后就地给出预填表单；
+  - `list` → 会话列表卡（等同 `/sessions`）；
+  - `enter` → 按 `target`（序号 / 标题关键词 / id 前缀）解析出**唯一**会话，复用 `/resume` 进入话题；歧义或未命中时转为追问；
+  - `clarify` → **对话追问**：发一条**纯文本**消息（含 AI 的 `question`），并记住上下文，下一条消息（即使形如 `/路径`）当作回答继续识别；
+  - `chat` → 管理台提示卡；
+  - 解析失败 / 异常 → **回退**到确定性命令矩阵（命令）或提示卡（普通文本）。
 - **目录优先（重要）**：`create` 时 dir 绝不允许为空，AI 按优先级给出确定目录：
   ① `given` 用户消息里明确给的路径；② `existing` 命中候选（**允许根目录一级子目录**
   （`scanRootSubdirs`，上限 50）+ 最近使用 + 全部会话目录（标题作语义线索）；prompt 候选上限 60）；
   ③ `new` 都不命中 → 在允许根目录下按主题新建（`<allowedRoot>/<kebab-case 主题>`）；④ 兜底允许根目录。
+  **拿不准时（既可能用现成也可能要新建 / 表述含糊）不擅自选定，而是 `clarify` 追问用户**：列出候选或询问是否允许新建。
   预填前用 `validateDirectory(..., { create: false })` **干校验**（不落盘：越界 / 系统目录拒绝、允许范围内可不存在），
   只有提交表单时才会真正 `mkdir -p`；
 - **预填表单（目录已填）**：表单只在目录确定后出现，顶部附来源说明
   （「✓ 匹配历史/最近目录」/「➕ AI 新建」/「✍️ 你指定」）；用户明确指定但越界的路径**不静默替换**——
   不预填 + 警示文案，由用户在表单里改；
-  - `list` → 会话列表卡（等同 `/sessions`，翻页/进话题/新建按钮全部可用）；
-  - `chat`/失败 → 管理台提示卡；
 - **表单确认**：建会话**必须**经表单提交（`applySetupFormSubmit`）——用户可确认或修改 AI 的预填；
   提交后锚点 = 表单消息本身，建会话 + 自动开话题；模型/权限等由用户在表单里选。
+- **多轮澄清状态**：按 `chatId` 内存保存 `{originalText, turns}`（TTL 30 分钟），识别 prompt 会带上历史问答；
+  `/cancel` 可清掉未决的追问状态。
 
 ## /sessions 数据源与恢复卡
 
@@ -199,7 +195,7 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `gatewayMatchGraceMs` | number | `3000` | **精确匹配优先**的宽限窗口：子目录候选先等这么久，出现 `here === gatewayLocation` 就让位（0 = 不等待，子目录立即兜底） |
 | `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
 | `staleExecutionMs` | number | `300000` | 看门狗阈值（夹取 0–60 分钟；**0 = 关闭**；见「看门狗判活规则」） |
-| `quickNew` | boolean | `true` | 主聊天流「一句话建会话」（AI 判意图 + 找目录，建议卡一键创建）；`false` 关闭 |
+| `quickNew` | boolean | `true` | 主聊天流「AI 会话管理」（AI 承接普通文本与建会话/管理类命令，判意图 + 找目录，拿不准时对话追问）；`false` 关闭 |
 | `busyDelivery` | `steer`\|`queue` | `steer` | 忙时新消息投递方式：`steer` = 立即插队（默认）；`queue` = 原生排队，见「排队卡生命周期」 |
 | `maxResourcesShown` | number | `8` | 审批卡最多展示的资源行数 |
 | `sessionAllowButton` | boolean | `true` | 审批卡是否显示「本会话内允许该工具」按钮 |

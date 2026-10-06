@@ -53,15 +53,6 @@ export interface IncomingMessage {
   readonly parentId?: string;
 }
 
-/** 机器人自定义菜单（`application.bot.menu_v6`）点击事件的归一化模型。 */
-export interface BotMenuClick {
-  readonly eventId: string;
-  /** 菜单事件的唯一标识（开发者后台为菜单项配置的事件 Key）。 */
-  readonly eventKey: string;
-  /** 点击菜单的用户 open_id。 */
-  readonly operatorOpenId: string;
-}
-
 /** `card.action.trigger` 回调归一化后的模型。 */
 export interface CardAction {
   /** `action.value` 原始值（对象或字符串）。 */

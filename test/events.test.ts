@@ -3,7 +3,6 @@ import {
   describeCardActionEvent,
   extractMessageText,
   isP2PChat,
-  parseBotMenuEvent,
   parseCardAction,
   parseIncomingAttachment,
   parseIncomingMessage,
@@ -88,53 +87,6 @@ describe("parseIncomingMessage", () => {
     expect(isP2PChat("p2p")).toBe(true);
     expect(isP2PChat("group")).toBe(false);
     expect(isP2PChat(undefined)).toBe(false);
-  });
-});
-
-describe("机器人自定义菜单事件解析", () => {
-  const base = {
-    schema: "2.0",
-    header: { event_id: "evt_menu_1", event_type: "application.bot.menu_v6" },
-    event: {
-      operator: {
-        operator_name: "张三",
-        operator_id: { union_id: "on_x", user_id: "u_1", open_id: "ou_owner" },
-      },
-      event_key: "new",
-      timestamp: 1669364458,
-    },
-  };
-
-  test("解析 event_key + 操作人 open_id + 事件 id", () => {
-    expect(parseBotMenuEvent(base)).toEqual({
-      eventId: "evt_menu_1",
-      eventKey: "new",
-      operatorOpenId: "ou_owner",
-    });
-  });
-
-  test("兼容 SDK 长连接实收的拍平形状（header/event 提升到顶层）", () => {
-    expect(
-      parseBotMenuEvent({
-        schema: "2.0",
-        event_id: "evt_flat_1",
-        event_type: "application.bot.menu_v6",
-        tenant_key: "t",
-        app_id: "cli_x",
-        event_key: "sessions",
-        operator: { operator_name: "张三", operator_id: { union_id: "on", user_id: "u", open_id: "ou_flat" } },
-        timestamp: 1669364458,
-      }),
-    ).toEqual({ eventId: "evt_flat_1", eventKey: "sessions", operatorOpenId: "ou_flat" });
-  });
-
-  test("缺操作人 / 缺 event_key / 非法形状返回 undefined", () => {
-    expect(parseBotMenuEvent({ header: { event_id: "e" }, event: { event_key: "new" } })).toBeUndefined();
-    expect(
-      parseBotMenuEvent({ header: { event_id: "e" }, event: { operator: { operator_id: { open_id: "ou" } } } }),
-    ).toBeUndefined();
-    expect(parseBotMenuEvent(null)).toBeUndefined();
-    expect(parseBotMenuEvent("x")).toBeUndefined();
   });
 });
 

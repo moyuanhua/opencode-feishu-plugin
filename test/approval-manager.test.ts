@@ -19,7 +19,9 @@ class FakeSender implements FeishuSender {
   readonly patched: Array<{ messageId: string; card: object }> = [];
   readonly texts: string[] = [];
   readonly repliedCards: Array<{ messageId: string; card: object }> = [];
+  readonly deleted: string[] = [];
   failSend = false;
+  failDelete = false;
 
   async sendCard(chatId: string, card: object): Promise<SendCardResult> {
     this.sent.push({ chatId, card });
@@ -44,7 +46,10 @@ class FakeSender implements FeishuSender {
     return undefined;
   }
   async sendFile(): Promise<{ ok: boolean }> { return { ok: true }; }
-  async deleteMessage(): Promise<{ ok: boolean }> { return { ok: true }; }
+  async deleteMessage(messageId: string): Promise<{ ok: boolean; error?: string }> {
+    this.deleted.push(messageId);
+    return this.failDelete ? { ok: false, error: "too late" } : { ok: true };
+  }
 }
 
 function setup(
@@ -143,7 +148,7 @@ describe("ApprovalManager.onAsked", () => {
 });
 
 describe("ApprovalManager.handleCardAction", () => {
-  test("合法点击：返回 toast，异步 reply + 更新卡片", async () => {
+  test("合法点击：返回 toast，异步 reply + 撤回卡片", async () => {
     const { manager, sender, replies } = setup();
     await manager.onAsked(REQUEST);
     const token = tokenFrom(sender);
@@ -154,6 +159,25 @@ describe("ApprovalManager.handleCardAction", () => {
 
     await tick();
     expect(replies).toEqual([{ sessionID: "ses_1", requestID: "per_1", reply: "once" }]);
+    expect(sender.deleted).toEqual(["om_card_1"]);
+    expect(sender.patched).toHaveLength(0);
+  });
+
+  test("撤回失败（超时限）→ 降级 patch 结果卡", async () => {
+    const { manager, sender, replies } = setup();
+    await manager.onAsked(REQUEST);
+    const token = tokenFrom(sender);
+    sender.failDelete = true;
+
+    manager.handleCardAction({
+      rawValue: { t: token, d: "once" },
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await tick();
+    expect(replies).toHaveLength(1);
+    expect(sender.deleted).toEqual(["om_card_1"]);
     expect(sender.patched).toHaveLength(1);
     expect((sender.patched[0]!.card as { header: { template: string } }).header.template).toBe("green");
   });
@@ -246,7 +270,7 @@ describe("ApprovalManager 会话内允许（任务 A）", () => {
     return btn.behaviors[0]!.value;
   }
 
-  test("卡片含按钮，点击 → 持久化 + 答复 once + patch 专用结果卡", async () => {
+  test("卡片含按钮，点击 → 持久化 + 答复 once + 撤回卡片", async () => {
     const { manager, sender, replies, allowCalls } = setup();
     await manager.onAsked(REQUEST);
     const value = allowValueFrom(sender);
@@ -263,6 +287,24 @@ describe("ApprovalManager 会话内允许（任务 A）", () => {
     await tick();
     expect(allowCalls).toEqual([{ sessionID: "ses_1", action: "bash" }]);
     expect(replies).toEqual([{ sessionID: "ses_1", requestID: "per_1", reply: "once" }]);
+    expect(sender.deleted).toEqual(["om_card_1"]);
+    expect(sender.patched).toHaveLength(0);
+  });
+
+  test("会话放行撤回失败 → 降级 patch 专用结果卡", async () => {
+    const { manager, sender, allowCalls } = setup();
+    await manager.onAsked(REQUEST);
+    const value = allowValueFrom(sender);
+    sender.failDelete = true;
+
+    manager.handleCardAction({
+      rawValue: value,
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await tick();
+    expect(allowCalls).toHaveLength(1);
     expect(sender.patched).toHaveLength(1);
     const patched = JSON.stringify(sender.patched[0]!.card);
     expect(patched).toContain("已允许本会话内 bash");
@@ -380,17 +422,26 @@ describe("ApprovalManager.hasPendingFor（看门狗判活：等审批属合法�
 });
 
 describe("ApprovalManager.onReplied", () => {
-  test("未由点击更新的卡片在 replied 时收敛", async () => {
+  test("未由点击更新的卡片在 replied 时撤回", async () => {
     const { manager, sender } = setup();
     await manager.onAsked(REQUEST);
     manager.onReplied({ sessionID: "ses_1", requestID: "per_1", reply: "reject" });
     await tick();
-    expect(sender.patched).toHaveLength(1);
-    expect((sender.patched[0]!.card as { header: { template: string } }).header.template).toBe("red");
+    expect(sender.deleted).toEqual(["om_card_1"]);
 
-    // 已消费，再次 replied 不再 patch
+    // 已消费，再次 replied 不再处理
+    manager.onReplied({ sessionID: "ses_1", requestID: "per_1", reply: "reject" });
+    await tick();
+    expect(sender.deleted).toEqual(["om_card_1"]);
+  });
+
+  test("replied 撤回失败 → 降级 patch 结果卡", async () => {
+    const { manager, sender } = setup();
+    await manager.onAsked(REQUEST);
+    sender.failDelete = true;
     manager.onReplied({ sessionID: "ses_1", requestID: "per_1", reply: "reject" });
     await tick();
     expect(sender.patched).toHaveLength(1);
+    expect((sender.patched[0]!.card as { header: { template: string } }).header.template).toBe("red");
   });
 });

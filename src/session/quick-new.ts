@@ -36,41 +36,60 @@ export interface QuickNewModelOption {
   readonly name?: string;
 }
 
+/** 意图：建会话 / 列会话 / 进入会话 / 闲聊 / 需要向用户澄清。 */
+export const QUICK_NEW_INTENTS = ["create", "list", "enter", "chat", "clarify"] as const;
+export type QuickNewIntent = (typeof QUICK_NEW_INTENTS)[number];
+
+/** 多轮澄清里的一轮（用户消息或助手提问）。 */
+export interface QuickNewTurn {
+  readonly role: "user" | "assistant";
+  readonly text: string;
+}
+
 /** 模型输出（意图 + 建会话字段）。 */
 export interface QuickNewDecision {
-  readonly intent: "create" | "list" | "chat";
+  readonly intent: QuickNewIntent;
   readonly directory?: string;
   /** 目录来源（create 时：given/existing/new）。 */
   readonly dirSource?: QuickNewDirSource;
   readonly title?: string;
   readonly perm?: QuickNewPerm;
   readonly model?: string;
+  /** enter 意图：目标会话（序号 / 标题关键词 / id 前缀）。 */
+  readonly target?: string;
+  /** clarify 意图：向用户提出的确认问题。 */
+  readonly question?: string;
   readonly reason?: string;
 }
 
 export const QUICK_NEW_INSTRUCTION = [
-  "你是飞书 AI 助手「管理台」的意图识别器。用户在管理台（还没有会话）发来一条消息。",
+  "你是飞书 AI 助手「管理台」的意图识别器。用户在管理台（尚未进入任何会话）发来一条消息，可能是一句自然语言，也可能是 /命令（/new、/form、/dir、/model、/perm、/sessions、/use、/resume）。",
   "判断意图并尽量解析建会话字段。只输出一个 JSON 对象，不要任何其他文字：",
-  '{"intent":"create|list|chat","dir":"<绝对路径>","dir_source":"given|existing|new","title":"<不超过20字的会话标题>","perm":"readonly|edit|askHigh|trust|空","model":"<providerID/modelID 或空>","reason":"<一句话理由>"}',
+  '{"intent":"create|list|enter|chat|clarify","dir":"<绝对路径>","dir_source":"given|existing|new","title":"<不超过20字的会话标题>","perm":"readonly|edit|askHigh|trust|空","model":"<providerID/modelID 或空>","target":"<要进入的会话：序号/标题关键词/id 前缀>","question":"<需要向用户确认的一句话>","reason":"<一句话理由>"}',
   "规则：",
-  "- 列出/查看会话 → intent=list，其余字段留空。",
-  "- 需要新建会话执行的开发/操作任务 → intent=create；闲聊、问候、询问用法 → chat。",
+  "- 列出/查看会话（/sessions、有哪些会话）→ intent=list，其余字段留空。",
+  "- 进入/继续/切换已有会话（/use、/resume、打开第N个、继续上次那个）→ intent=enter，target=序号或标题关键词；无法确定是哪一个 → intent=clarify。",
+  "- 需要新建会话执行的开发/操作任务（/new、/form、描述任务）→ intent=create；闲聊、问候、询问用法、无法归类 → chat。",
+  "- 命令参数要采纳：/new 标题→title；/dir 路径→dir(dir_source=\"given\")；/model x→model；/perm x→perm。",
   "- **目录规则（create 时 dir 绝不允许为空，按优先级）：**",
   "  候选目录包括：最近使用目录、**允许根目录的一级子目录**、历史会话目录（可能带标题线索）。",
   "  ① 用户消息里明确给了路径 → dir=该路径，dir_source=\"given\"；",
   "  ② 否则先看候选里有没有语义匹配的现成目录（尤其允许根目录的一级子目录）→ dir=该候选路径原文，dir_source=\"existing\"；",
-  "  ③ 都不匹配才新建：dir=<允许根目录下、英文小写短横线的主题目录>（如 /Users/code/stock-research），dir_source=\"new\"；",
-  "  ④ 实在难以命名 → dir=<第一个允许根目录>，dir_source=\"new\"。",
+  "  ③ 能根据任务给出合理的英文小写短横线新目录名 → dir=<允许根目录下该新目录>，dir_source=\"new\"；",
+  "  ④ **拿不准用哪个目录**（表述含糊、既可能用现成也可能要新建、候选无法判断）→ intent=clarify，question=一句中文提问：列出 2-3 个候选目录，或询问是否允许新建（给出建议的新目录名）。切勿在拿不准时擅自替用户选定目录。",
   "- perm 依据用户表述（只读→readonly、可编辑→edit、高风险→askHigh、完全信任→trust）；用户没说就留空。",
   "- model 只能从候选模型中精确复制 providerID/modelID；用户没说就留空。",
+  "- dir 必须是绝对路径；绝不编造用户未提及、也不在候选/允许根目录范围内的既有路径。",
 ].join("\n");
 
-/** 拼装发给模型的 prompt（允许根目录 + 候选目录 + 候选模型 + 用户消息，均有截断保护）。 */
+/** 拼装发给模型的 prompt（允许根目录 + 候选目录 + 候选模型 + 历史对话 + 用户消息，均有截断保护）。 */
 export function buildQuickNewPrompt(input: {
   readonly text: string;
   readonly candidates: readonly QuickNewCandidate[];
   readonly models?: readonly QuickNewModelOption[];
   readonly allowedRoots?: readonly string[];
+  /** 多轮澄清历史（用户消息 / 助手提问），按时间顺序。 */
+  readonly history?: readonly QuickNewTurn[];
 }): string {
   const roots = (input.allowedRoots ?? []).slice(0, 8).map((r) => `- ${r}`).join("\n");
   const dirs = input.candidates
@@ -80,6 +99,10 @@ export function buildQuickNewPrompt(input: {
   const models = (input.models ?? [])
     .slice(0, 30)
     .map((m) => `- ${m.providerID}/${m.id}${m.name ? `（${m.name}）` : ""}`)
+    .join("\n");
+  const history = (input.history ?? [])
+    .slice(-8)
+    .map((t) => `${t.role === "user" ? "用户" : "助手"}：${t.text.slice(0, 500)}`)
     .join("\n");
   return [
     QUICK_NEW_INSTRUCTION,
@@ -92,6 +115,7 @@ export function buildQuickNewPrompt(input: {
     "",
     "候选模型：",
     models || "（无）",
+    ...(history ? ["", "历史对话（用于理解下面这条消息是对上一轮追问的回答）：", history] : []),
     "",
     "用户消息：",
     input.text.slice(0, 2000),
@@ -104,6 +128,10 @@ function isPerm(value: unknown): value is QuickNewPerm {
 
 function isDirSource(value: unknown): value is QuickNewDirSource {
   return typeof value === "string" && (QUICK_NEW_DIR_SOURCES as readonly string[]).includes(value);
+}
+
+function isIntent(value: unknown): value is QuickNewIntent {
+  return typeof value === "string" && (QUICK_NEW_INTENTS as readonly string[]).includes(value);
 }
 
 /**
@@ -124,8 +152,7 @@ export function parseQuickNewDecision(raw: string | undefined): QuickNewDecision
   }
   if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return undefined;
   const obj = parsed as Record<string, unknown>;
-  const intent =
-    obj.intent === "create" || obj.intent === "list" || obj.intent === "chat" ? obj.intent : undefined;
+  const intent = isIntent(obj.intent) ? obj.intent : undefined;
   if (!intent) return undefined;
   const dir =
     typeof obj.dir === "string" ? obj.dir.trim() : typeof obj.directory === "string" ? obj.directory.trim() : "";
@@ -137,6 +164,8 @@ export function parseQuickNewDecision(raw: string | undefined): QuickNewDecision
   const title = typeof obj.title === "string" ? obj.title.trim().slice(0, 30) : "";
   const perm = isPerm(obj.perm) ? obj.perm : undefined;
   const model = typeof obj.model === "string" ? obj.model.trim() : "";
+  const target = typeof obj.target === "string" ? obj.target.trim().slice(0, 200) : "";
+  const question = typeof obj.question === "string" ? obj.question.trim().slice(0, 1000) : "";
   const reason = typeof obj.reason === "string" ? obj.reason.trim().slice(0, 200) : "";
   return {
     intent,
@@ -145,6 +174,8 @@ export function parseQuickNewDecision(raw: string | undefined): QuickNewDecision
     ...(title ? { title } : {}),
     ...(perm ? { perm } : {}),
     ...(model ? { model } : {}),
+    ...(target ? { target } : {}),
+    ...(question ? { question } : {}),
     ...(reason ? { reason } : {}),
   };
 }

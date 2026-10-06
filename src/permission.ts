@@ -278,7 +278,7 @@ export class ApprovalManager {
     });
   }
 
-  /** 处理 permission.replied：把卡片收敛为结果态（若尚未由点击更新）。 */
+  /** 处理 permission.replied：收敛卡片（撤回，失败降级结果卡；若尚未由点击更新）。 */
   onReplied(event: PermissionRepliedLike): void {
     const tracked = this.cards.get(event.requestID);
     if (!tracked) return;
@@ -441,7 +441,7 @@ export class ApprovalManager {
       });
     }
 
-    // 3) 把审批卡收尾成专用结果卡（无按钮）。
+    // 3) 把审批卡收尾（优先撤回，失败降级为专用结果卡）。
     const messageId = tracked?.messageId;
     if (!messageId || !tracked) return;
     const card = buildSessionAllowResolvedCard(tracked.input, {
@@ -449,10 +449,7 @@ export class ApprovalManager {
       operatorOpenId: action.operatorOpenId,
       at: this.now(),
     });
-    const res = await this.deps.sender.patchCard(messageId, card);
-    if (!res.ok) {
-      this.deps.log.warn("会话放行结果卡片更新失败", { requestID: claims.r, error: res.error ?? "unknown" });
-    }
+    await this.finishCard(messageId, card, { requestID: claims.r });
   }
 
   private async applyReply(
@@ -480,8 +477,21 @@ export class ApprovalManager {
 
   private async patchResolved(tracked: TrackedCard, outcome: ApprovalOutcome, requestID: string): Promise<void> {
     tracked.resolved = true;
-    const res = await this.deps.sender.patchCard(tracked.messageId, buildResolvedCard(tracked.input, outcome));
-    if (!res.ok) this.deps.log.warn("审批结果卡片更新失败", { requestID, error: res.error ?? "unknown" });
+    await this.finishCard(tracked.messageId, buildResolvedCard(tracked.input, outcome), { requestID });
+  }
+
+  /**
+   * 审批卡收敛：**优先撤回**（操作后不再残留卡片影响用户查看），撤回失败（超时限/无权限）
+   * 才降级 patch 成结果卡，避免卡片永久停在待审批态。
+   */
+  private async finishCard(messageId: string, card: object, tag: { requestID: string }): Promise<void> {
+    const res = await this.deps.sender.deleteMessage(messageId);
+    if (res.ok) {
+      this.deps.log.debug("审批卡已撤回", tag);
+      return;
+    }
+    const patched = await this.deps.sender.patchCard(messageId, card);
+    if (!patched.ok) this.deps.log.warn("审批结果卡片更新失败", { ...tag, error: patched.error ?? "unknown" });
   }
 }
 
