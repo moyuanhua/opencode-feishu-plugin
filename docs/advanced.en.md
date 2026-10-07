@@ -158,7 +158,7 @@ The root card reflects session state live, so you can see at a glance which sess
 
 When the agent asks via `question` or other form tools, the plugin turns it into a Feishu card:
 
-- **Two equivalent ways to answer**: click the option buttons, or **reply with text directly in the topic** (no need to tap "✍️ reply with text" first). Text is smart-matched — hitting an option label/value uses that value; `boolean` recognizes 是/否, yes/no, 1/0; `number`/`integer` converts to numbers; multi-select splits on 、/,; anything else is treated as **manual input**.
+- **Three equivalent ways to answer**: click the option buttons, **fill the input box in the card and tap "✅ 提交"**, or **reply with text directly in the topic** (no need to tap "✍️ reply with text" first). Text is smart-matched — hitting an option label/value uses that value; `boolean` recognizes 是/否, yes/no, 1/0; `number`/`integer` converts to numbers; multi-select splits on 、/,; anything else is treated as **manual input**.
 - Multi-field forms can mix: click a few buttons + add one text message; auto-submits once complete.
 - **Pure option questions** (options present, no free input): reply with the index/letter (`1`, `B`) or the option text directly; if you send **other content**, the plugin treats it as "you want to say something else" — **skips the form automatically** and passes the message to the AI as a normal one.
 - **The card is withdrawn after answering/cancelling** (no leftover pending cards); beyond Feishu's recall window it degrades to a "submitted / cancelled" result card.

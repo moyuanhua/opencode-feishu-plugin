@@ -151,6 +151,50 @@ describe("FormRelay.handleCardAction / consumeText", () => {
     expect(replies[0]!.answer).toEqual({ q0: "聚焦可动手的项目" });
   });
 
+  test("卡片内输入框「✅ 提交」→ 用 formValue 提交答案", async () => {
+    const { relay, replies } = setup();
+    await relay.onCreated({ form: FORM });
+    const res = relay.handleCardAction({
+      rawValue: { f: "frm_1", submit: true },
+      formValue: { q0: "在输入框里写的答案" },
+      messageId: "om_card",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { type: string } };
+    expect(res.toast.type).toBe("success");
+    await tick();
+    expect(replies[0]!.answer).toEqual({ q0: "在输入框里写的答案" });
+  });
+
+  test("输入框提交命中选项文本 → 归一化为选项 value", async () => {
+    const { relay, replies } = setup();
+    await relay.onCreated({ form: FORM });
+    relay.handleCardAction({
+      rawValue: { f: "frm_1", submit: true },
+      formValue: { q0: "深挖 Top5" },
+      messageId: "om_card",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await tick();
+    expect(replies[0]!.answer).toEqual({ q0: "b" });
+  });
+
+  test("输入框空提交 → 仅提示，不 dispatch", async () => {
+    const { relay, replies } = setup();
+    await relay.onCreated({ form: FORM });
+    const res = relay.handleCardAction({
+      rawValue: { f: "frm_1", submit: true },
+      formValue: { q0: "   " },
+      messageId: "om_card",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { type: string } };
+    expect(res.toast.type).toBe("info");
+    await tick();
+    expect(replies).toHaveLength(0);
+  });
+
   test("非白名单用户点击被拒，且不 dispatch", async () => {
     const { relay, replies } = setup({ allowed: false });
     await relay.onCreated({ form: FORM });

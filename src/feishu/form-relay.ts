@@ -19,10 +19,12 @@ import {
   buildFormResolvedCard,
   isComplete,
   parseFormAction,
+  parseFormSubmit,
   normalizeForm,
   type FormField,
   type FormLike,
   type FormOutcome,
+  type FormSubmitAction,
   type FormValue,
 } from "./forms.js";
 
@@ -133,6 +135,10 @@ export class FormRelay {
    * 同步返回 toast，reply/patch 在后台完成（电商回调 3s 窗口）。
    */
   handleCardAction(action: CardAction): object | undefined {
+    // 卡片内输入框的「✅ 提交」：内容走 action.formValue。
+    const submit = parseFormSubmit(action.rawValue);
+    if (submit) return this.handleSubmit(action, submit);
+
     const parsed = parseFormAction(action.rawValue);
     if (!parsed) return undefined;
 
@@ -165,6 +171,54 @@ export class FormRelay {
     const nextField = pending.form.fields.find((f) => f.hidden !== true && pending.answers[f.key] === undefined);
     pending.awaitingField = nextField?.key;
     if (pending.awaitingField) {
+      this.awaiting.set(pending.sessionID, pending.form.id);
+    } else {
+      this.awaiting.delete(pending.sessionID);
+    }
+
+    if (isComplete(pending.form, pending.answers)) {
+      pending.settled = true;
+      void this.submit(pending);
+      return TOAST("success", "已提交");
+    }
+    void this.patch(pending, buildFormCard(pending.form, pending.answers));
+    return TOAST("success", "已记录");
+  }
+
+  /**
+   * 处理卡片内输入框「✅ 提交」：把 `action.formValue`（键 = 输入框 name = 字段 key）
+   * 归一化后写入答案；填满即 `session.form.reply`，否则回存并重渲染。
+   */
+  private handleSubmit(action: CardAction, submit: FormSubmitAction): object {
+    if (!this.deps.isAllowed(action.operatorOpenId)) {
+      this.deps.log.warn("拒绝非白名单用户的表单提交", { operator: action.operatorOpenId.slice(0, 8) });
+      return TOAST("error", "无操作权限");
+    }
+    const pending = this.forms.get(submit.f);
+    if (!pending) return TOAST("warning", "该表单已失效或已提交");
+    if (pending.settled) return TOAST("info", "正在提交，请稍候");
+
+    const values: Record<string, unknown> = action.formValue ?? {};
+    let recorded = false;
+    for (const field of pending.form.fields) {
+      if (field.hidden === true) continue;
+      const rawValue = values[field.key];
+      if (rawValue === undefined || rawValue === null) continue;
+      if (typeof rawValue === "string") {
+        if (rawValue.trim() === "") continue;
+        pending.answers[field.key] = coerceAnswer(field, rawValue);
+        recorded = true;
+      } else if (Array.isArray(rawValue) && rawValue.length > 0) {
+        pending.answers[field.key] = rawValue.map((v) => String(v));
+        recorded = true;
+      }
+    }
+    if (!recorded) return TOAST("info", "请先填写内容再提交");
+
+    // 更新「等待文字回答」字段为下一个未填项（兼容话题内直接发文字作答）。
+    const nextField = pending.form.fields.find((f) => f.hidden !== true && pending.answers[f.key] === undefined);
+    pending.awaitingField = nextField?.key;
+    if (nextField) {
       this.awaiting.set(pending.sessionID, pending.form.id);
     } else {
       this.awaiting.delete(pending.sessionID);

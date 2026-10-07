@@ -48,6 +48,17 @@ export interface FormActionValue {
   readonly free?: boolean;
 }
 
+/** 表单提交按钮回传值：`{ f: formID, submit: true }`（输入框内容走 `action.form_value`）。 */
+export interface FormSubmitAction {
+  readonly f: string;
+  readonly submit: true;
+}
+
+/** 表单容器 name（全局唯一；飞书要求 form 容器直挂 body.elements 根节点）。 */
+export const FORM_CONTAINER_NAME = "opencode_form";
+/** 提交按钮组件 name（尽量不与字段 key 冲突）。 */
+export const FORM_SUBMIT_NAME = "__opencode_submit__";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -130,6 +141,14 @@ export function isFormAction(raw: unknown): boolean {
   return parseFormAction(raw) !== undefined;
 }
 
+/** 解析表单提交按钮 value（`{ f, submit: true }`）；非提交按钮返回 undefined。 */
+export function parseFormSubmit(raw: unknown): FormSubmitAction | undefined {
+  if (!isRecord(raw)) return undefined;
+  const f = asString(raw.f);
+  if (!f || raw.submit !== true) return undefined;
+  return { f, submit: true };
+}
+
 /** 尚未回答的字段 key（忽略 hidden）。 */
 export function missingFields(form: FormLike, answers: Readonly<Record<string, FormValue>>): string[] {
   return form.fields
@@ -164,8 +183,22 @@ function answerLabel(field: FormField, value: FormValue): string {
   return opt?.label ?? String(value);
 }
 
+/** 该字段是否接受自由文本（无选项且非布尔，或允许自填）。 */
+function fieldAllowsInput(field: FormField): boolean {
+  if (field.type === "boolean") return false;
+  return (field.options?.length ?? 0) === 0 || field.custom === true;
+}
+
+function inputPlaceholder(field: FormField): string {
+  if ((field.options?.length ?? 0) > 0) return "✍️ 或在此填写自定义答案";
+  return field.description?.trim() || `输入「${fieldTitle(field)}」`;
+}
+
 /**
- * 渲染待回答表单卡：每个字段一块说明 + 选项按钮。
+ * 渲染待回答表单卡：
+ * - **选项 / 布尔字段**：一块说明 + 选项按钮（点击即回填，可跨轮次作答）；
+ * - **可自由输入字段**：卡片内**直接渲染输入框**（不再让用户到话题里发文字），底部「✅ 提交」一次提交；
+ *   同时仍兼容「直接在话题里发文字作答」（`FormRelay.consumeText`）。
  * 已选中的选项加 ✅ 前缀；多字段未填完时提示还差哪些。
  */
 export function buildFormCard(
@@ -173,29 +206,49 @@ export function buildFormCard(
   answers: Readonly<Record<string, FormValue>>,
   opts: { readonly notice?: string } = {},
 ): object {
-  const elements: object[] = [];
+  const top: object[] = [];
+  /** 需要放进 form 容器的元素（输入框 + 纯文本字段的标题）。 */
+  const inputs: object[] = [];
   const visible = form.fields.filter((f) => f.hidden !== true);
 
   if (visible.length === 0) {
-    elements.push({ tag: "markdown", content: truncateCardContent("（表单无字段）") });
+    top.push({ tag: "markdown", content: truncateCardContent("（表单无字段）") });
   }
 
   for (const field of visible) {
     const value = answers[field.key];
+    const hasOptions = (field.options?.length ?? 0) > 0;
     const lines: string[] = [`**${fieldTitle(field)}**`];
     if (field.description) lines.push(field.description);
+
+    if (!hasOptions && field.type !== "boolean") {
+      // 纯自由文本字段：标题 + 输入框，整块放进表单容器。
+      if (value !== undefined) lines.push(`✅ 已填：**${answerLabel(field, value)}**`);
+      inputs.push({ tag: "markdown", content: truncateCardContent(lines.join("\n")) });
+      inputs.push({
+        tag: "input",
+        name: field.key,
+        required: false,
+        width: "fill",
+        placeholder: { tag: "plain_text", content: inputPlaceholder(field) },
+        ...(typeof value === "string" && value ? { default_value: value } : {}),
+      });
+      continue;
+    }
+
+    // 选项 / 布尔字段：说明 + 按钮（点击即回填，不必等提交）。
     if (value !== undefined) lines.push(`✅ 已选：**${answerLabel(field, value)}**`);
-    elements.push({ tag: "markdown", content: truncateCardContent(lines.join("\n")) });
+    top.push({ tag: "markdown", content: truncateCardContent(lines.join("\n")) });
 
     for (const opt of field.options ?? []) {
       const selected = value !== undefined && answerLabel(field, value) === opt.label;
       const label = `${selected ? "✅ " : ""}${opt.label}`;
-      elements.push(cardButton(label, selected ? "primary" : "default", { f: form.id, k: field.key, v: opt.value }));
+      top.push(cardButton(label, selected ? "primary" : "default", { f: form.id, k: field.key, v: opt.value }));
     }
     if (field.type === "boolean") {
       for (const b of [true, false]) {
         const selected = value === b;
-        elements.push(
+        top.push(
           cardButton(`${selected ? "✅ " : ""}${b ? "是" : "否"}`, selected ? "primary" : "default", {
             f: form.id,
             k: field.key,
@@ -204,9 +257,16 @@ export function buildFormCard(
         );
       }
     }
-    // 无选项，或允许自填 → 提供自由文本入口。
-    if ((field.options?.length ?? 0) === 0 || field.custom === true) {
-      elements.push(cardButton("✍️ 直接回复答案", "default", { f: form.id, k: field.key, free: true }));
+    // 有选项 + 允许自填 → 额外给一个输入框（放进表单容器）。
+    if (fieldAllowsInput(field)) {
+      inputs.push({
+        tag: "input",
+        name: field.key,
+        required: false,
+        width: "fill",
+        placeholder: { tag: "plain_text", content: inputPlaceholder(field) },
+        ...(typeof value === "string" && value ? { default_value: value } : {}),
+      });
     }
   }
 
@@ -225,22 +285,43 @@ export function buildFormCard(
   const hints: string[] = [];
   if (opts.notice) hints.push(opts.notice);
   if (missing.length > 0 && visible.length > 1) {
-    hints.push(`还需回答：${missing.join("、")}${optionOnly ? "（点选项或回复序号）" : "（可直接发文字回答）"}`);
+    hints.push(`还需回答：${missing.join("、")}${optionOnly ? "（点选项或回复序号）" : "（在输入框作答）"}`);
   } else if (missing.length > 0) {
     hints.push(
       optionOnly
         ? "请点击上方选项（或回复序号，如 1）；发送其它内容会作为普通消息处理。"
-        : "可直接发文字回答，或点上方选项。",
+        : "在下方输入框作答后点「✅ 提交」即可（也可直接在话题里发文字回答）。",
     );
   }
-  if (hints.length > 0) elements.push({ tag: "markdown", content: truncateCardContent(hints.join("\n\n")) });
+
+  const body: object[] = [
+    ...top,
+    ...hints.map((h) => ({ tag: "markdown", content: truncateCardContent(h) })),
+  ];
+  if (inputs.length > 0) {
+    body.push({
+      tag: "form",
+      name: FORM_CONTAINER_NAME,
+      elements: [
+        ...inputs,
+        {
+          tag: "button",
+          name: FORM_SUBMIT_NAME,
+          type: "primary",
+          form_action_type: "submit",
+          text: { tag: "plain_text", content: "✅ 提交" },
+          behaviors: [{ type: "callback", value: { f: form.id, submit: true } }],
+        },
+      ],
+    });
+  }
 
   const header = headerFor(form);
   return {
     schema: "2.0",
     config: { update_multi: true },
     header: { title: { tag: "plain_text", content: header.text }, template: header.template },
-    body: { elements: elements.slice(0, 80) },
+    body: { elements: body.slice(0, 80) },
   };
 }
 
