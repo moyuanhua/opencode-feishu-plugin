@@ -166,7 +166,7 @@ Permission requests become approval cards: `✅ Allow once` / `🔓 Always allow
 
 ### Forms & questions (`question` tool)
 
-When the agent asks via `question` or other form tools, the form becomes a Feishu card. **Click buttons or just reply in the topic with text** — both work, and the card is withdrawn after answering. For pure option questions you can reply with the option number/letter directly; any other content is treated as a normal message to the AI.
+When the agent asks via `question` or other form tools, the form becomes a Feishu card: fields that accept free text now render an **input box right in the card** — fill it and tap "✅ 提交". You can also click option buttons, or **reply in the topic with text**. The card is withdrawn after answering. For pure option questions you can reply with the option number/letter directly; any other content is treated as a normal message to the AI.
 
 ## 4. Configuration (common)
 
@@ -230,9 +230,10 @@ Iterating from real usage feedback; current plan:
 
 | Version | Highlights |
 |---|---|
+| **v0.2.21** | **Form / question cards**: fields that accept free text now render an **input box + "✅ 提交" right in the card** — no need to type in the topic; clicking option buttons / replying with text in the topic still works |
+| **v0.2.20** | Location-eviction handling: measured confirmation that eviction **cannot be prevented from the plugin side** (hardcoded 60-min TTL + no working refresh channel) → **second-scale revive after eviction** (probes at +1s/+5s/+20s on dispose); outage drops from 20 min to ~10 s |
 | **v0.2.19** | **Main chat goes fully AI-driven**: creation / management commands (`/new` `/form` `/dir` `/model` `/perm` `/sessions` `/use` `/resume`) are no longer executed directly — like plain text they are **handed to the AI for intent recognition** first, which drives the flow forward; when unsure about the working directory the AI **no longer picks one silently, but asks back in conversation** (listing candidates or offering to create a new one), and the next message is taken as the answer; **removed the bot custom menu** (the `/new` `/sessions` quick buttons above the input box); approval cards are now **withdrawn automatically** after being acted on (falling back to a result card only past Feishu's recall window) |
 | **v0.2.18** | Fix the **log-triggered plugin reload storm**: the default log moves to `~/.local/state/opencode/feishu-plugin.log` (opencode watches the whole config directory; writing any file there counts as a config change → a plugin reload per log write and constant WS reconnects); explicitly putting the log inside the config dir now raises a warning |
-| **v0.2.20** | Location-eviction handling: measured confirmation that eviction **cannot be prevented from the plugin side** (hardcoded 60-min TTL + no working refresh channel) → **second-scale revive after eviction** (probes at +1s/+5s/+20s on dispose); outage drops from 20 min to ~10 s |
 | **v0.2.17** | Location keep-alive rebuilt: the probe now uses `GET /api/plugin` (measured as the only channel that renews / rebuilds a location); the process-level watchdog holds an **independent log sink**, so a **single-location / headless** server self-heals within one heartbeat interval after eviction (no external cron) |
 | **v0.2.16** | Session creation is **directory-first**: the AI pins the working directory before prefilling the form, so the form never has an empty directory; directory candidates now include the **first-level subdirectories of allowed roots**, preferring an existing directory before creating a new one |
 | **v0.2.15** | **AI session management** (the main chat lets the AI judge intent and return a prefilled form / session list); **new messages cut in by default when busy** (`busyDelivery: "queue"` to queue instead); fix transient generation always failing under opencode-go |
