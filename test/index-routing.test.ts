@@ -776,7 +776,7 @@ describe("index 话题路由（集成）", () => {
       secret,
     );
     const res = (await click({ cmd: "allow_session", a: "bash", t: token })) as { toast: { type: string } };
-    expect(res.toast.type).toBe("success");
+    expect(res.toast.type).toBe("info");
 
     await vi.waitFor(() => {
       const link = storage.raw("feishu:v2:session:ses_perm") as { allowActions?: string[] };

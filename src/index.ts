@@ -38,6 +38,7 @@ import { StopController } from "./feishu/run-stop.js";
 import { startWatchdog } from "./feishu/watchdog.js";
 import { FormRelay, type FormReplyInput } from "./feishu/form-relay.js";
 import { cancelFormOverHttp, replyFormOverHttp } from "./feishu/form-reply.js";
+import { replyPermissionOverHttp } from "./feishu/permission-http.js";
 import { listSessionsOverHttp } from "./session/session-list-http.js";
 import { ensureGatewayWatchdog, scheduleFastRevive, startKeepalive } from "./session/keepalive.js";
 import { isP2PChat } from "./feishu/events.js";
@@ -91,6 +92,7 @@ import { quickGenerateWithSession } from "./session/quick-generate.js";
 import type {
   CardAction,
   IncomingMessage,
+  Logger,
   ModelRef,
   PermissionPreset,
   PermissionRule,
@@ -771,7 +773,7 @@ async function start(
     sender,
     getLink: (sessionID) => sessionMap.resolveBySession(sessionID),
     isAllowed: (openId) => owner.isAllowed(openId),
-    reply: (input) => replyPermission(ctx, input),
+    reply: (input) => replyPermission(ctx, input, log),
     // 任务 A：审批卡「✅ 本会话内允许该工具」。
     sessionAllowButton: config.sessionAllowButton,
     signAllowSession: ({ requestID, sessionID, action }) =>
@@ -1655,7 +1657,7 @@ async function promoteQueuedInbox(
   }
 }
 
-async function replyPermission(ctx: Plugin.Context, input: ReplyInput): Promise<void> {
+async function replyPermission(ctx: Plugin.Context, input: ReplyInput, log: Logger): Promise<void> {
   const api = ctx.permission.reply as unknown as (
     arg: Record<string, unknown>,
     requestOptions?: { headers?: Record<string, string> },
@@ -1672,14 +1674,34 @@ async function replyPermission(ctx: Plugin.Context, input: ReplyInput): Promise<
   };
   try {
     await api({ ...base, reply: input.reply }, requestOptions);
+    return;
   } catch (err) {
     const text = errorMessage(err);
+    // 字段名兼容：部分版本的适配器用 decision 而非 reply。
     if (/decision|missing key|invalid|validation/i.test(text)) {
-      await api({ ...base, decision: input.reply }, requestOptions);
-      return;
+      try {
+        await api({ ...base, decision: input.reply }, requestOptions);
+        return;
+      } catch (err2) {
+        log.debug("permission.reply(decision) 仍失败，尝试本机 HTTP 兜底", {
+          requestID: input.requestID,
+          error: errorMessage(err2),
+        });
+      }
+    } else {
+      log.warn("permission.reply 失败，尝试本机 HTTP 兜底", { requestID: input.requestID, error: text });
     }
-    throw err;
   }
+  // HTTP 兜底：跨实例（回调落到非持有该请求的进程）时，直接投递到服务端的对应 location。
+  await replyPermissionOverHttp(
+    {
+      sessionID: input.sessionID,
+      requestID: input.requestID,
+      reply: input.reply,
+      ...(input.directory ? { directory: input.directory } : {}),
+    },
+    { log },
+  );
 }
 
 /**

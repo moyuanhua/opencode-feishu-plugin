@@ -59,11 +59,15 @@ function setup(
     sessionAllowButton?: boolean;
     allowSession?: (input: { sessionID: string; action: string }) => Promise<void>;
     hasSessionAllow?: (input: { sessionID: string; action: string }) => boolean;
+    /** 让 `reply` 抛错（模拟跨实例 / 请求不存在）。 */
+    replyThrows?: string;
   } = {},
 ) {
   const sender = new FakeSender();
   const replies: ReplyInput[] = [];
   const allowCalls: Array<{ sessionID: string; action: string }> = [];
+  /** 可变故障开关：测试可在重试前清掉。 */
+  const faults: { replyThrows?: string } = { ...(over.replyThrows ? { replyThrows: over.replyThrows } : {}) };
   const log = createLogger({ level: "error", sink: () => undefined });
   const manager = new ApprovalManager({
     config: { permissionGate: "gate", allowTools: [], denyTools: [], approvalTtlMs: 60_000, maxResourcesShown: 8 },
@@ -77,6 +81,7 @@ function setup(
     isAllowed: (openId) => (over.allowed ?? ["ou_1"]).includes(openId),
     reply: async (input) => {
       replies.push(input);
+      if (faults.replyThrows) throw new Error(faults.replyThrows);
     },
     sessionAllowButton: over.sessionAllowButton ?? true,
     signAllowSession: ({ requestID, sessionID, action }) =>
@@ -94,7 +99,7 @@ function setup(
     ...(over.hasSessionAllow ? { hasSessionAllow: over.hasSessionAllow } : {}),
     now: () => NOW,
   });
-  return { manager, sender, replies, allowCalls };
+  return { manager, sender, replies, allowCalls, faults };
 }
 
 const REQUEST = {
@@ -155,7 +160,7 @@ describe("ApprovalManager.handleCardAction", () => {
 
     const action: CardAction = { rawValue: { t: token, d: "once" }, messageId: "om_card_1", chatId: "oc_1", operatorOpenId: "ou_1" };
     const response = manager.handleCardAction(action) as { toast: { type: string } };
-    expect(response.toast.type).toBe("success");
+    expect(response.toast.type).toBe("info");
 
     await tick();
     expect(replies).toEqual([{ sessionID: "ses_1", requestID: "per_1", reply: "once" }]);
@@ -180,6 +185,62 @@ describe("ApprovalManager.handleCardAction", () => {
     expect(sender.deleted).toEqual(["om_card_1"]);
     expect(sender.patched).toHaveLength(1);
     expect((sender.patched[0]!.card as { header: { template: string } }).header.template).toBe("green");
+  });
+
+  test("reply 失败（not found）→ 保留卡片并 patch 红色失败卡 + 重试按钮（不误报成功）", async () => {
+    const { manager, sender, faults } = setup({ replyThrows: "Permission request not found: per_1" });
+    await manager.onAsked(REQUEST);
+    const token = tokenFrom(sender);
+
+    const res = manager.handleCardAction({
+      rawValue: { t: token, d: "once" },
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    }) as { toast: { type: string } };
+    expect(res.toast.type).toBe("info");
+
+    await tick();
+    // 不误撤回、不显示成功结果卡；改为红色「未生效」卡 + 重试
+    expect(sender.deleted).toHaveLength(0);
+    expect(sender.patched).toHaveLength(1);
+    const card = sender.patched[0]!.card as {
+      header: { template: string; title: { content: string } };
+      body: { elements: Array<Record<string, unknown>> };
+    };
+    expect(card.header.template).toBe("red");
+    expect(card.header.title.content).toContain("未生效");
+    const btn = card.body.elements.find((e) => e.tag === "button") as {
+      behaviors: Array<{ value: { t: string; d: string } }>;
+    };
+    expect(btn.behaviors[0]!.value.d).toBe("once");
+    expect(btn.behaviors[0]!.value.t).toBeTruthy();
+
+    // 故障恢复 → 点重试按钮（重签 token）→ reply 成功 → 撤回卡片
+    faults.replyThrows = undefined;
+    manager.handleCardAction({
+      rawValue: btn.behaviors[0]!.value,
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await tick();
+    expect(sender.deleted).toContain("om_card_1");
+  });
+
+  test("跨实例（本实例未跟踪该卡片）：reply 失败 → 发可见失败提示，不静默", async () => {
+    const { manager, sender, faults } = setup();
+    faults.replyThrows = "Permission request not found: per_x";
+    // 直接签一个该实例没跟踪过的请求 token（模拟回调落到非持有实例）。
+    const tok = signApproval({ r: "per_x", s: "ses_1", u: "ou_1", ttlMs: 60_000, now: NOW }, SECRET);
+    manager.handleCardAction({
+      rawValue: { t: tok, d: "once" },
+      messageId: "om_x",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await tick();
+    expect(sender.texts.some((t) => t.includes("审批未生效"))).toBe(true);
   });
 
   test("会话带 dir 时 reply 携带目录（跨 location 路由）", async () => {
@@ -241,7 +302,7 @@ describe("ApprovalManager.handleCardAction", () => {
     await tick();
     const second = manager.handleCardAction(action) as { toast: { type: string; content: string } };
 
-    expect(first.toast.type).toBe("warning"); // reject → warning toast
+    expect(first.toast.type).toBe("info"); // 先回执「处理中」，成功与否由卡片收敛体现
     expect(second.toast.type).toBe("warning");
     expect(second.toast.content).toContain("已处理");
     expect(replies).toHaveLength(1);
@@ -281,8 +342,7 @@ describe("ApprovalManager 会话内允许（任务 A）", () => {
       chatId: "oc_1",
       operatorOpenId: "ou_1",
     }) as { toast: { type: string; content: string } };
-    expect(res.toast.type).toBe("success");
-    expect(res.toast.content).toContain("bash");
+    expect(res.toast.type).toBe("info");
 
     await tick();
     expect(allowCalls).toEqual([{ sessionID: "ses_1", action: "bash" }]);
@@ -309,6 +369,35 @@ describe("ApprovalManager 会话内允许（任务 A）", () => {
     const patched = JSON.stringify(sender.patched[0]!.card);
     expect(patched).toContain("已允许本会话内 bash");
     expect(patched).not.toContain('"tag":"button"');
+  });
+
+  test("会话放行 reply 失败 → 保留卡片并 patch 失败卡 + 「本会话内允许」重试按钮", async () => {
+    const { manager, sender, allowCalls } = setup({ replyThrows: "Permission request not found: per_1" });
+    await manager.onAsked(REQUEST);
+    const value = allowValueFrom(sender);
+
+    manager.handleCardAction({
+      rawValue: value,
+      messageId: "om_card_1",
+      chatId: "oc_1",
+      operatorOpenId: "ou_1",
+    });
+    await tick();
+    expect(allowCalls).toHaveLength(1); // 会话级放行仍已写入（幂等）
+    expect(sender.deleted).toHaveLength(0); // 不误撤回
+    expect(sender.patched).toHaveLength(1);
+    const card = sender.patched[0]!.card as {
+      header: { template: string; title: { content: string } };
+      body: { elements: Array<Record<string, unknown>> };
+    };
+    expect(card.header.template).toBe("red");
+    expect(card.header.title.content).toContain("未生效");
+    const btn = card.body.elements.find((e) => e.tag === "button") as {
+      behaviors: Array<{ value: { cmd: string; a: string; t: string } }>;
+    };
+    expect(btn.behaviors[0]!.value.cmd).toBe("allow_session");
+    expect(btn.behaviors[0]!.value.a).toBe("bash");
+    expect(btn.behaviors[0]!.value.t).toBeTruthy();
   });
 
   test("非白名单用户被拒，且不写入、不 reply", async () => {
@@ -380,7 +469,7 @@ describe("ApprovalManager 会话内允许（任务 A）", () => {
     const first = manager.handleCardAction(action) as { toast: { type: string } };
     await tick();
     const second = manager.handleCardAction(action) as { toast: { type: string; content: string } };
-    expect(first.toast.type).toBe("success");
+    expect(first.toast.type).toBe("info");
     expect(second.toast.type).toBe("warning");
     expect(second.toast.content).toContain("已处理");
     expect(allowCalls).toHaveLength(1);

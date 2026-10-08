@@ -22,6 +22,7 @@ import { matchesAny } from "./security/allowlist.js";
 import { type AllowSessionClaims, type ReplayGuard, type VerifyResult } from "./security/token.js";
 import {
   buildApprovalCard,
+  buildApprovalFailedCard,
   buildResolvedCard,
   buildSessionAllowResolvedCard,
   type ApprovalCardInput,
@@ -204,6 +205,8 @@ interface TrackedCard {
   readonly input: ApprovalCardInput;
   /** 审批回复需要按会话所在 location 路由（跨 location 会话）。 */
   readonly directory?: string;
+  /** 卡片绑定人 openId（reply 失败重试时重签 token 用）。 */
+  readonly openId: string;
   resolved: boolean;
 }
 
@@ -268,6 +271,7 @@ export class ApprovalManager {
       messageId: result.messageId,
       input,
       ...(link.dir ? { directory: link.dir } : {}),
+      openId: link.openId,
       resolved: false,
     });
     this.deps.log.info("审批卡已发送", {
@@ -333,12 +337,11 @@ export class ApprovalManager {
     };
 
     // 后台回复 + 更新卡片，绝不阻塞回调 3 秒窗口。
+    // 注意：此处**不报成功**——reply 可能失败（如命中非持有该请求的实例）；
+    // 成功与否由卡片收敛体现（成功 → 撤回；失败 → 红色失败卡 + 重试）。
     void this.applyReply(claims.r, claims.s, parsed.decision, tracked, outcome, tracked?.directory);
 
-    return toast(
-      parsed.decision === "reject" ? "warning" : "success",
-      parsed.decision === "reject" ? "已拒绝" : "已允许",
-    );
+    return toast("info", "已提交，正在处理…");
   }
 
   /** 该会话是否有未决审批（看门狗判活：等审批属合法等待，不应判 stale）。 */
@@ -396,7 +399,6 @@ export class ApprovalManager {
     }
 
     const already = this.deps.hasSessionAllow?.({ sessionID: claims.s, action: claims.a }) ?? false;
-    if (tracked) tracked.resolved = true; // 防 `permission.replied` 用普通结果卡覆盖我们的专用卡。
     void this.applyAllowSession(claims, tracked, action).catch((err) =>
       this.deps.log.error("会话放行处理失败", {
         sessionID: claims.s,
@@ -406,7 +408,7 @@ export class ApprovalManager {
     );
     return already
       ? toast("info", "该工具已在本会话内允许")
-      : toast("success", `已允许本会话内 ${claims.a}`);
+      : toast("info", "已提交，正在处理…");
   }
 
   private async applyAllowSession(
@@ -435,15 +437,29 @@ export class ApprovalManager {
         ...(directory ? { directory } : {}),
       });
     } catch (err) {
+      // fail loud：reply 失败不静默——保留卡片并给「重试」，绝不误判成功/撤回。
+      const message = errorMessage(err);
+      const notFound = isRequestNotFound(err);
       this.deps.log.error("permission.reply 失败", {
         requestID: claims.r,
-        error: errorMessage(err),
+        sessionID: claims.s,
+        action: claims.a,
+        notFound,
+        error: message,
       });
+      if (tracked) {
+        tracked.resolved = false; // 允许后续 permission.replied 正常收敛
+        await this.patchAllowSessionFailed(tracked, claims.a, message, notFound);
+      } else {
+        await this.notifyFailure(claims.s, message, notFound);
+      }
+      return;
     }
 
-    // 3) 把审批卡收尾（优先撤回，失败降级为专用结果卡）。
+    // 3) reply 成功 → 收尾（优先撤回，失败降级为专用结果卡）。
     const messageId = tracked?.messageId;
     if (!messageId || !tracked) return;
+    tracked.resolved = true;
     const card = buildSessionAllowResolvedCard(tracked.input, {
       action: claims.a,
       operatorOpenId: action.operatorOpenId,
@@ -463,15 +479,103 @@ export class ApprovalManager {
     try {
       await this.deps.reply({ sessionID, requestID, reply, ...(directory ? { directory } : {}) });
     } catch (err) {
+      // fail loud：reply 失败不静默——保留卡片并给「重试」，避免「假成功」卡死会话。
+      const message = errorMessage(err);
+      const notFound = isRequestNotFound(err);
       this.deps.log.error("permission.reply 失败", {
         requestID,
         hasDir: Boolean(directory),
-        error: errorMessage(err),
+        notFound,
+        error: message,
       });
+      if (tracked) {
+        if (!tracked.resolved) await this.patchReplyFailed(tracked, reply, message, notFound);
+      } else {
+        await this.notifyFailure(sessionID, message, notFound);
+      }
       return;
     }
     if (tracked && !tracked.resolved) {
       await this.patchResolved(tracked, outcome, requestID);
+    }
+  }
+
+  /**
+   * reply 失败且本实例**未跟踪到该卡片**时（跨进程：回调落到非持有实例），
+   * 发一条可见失败提示，避免「静默假成功」。
+   */
+  private async notifyFailure(sessionID: string, reason: string, notFound: boolean): Promise<void> {
+    const link = await this.deps.getLink(sessionID);
+    if (!link) return;
+    const text = [
+      "⚠️ 审批未生效：本次操作没有送达 OpenCode，会话可能仍在等待。",
+      `原因：${reason}`,
+      notFound
+        ? "该请求可能已由另一个 opencode 实例处理、或已过期。请回到该会话重新触发审批。"
+        : "请稍后回到该会话重试。",
+    ].join("\n");
+    const res = link.replyMessageId
+      ? await this.deps.sender.replyText(link.replyMessageId, text)
+      : await this.deps.sender.sendText(link.chatId, text);
+    if (!res.ok) this.deps.log.warn("审批失败提示发送失败", { sessionID, error: res.error ?? "unknown" });
+  }
+
+  /** reply 失败 → 把审批卡 patch 成「未生效 + 重试」卡（重试携带重签 token）。 */
+  private async patchReplyFailed(
+    tracked: TrackedCard,
+    reply: PermissionReply,
+    reason: string,
+    notFound: boolean,
+  ): Promise<void> {
+    const token = this.deps.sign({
+      requestID: tracked.input.requestID,
+      sessionID: tracked.input.sessionID,
+      openId: tracked.openId,
+    });
+    const card = buildApprovalFailedCard(tracked.input, {
+      reason,
+      ...(notFound ? { notFound: true } : {}),
+      retry: { label: "🔁 重试", value: { t: token, d: reply } },
+    });
+    const res = await this.deps.sender.patchCard(tracked.messageId, card);
+    if (!res.ok) {
+      this.deps.log.warn("审批失败卡更新失败", {
+        requestID: tracked.input.requestID,
+        error: res.error ?? "unknown",
+      });
+    }
+  }
+
+  /** 会话放行 reply 失败 → 同样的「未生效 + 重试」卡（重试携带重签的 allow_session token）。 */
+  private async patchAllowSessionFailed(
+    tracked: TrackedCard,
+    action: string,
+    reason: string,
+    notFound: boolean,
+  ): Promise<void> {
+    const retryValue: Record<string, unknown> | undefined =
+      this.deps.signAllowSession && this.deps.sessionAllowButton !== false
+        ? {
+            cmd: "allow_session",
+            a: action,
+            t: this.deps.signAllowSession({
+              requestID: tracked.input.requestID,
+              sessionID: tracked.input.sessionID,
+              action,
+            }),
+          }
+        : undefined;
+    const card = buildApprovalFailedCard(tracked.input, {
+      reason,
+      ...(notFound ? { notFound: true } : {}),
+      ...(retryValue ? { retry: { label: "🔁 重试「本会话内允许」", value: retryValue } } : {}),
+    });
+    const res = await this.deps.sender.patchCard(tracked.messageId, card);
+    if (!res.ok) {
+      this.deps.log.warn("会话放行失败卡更新失败", {
+        requestID: tracked.input.requestID,
+        error: res.error ?? "unknown",
+      });
     }
   }
 
@@ -496,6 +600,11 @@ export class ApprovalManager {
 }
 
 type ToastType = "success" | "error" | "warning" | "info";
+
+/** 是否「请求不存在」类错误（命中非持有该请求的实例 / 已过期失效）。 */
+function isRequestNotFound(err: unknown): boolean {
+  return /not\s*found/i.test(errorMessage(err));
+}
 
 function toast(type: ToastType, content: string): object {
   return { toast: { type, content } };

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   buildApprovalCard,
+  buildApprovalFailedCard,
   buildConsoleHintCard,
   buildResolvedCard,
   buildSessionAllowResolvedCard,
@@ -95,6 +96,28 @@ describe("buildResolvedCard", () => {
 
     const allowed = buildResolvedCard(baseInput, { reply: "always", operatorOpenId: "ou_1", at: 0 }) as Record<string, unknown>;
     expect((allowed.header as Record<string, unknown>).template).toBe("green");
+  });
+});
+
+describe("buildApprovalFailedCard", () => {
+  test("红色「未生效」卡 + 原因 + 重试按钮", () => {
+    const card = buildApprovalFailedCard(baseInput, {
+      reason: "Permission request not found: per_1",
+      notFound: true,
+      retry: { label: "🔁 重试", value: { t: "tok-2", d: "once" } },
+    }) as Record<string, unknown>;
+    expect((card.header as Record<string, unknown>).template).toBe("red");
+    expect(JSON.stringify(card)).toContain("未生效");
+    expect(JSON.stringify(card)).toContain("另一个 opencode 实例");
+    const btn = (card.body as { elements: Array<Record<string, unknown>> }).elements.find(
+      (e) => e.tag === "button",
+    ) as { behaviors: Array<{ value: Record<string, unknown> }> };
+    expect(btn.behaviors[0]!.value).toEqual({ t: "tok-2", d: "once" });
+  });
+
+  test("无 retry 时不渲染按钮", () => {
+    const card = buildApprovalFailedCard(baseInput, { reason: "network" });
+    expect(JSON.stringify(card)).not.toContain('"tag":"button"');
   });
 });
 

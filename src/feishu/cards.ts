@@ -198,6 +198,43 @@ export function buildResolvedCard(input: ApprovalCardInput, outcome: ApprovalOut
 }
 
 /**
+ * 审批「未生效」卡片：`permission.reply` 失败时**保留卡片**（不误判成功/撤回），
+ * 展示原因并给出「🔁 重试」按钮（携带重签的 token）。
+ */
+export interface ApprovalFailedInput {
+  readonly reason: string;
+  /** true = 请求已失效 / 命中非持有实例（not found）。 */
+  readonly notFound?: boolean;
+  readonly retry?: { readonly label: string; readonly value: Record<string, unknown> };
+}
+
+export function buildApprovalFailedCard(input: ApprovalCardInput, failed: ApprovalFailedInput): object {
+  const lines = [
+    `**操作**：\`${escapeInline(input.action)}\``,
+    "",
+    "⚠️ **审批未生效**：本次操作没有送达 OpenCode，会话可能仍在等待。",
+    "",
+    `**原因**：${escapeInline(failed.reason)}`,
+  ];
+  if (failed.notFound) {
+    lines.push(
+      "",
+      "该请求可能已由**另一个 opencode 实例**处理、或已过期失效。可点下方「🔁 重试」；若仍失败，请回到该会话重新触发一次操作。",
+    );
+  } else {
+    lines.push("", "请稍后点下方「🔁 重试」。");
+  }
+  const elements: object[] = [{ tag: "markdown", content: truncateCardContent(lines.join("\n")) }];
+  if (failed.retry) elements.push(cardButton(failed.retry.label, "primary", failed.retry.value));
+  return {
+    schema: "2.0",
+    config: { update_multi: true },
+    header: { title: { tag: "plain_text", content: "❌ 审批未生效" }, template: "red" },
+    body: { elements },
+  };
+}
+
+/**
  * 卡死 / 排队超时提示卡（任务 B）：提示已自动中断，并带「强制停止」按钮供重试。
  * 与运行卡一致：JSON 2.0，按钮直放 `body.elements`，回调走 `behaviors`。
  */
