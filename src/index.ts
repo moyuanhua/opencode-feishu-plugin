@@ -1272,8 +1272,100 @@ async function start(
   }
 
   /**
+   * 消息缓冲（批处理）：同一会话内、窗口期（`messageBatchMs`）连续到达的消息合并成
+   * **一次** prompt（回执卡仍在**第一条**消息时立即发 → 即时反馈 + 只出一张卡）。
+   *
+   * 典型场景：飞书发图片/文件常被拆成多条消息、连发多张图 → 原来每条各出一张卡刷屏。
+   */
+  interface PendingBatch {
+    readonly sessionID: string;
+    readonly chatId: string;
+    readonly delivery: Delivery;
+    readonly replyToMessageId?: string;
+    readonly messages: IncomingMessage[];
+    timer?: ReturnType<typeof setTimeout>;
+  }
+  const batches = new Map<string, PendingBatch>();
+
+  function armBatchTimer(batch: PendingBatch): void {
+    if (batch.timer) clearTimeout(batch.timer);
+    batch.timer = setTimeout(() => {
+      void flushBatch(batch.sessionID);
+    }, config.messageBatchMs);
+  }
+
+  /** 窗口结束：取出批次并合并提交。 */
+  async function flushBatch(sessionID: string): Promise<void> {
+    const batch = batches.get(sessionID);
+    if (!batch) return;
+    batches.delete(sessionID);
+    if (batch.timer) clearTimeout(batch.timer);
+    await promptBatch(batch);
+  }
+
+  /** 合并一批消息为一次 prompt（下载全部附件，文本用空行拼接）。 */
+  async function promptBatch(batch: PendingBatch): Promise<void> {
+    const link = await sessionMap.resolveBySession(batch.sessionID);
+    const texts: string[] = [];
+    const files: Array<{ uri: string }> = [];
+    for (const message of batch.messages) {
+      let text = message.text;
+      if (config.acceptAttachments && message.attachment) {
+        // 图片/文件：先下载到本地（默认落在会话工作目录），作为会话附件挂进 prompt；失败降级占位文本。
+        const outcome = await downloadAttachment({
+          client,
+          messageId: message.messageId,
+          attachment: message.attachment,
+          dir: resolveAttachmentDir(config.attachmentsDir, link?.dir),
+          maxBytes: config.attachmentMaxBytes,
+          timeoutMs: config.attachmentTimeoutMs,
+          log,
+          ...(config.attachmentsDir ? {} : { gitIgnore: true }),
+        });
+        if (outcome.ok) {
+          files.push({ uri: pathToFileURL(outcome.path).href });
+          text = `${text}\n\n${downloadedAttachmentPrompt(message.attachment, outcome)}`;
+        } else {
+          text = `${text}\n\n[附件] 下载失败：${outcome.reason}`;
+        }
+      }
+      if (text.trim()) texts.push(text);
+    }
+    const promptText = texts.join("\n\n") || "(空消息)";
+    try {
+      await promptSession(ctx, batch.sessionID, promptText, batch.delivery, files);
+    } catch (err) {
+      log.warn("prompt 发送失败", { sessionID: batch.sessionID, error: errorMessage(err) });
+      // 卡片收尾为失败态，避免页脚永久停在「思考中」；话题根卡同样收尾。
+      runs.apply(batch.sessionID, { type: "execution.failed", error: errorMessage(err) });
+      topicStatus.markTerminal(batch.sessionID, "failed");
+    }
+  }
+
+  /** 发回执卡（含模型页脚，以读回的真实值为准）。 */
+  async function beginReceipt(
+    sessionID: string,
+    chatId: string,
+    delivery: Delivery,
+    replyToMessageId?: string,
+  ): Promise<void> {
+    const link = await sessionMap.resolveBySession(sessionID);
+    const modelRef = (await readSessionModelQuiet(sessionID, link?.dir)) ?? link?.model;
+    const model = modelRef ? modelLabel(modelRef) : undefined;
+    const receipt = await runs.beginRun({
+      sessionID,
+      chatId,
+      delivery,
+      ...(replyToMessageId ? { replyToMessageId } : {}),
+      ...(model ? { model } : {}),
+    });
+    if (!receipt.ok) log.warn("回执卡未发送，仍继续 prompt", { sessionID, delivery });
+  }
+
+  /**
    * 在指定会话里跑一条消息：先发回执卡，再 prompt。
    * `replyToMessageId` 有值时回执卡引用该消息（话题内 → 回复留在话题）。
+   * `messageBatchMs > 0` 时，窗口内连续消息合并为一次 prompt（见 `PendingBatch`）。
    */
   async function runInSession(
     message: IncomingMessage,
@@ -1282,55 +1374,41 @@ async function start(
     forceDelivery?: Delivery,
   ): Promise<void> {
     // 原生投递：空闲 → steer；忙时按 `busyDelivery` 偏好（默认 steer = 立即插队）。`/steer` 强制 steer。
-    const delivery: Delivery = forceDelivery ?? decideDelivery(executions.isRunning(sessionID), config.busyDelivery);
-    // P6：运行卡页脚展示当前模型。以**读回的真实值**为准（读回失败才回退记录值）。
-    const link = await sessionMap.resolveBySession(sessionID);
-    const modelRef = (await readSessionModelQuiet(sessionID, link?.dir)) ?? link?.model;
-    const model = modelRef ? modelLabel(modelRef) : undefined;
+    const delivery: Delivery =
+      forceDelivery ?? decideDelivery(executions.isRunning(sessionID), config.busyDelivery);
 
-    // 关键顺序：**先**发回执卡（含状态页脚），再下载附件、发起 prompt。
-    const receipt = await runs.beginRun({
+    // 关闭缓冲：立即跑（与旧行为一致）。
+    if (config.messageBatchMs <= 0) {
+      await beginReceipt(sessionID, message.chatId, delivery, replyToMessageId);
+      await promptBatch({
+        sessionID,
+        chatId: message.chatId,
+        delivery,
+        ...(replyToMessageId ? { replyToMessageId } : {}),
+        messages: [message],
+      });
+      return;
+    }
+
+    // 窗口内已有批次 → 追加并重置计时器（回执卡已在首条消息时发出，不重复出卡）。
+    const existing = batches.get(sessionID);
+    if (existing) {
+      existing.messages.push(message);
+      armBatchTimer(existing);
+      log.debug("消息并入批次", { sessionID, batchSize: existing.messages.length });
+      return;
+    }
+
+    const batch: PendingBatch = {
       sessionID,
       chatId: message.chatId,
       delivery,
       ...(replyToMessageId ? { replyToMessageId } : {}),
-      ...(model ? { model } : {}),
-    });
-    if (!receipt.ok) log.warn("回执卡未发送，仍继续 prompt", { sessionID, delivery });
-
-    // 图片/文件：先下载到本地（默认落在**会话工作目录**：`<dir>/.opencode/temp/opencode-feishu-plugin/`），
-    // 作为会话附件挂进 prompt；失败降级为占位文本 + 原因。
-    let promptText = message.text;
-    const files: Array<{ uri: string }> = [];
-    if (config.acceptAttachments && message.attachment) {
-      const outcome = await downloadAttachment({
-        client,
-        messageId: message.messageId,
-        attachment: message.attachment,
-        dir: resolveAttachmentDir(config.attachmentsDir, link?.dir),
-        maxBytes: config.attachmentMaxBytes,
-        timeoutMs: config.attachmentTimeoutMs,
-        log,
-        // 显式配置的目录不动；默认的会话内目录顺手放 `.gitignore`，避免污染 git status。
-        ...(config.attachmentsDir ? {} : { gitIgnore: true }),
-      });
-      if (outcome.ok) {
-        files.push({ uri: pathToFileURL(outcome.path).href });
-        promptText = `${promptText}\n\n${downloadedAttachmentPrompt(message.attachment, outcome)}`;
-      } else {
-        promptText = `${promptText}\n\n[附件] 下载失败：${outcome.reason}`;
-      }
-    }
-
-    try {
-      await promptSession(ctx, sessionID, promptText, delivery, files);
-    } catch (err) {
-      log.warn("prompt 发送失败", { sessionID, error: errorMessage(err) });
-      // 卡片收尾为失败态，避免页脚永久停在「思考中」。
-      runs.apply(sessionID, { type: "execution.failed", error: errorMessage(err) });
-      // 话题根卡同样收尾为失败态（运行卡自身的终态来源之一）。
-      topicStatus.markTerminal(sessionID, "failed");
-    }
+      messages: [message],
+    };
+    batches.set(sessionID, batch);
+    await beginReceipt(sessionID, message.chatId, delivery, replyToMessageId);
+    armBatchTimer(batch);
   }
 
   const gateway = startGateway({
@@ -1528,6 +1606,11 @@ async function start(
     stopWatchdog();
     stopKeepalive?.();
     await subscription.catch(() => undefined);
+    // 丢弃未刷出的消息批次（连同定时器）。
+    for (const batch of batches.values()) {
+      if (batch.timer) clearTimeout(batch.timer);
+    }
+    batches.clear();
     runs.dispose();
     executions.clear();
     topicStatus.dispose();

@@ -201,6 +201,15 @@ export interface ResolvedConfig {
    * - `queue`：原生排队，等当前步骤结束后处理（长命令场景更温和）。
    */
   readonly busyDelivery: "steer" | "queue";
+  /**
+   * 消息缓冲窗口（毫秒，默认 1500，夹取 0–10000）。
+   *
+   * 同一会话内、该窗口内连续到达的消息**合并成一次 prompt / 一张回执卡**：
+   * 飞书里发图片/文件常被拆成多条消息、连发多张图时会各出一张卡刷屏；缓冲后
+   * 回执卡仍在**第一条**消息时立即发出（即时反馈），prompt 在窗口结束（最后一条后
+   * 静默这么久）才合并提交。`0` = 关闭（每条消息各跑一次，与旧行为一致）。
+   */
+  readonly messageBatchMs: number;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -289,6 +298,7 @@ export function resolveConfig(
   const attachmentsDirRaw = asString(merged.attachmentsDir).trim();
   const quickNew = asBoolean(merged.quickNew, true);
   const busyDelivery = merged.busyDelivery === "queue" ? "queue" : "steer";
+  const messageBatchMs = clamp(asNumber(merged.messageBatchMs, 1500), 0, 10_000);
   const keepaliveIntervalMs = clamp(
     asNumber(merged.keepaliveIntervalMs, 20 * 60 * 1000),
     5 * 60 * 1000,
@@ -360,6 +370,7 @@ export function resolveConfig(
     ...(attachmentsDirRaw ? { attachmentsDir: attachmentsDirRaw } : {}),
     quickNew,
     busyDelivery,
+    messageBatchMs,
   };
 }
 

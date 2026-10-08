@@ -113,6 +113,8 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       // 测试默认关闭「一句话建会话」，避免主聊天流文本触发额外模型调用；
       // quick-new 用例显式 setup({ quickNew: true })。
       quickNew: false,
+      // 默认关闭消息缓冲，保持每条消息即时跑（缓冲有专门用例）。
+      messageBatchMs: 0,
       ...overrides,
     },
     storage: {
@@ -305,6 +307,27 @@ describe("index 话题路由（集成）", () => {
 
     expect(createSession).toHaveBeenCalledTimes(1);
     expect(promptCalls.map((p) => p.sessionID)).toEqual(["ses_0", "ses_0"]);
+  });
+
+  test("消息缓冲：窗口内连发多条 → 合并为一次 prompt + 只出一张回执卡", async () => {
+    cleanup = await setup({ messageBatchMs: 40 });
+    await deliver(msg("第一段", { messageId: "om_b1", threadId: "omt_b", rootId: "omr_b" }));
+    await deliver(
+      msg("[图片]", { messageId: "om_b2", messageType: "image", threadId: "omt_b", rootId: "omr_b" }),
+    );
+    await deliver(msg("第三段", { messageId: "om_b3", threadId: "omt_b", rootId: "omr_b" }));
+
+    // 窗口内尚未提交给模型
+    expect(promptCalls).toHaveLength(0);
+    await new Promise((r) => setTimeout(r, 150));
+    // 合并成一次 prompt，三条文本都在
+    expect(promptCalls).toHaveLength(1);
+    expect(promptCalls[0]!.text).toContain("第一段");
+    expect(promptCalls[0]!.text).toContain("[图片]");
+    expect(promptCalls[0]!.text).toContain("第三段");
+    // 只发了一张回执卡（后续消息并入批次，不再出卡）
+    expect(h.replied).toHaveLength(1);
+    expect(createSession).toHaveBeenCalledTimes(1);
   });
 
   test("root 命中（手动从卡片建话题）：复用该会话并补写 thread", async () => {

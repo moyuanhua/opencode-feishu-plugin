@@ -467,6 +467,18 @@ describe("busyDelivery（忙时投递偏好）", () => {
   });
 });
 
+describe("messageBatchMs（消息缓冲窗口）", () => {
+  const base = { appId: "a", appSecret: "b", logFile: false };
+  test("默认 1500ms", () => {
+    expect(resolveConfig(base, {}, noFile()).messageBatchMs).toBe(1500);
+  });
+  test("0 = 关闭；越界夹取到 0–10000", () => {
+    expect(resolveConfig({ ...base, messageBatchMs: 0 }, {}, noFile()).messageBatchMs).toBe(0);
+    expect(resolveConfig({ ...base, messageBatchMs: -5 }, {}, noFile()).messageBatchMs).toBe(0);
+    expect(resolveConfig({ ...base, messageBatchMs: 999_999 }, {}, noFile()).messageBatchMs).toBe(10_000);
+  });
+});
+
 describe("gatewayMatchGraceMs（精确匹配宽限）", () => {
   const base = { appId: "a", appSecret: "b", logFile: false };
   test("默认 3000ms", () => {

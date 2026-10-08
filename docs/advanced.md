@@ -198,6 +198,7 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `staleExecutionMs` | number | `300000` | 看门狗阈值（夹取 0–60 分钟；**0 = 关闭**；见「看门狗判活规则」） |
 | `quickNew` | boolean | `true` | 主聊天流「AI 会话管理」（AI 承接普通文本与建会话/管理类命令，判意图 + 找目录，拿不准时对话追问）；`false` 关闭 |
 | `busyDelivery` | `steer`\|`queue` | `steer` | 忙时新消息投递方式：`steer` = 立即插队（默认）；`queue` = 原生排队，见「排队卡生命周期」 |
+| `messageBatchMs` | number | `1500` | 消息缓冲窗口（0–10000，0=关闭）：同一会话该窗口内连发的消息合并成**一次 prompt / 一张回执卡**——回执卡在首条消息时立即发，prompt 在最后一条消息静默该窗口后合并提交 |
 | `maxResourcesShown` | number | `8` | 审批卡最多展示的资源行数 |
 | `sessionAllowButton` | boolean | `true` | 审批卡是否显示「本会话内允许该工具」按钮 |
 | `resumeSummary` | boolean | `true` | 恢复卡是否展示会话摘要 |
