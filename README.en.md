@@ -190,6 +190,7 @@ When the agent asks via `question` or other form tools, the form becomes a Feish
 | `staleExecutionMs` | number | `300000` | Watchdog threshold (0–60 min; **0 = disabled**; sessions waiting on a form / pending approval are never killed) |
 | `quickNew` | boolean | `true` | Main-chat "AI session management": AI handles plain text and creation/management commands, judges intent + finds the directory (asks back in conversation when unsure); `false` disables |
 | `busyDelivery` | `steer`\|`queue` | `steer` | Delivery for new messages while busy: `steer` = cut in and interrupt the current step; `queue` = native queueing (gentler for long commands) |
+| `messageBatchMs` | number | `1500` | Message buffer window: messages arriving within this window in the same session are **merged into one prompt / one receipt card** (no more card spam when a file/image is split into several messages or several images are sent in a row); `0` = off |
 | `gatewayLocation` | string | — | Only start the gateway at this location (or its subdirectories); empty = any location |
 
 Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepalive*`, `gatewayMatchGraceMs`) → [docs/advanced.en.md](./docs/advanced.en.md#full-configuration).
@@ -231,6 +232,7 @@ Iterating from real usage feedback; current plan:
 
 | Version | Highlights |
 |---|---|
+| **v0.2.23** | **Message buffering**: messages arriving within a window (`messageBatchMs`, default 1500ms) in the same session are **merged into one prompt / one receipt card** — no more card spam when a file/image is split into several messages or several images are sent in a row; the receipt card still appears immediately on the first message, and the prompt is submitted once the last message has been quiet for the window. `messageBatchMs: 0` disables |
 | **v0.2.22** | Fix issue #4 "approvals silently swallowed": a failed `permission.reply` no longer fakes success or withdraws the card — it shows a red "❌ 审批未生效" card with **🔁 retry** (re-signed token); `reply` failures now fall back to the **local HTTP API** (so a callback landing on the wrong instance can still deliver to the location owning the request); callbacks on an untracked instance post a visible failure notice; click toasts changed to "submitted, processing…" |
 | **v0.2.21** | **Form / question cards**: fields that accept free text now render an **input box + "✅ 提交" right in the card** — no need to type in the topic; clicking option buttons / replying with text in the topic still works |
 | **v0.2.20** | Location-eviction handling: measured confirmation that eviction **cannot be prevented from the plugin side** (hardcoded 60-min TTL + no working refresh channel) → **second-scale revive after eviction** (probes at +1s/+5s/+20s on dispose); outage drops from 20 min to ~10 s |
