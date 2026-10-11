@@ -159,7 +159,7 @@ A topic = a session; sending plain text is giving the AI a command.
 |---|---|
 | 🔒 **Read-only** | Look only (denies `edit` / `shell`) |
 | ✏️ **Editable** | File edits free, shell commands ask |
-| ⚠️ **High-risk approval** | File edits, shell commands and out-of-root access all ask |
+| ⚠️ **High-risk approval** | Normal operations run; only **shell / edits / out-of-root** access ask each time (self-contained, no directory inheritance) |
 | 🔓 **Full trust** | Never ask |
 
 Permission requests become approval cards: `✅ Allow once` / `🔓 Always allow` / `✅ Allow this tool in this session` / `❌ Deny`. Changing tier (`/perm`) clears this session's "allow in this session" grants.
@@ -192,6 +192,7 @@ When the agent asks via `question` or other form tools, the form becomes a Feish
 | `busyDelivery` | `steer`\|`queue` | `steer` | Delivery for new messages while busy: `steer` = cut in and interrupt the current step; `queue` = native queueing (gentler for long commands) |
 | `messageBatchMs` | number | `1500` | Message buffer window: messages arriving within this window in the same session are **merged into one prompt / one receipt card** (no more card spam when a file/image is split into several messages or several images are sent in a row); `0` = off |
 | `gatewayLocation` | string | — | Only start the gateway at this location (or its subdirectories); empty = any location |
+| `gatewayLeader` | boolean | `true` | Cross-location / cross-process **gateway convergence**: a machine-wide leader is elected via a state-dir lock so only one instance runs the Feishu long connection (events are server-global) — fixes "form expired / approval not found" |
 
 Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepalive*`, `gatewayMatchGraceMs`) → [docs/advanced.en.md](./docs/advanced.en.md#full-configuration).
 
@@ -209,7 +210,7 @@ Full config (including `cardMaxTables`, `topicStatus*`, `resumeSummary*`, `keepa
 | Bot goes silent after ~1h idle | opencode recycles idle locations every 60 min (**cannot be prevented from the plugin side**); the plugin **rebuilds it within seconds** after eviction (v0.2.20, incl. single-location), see [docs/advanced.en.md](./docs/advanced.en.md#location-keep-alive) |
 | Plugin reloads frequently / WS reconnects repeatedly | `logFile` points inside the opencode **config directory** (writing logs there counts as a config change → a reload per log write). Use the default, or move the log outside the config dir (default `~/.local/state/opencode/feishu-plugin.log`) |
 | Can't see plugin logs | stderr is discarded in server mode; set `logFile: true` (writes `~/.local/state/opencode/feishu-plugin.log` by default) |
-| Multiple long connections / duplicate replies | `gatewayLocation` only collapses **multiple locations within one process**; the plugin **assumes a single opencode server per machine**. Multiple processes (e.g. TUI + `opencode serve`) each open their own long connection, and an approval callback may land on an instance that **doesn't hold the request** — the card now shows "❌ 审批未生效" with a retry (no more false success). To avoid entirely, keep a single instance |
+| Multiple long connections / duplicate replies | Now auto-converged to **one instance** by `gatewayLeader` (machine-wide leader election); `gatewayLocation` can further restrict the location. If you disable `gatewayLeader` and run multiple locations / processes, a callback may land on an instance that **doesn't hold the request** — the card shows "❌ 审批未生效" with a retry |
 | Approval card shows "❌ 审批未生效" / " Approval not applied" | `permission.reply` couldn't be delivered — usually **multiple instances** (the request lives in another process) or an expired request. Tap "🔁 重试"; if it still fails, re-trigger the action in that session, or keep a single opencode instance |
 
 ## 6. Known limitations
@@ -232,6 +233,7 @@ Iterating from real usage feedback; current plan:
 
 | Version | Highlights |
 |---|---|
+| **v0.2.24** | **Cross-location / cross-process gateway convergence**: added a **machine-wide leader election** (atomic directory lock under `stateDir`) so only one instance runs the Feishu long connection + event subscription — fixes the multi-instance root cause of "form expired / approvals silently swallowed" (`gatewayLeader`, on by default); the **⚠️ High-risk approval** tier is now **self-contained** (normal ops run, only shell / edits / out-of-root ask each time; no directory inheritance) |
 | **v0.2.23** | **Message buffering**: messages arriving within a window (`messageBatchMs`, default 1500ms) in the same session are **merged into one prompt / one receipt card** — no more card spam when a file/image is split into several messages or several images are sent in a row; the receipt card still appears immediately on the first message, and the prompt is submitted once the last message has been quiet for the window. `messageBatchMs: 0` disables |
 | **v0.2.22** | Fix issue #4 "approvals silently swallowed": a failed `permission.reply` no longer fakes success or withdraws the card — it shows a red "❌ 审批未生效" card with **🔁 retry** (re-signed token); `reply` failures now fall back to the **local HTTP API** (so a callback landing on the wrong instance can still deliver to the location owning the request); callbacks on an untracked instance post a visible failure notice; click toasts changed to "submitted, processing…" |
 | **v0.2.21** | **Form / question cards**: fields that accept free text now render an **input box + "✅ 提交" right in the card** — no need to type in the topic; clicking option buttons / replying with text in the topic still works |
