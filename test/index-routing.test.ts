@@ -477,6 +477,30 @@ describe("index 话题路由（集成）", () => {
     expect(h.resourceGets).toHaveLength(1);
   });
 
+  test("多附件（post 图片+文字）：全部下载并挂进同一 prompt", async () => {
+    const { rm } = await import("node:fs/promises");
+    cleanup = await setup({ attachmentsDir: "/tmp/feishu-att-multi" });
+    await rm("/tmp/feishu-att-multi", { recursive: true, force: true });
+    await deliver(msg("干活", { messageId: "om_m_boot", threadId: "omt_m", rootId: "omr_m" }));
+    await deliver(
+      msg("[图片]\n看图", {
+        messageId: "om_m1",
+        messageType: "post",
+        threadId: "omt_m",
+        rootId: "omr_m",
+        attachments: [
+          { kind: "image", fileKey: "img_a" },
+          { kind: "image", fileKey: "img_b" },
+        ],
+      }),
+    );
+    const last = promptCalls.at(-1)!;
+    expect(last.text).toContain("[附件] 图片");
+    expect(last.files).toHaveLength(2);
+    // 两张图落不同文件（fileKey 后缀去重，不互相覆盖）
+    expect(last.files![0]!.uri).not.toBe(last.files![1]!.uri);
+  });
+
   // ── 主聊天流「AI 会话管理」（issue #2 演进）────────────────────────────
   /** 在全部 patch 中查找包含指定文案的卡片（避免受跨用例迟到 patch 影响）。 */
   const findPatched = (text: string): string =>

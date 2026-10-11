@@ -94,29 +94,75 @@ function extractPostText(rawContent: string): string {
 }
 
 /**
- * 解析图片/文件消息的资源信息（`image_key` / `file_key`）。
- * 仅 image / file 两类；其余类型返回 undefined（保持占位文本行为）。
+ * 解析消息里的**全部**图片/文件附件。
+ *
+ * - `image` / `file`：单个附件（`image_key` / `file_key`）；
+ * - `post`（**富文本**）：图片+文字一起发时飞书用的就是 post，图片以内联 `img` 元素存在
+ *   （`image_key`），**可能有多张**；文件元素（`file`/`media`）尽力兼容；
+ * - 其余类型：空数组。
+ *
+ * 这是「图片+文字一起发时 AI 只看到占位、看不到图」的修复点：post 类型此前被直接忽略。
+ */
+export function parseIncomingAttachments(messageType: string, rawContent: string): IncomingAttachment[] {
+  if (messageType === "image") {
+    const key = str(parseJsonObject(rawContent)?.image_key);
+    return key ? [{ kind: "image", fileKey: key }] : [];
+  }
+  if (messageType === "file") {
+    const obj = parseJsonObject(rawContent);
+    const fileKey = str(obj?.file_key);
+    if (!fileKey) return [];
+    const fileName = str(obj?.file_name);
+    return [{ kind: "file", fileKey, ...(fileName ? { fileName } : {}) }];
+  }
+  if (messageType === "post") return parsePostAttachments(rawContent);
+  return [];
+}
+
+/** 从 `post`（富文本）内容里提取内联图片/文件（`content` 为二维数组，元素含 `img`/`file` 等）。 */
+export function parsePostAttachments(rawContent: string): IncomingAttachment[] {
+  const parsed = parseJsonObject(rawContent);
+  const content = parsed?.content;
+  if (!Array.isArray(content)) return [];
+  const out: IncomingAttachment[] = [];
+  for (const paragraph of content) {
+    if (!Array.isArray(paragraph)) continue;
+    for (const el of paragraph) {
+      if (!isRecordLike(el)) continue;
+      if (el.tag === "img") {
+        const key = str(el.image_key);
+        if (key) out.push({ kind: "image", fileKey: key });
+      } else if (el.tag === "file" || el.tag === "media") {
+        const key = str(el.file_key);
+        if (key) {
+          const fileName = str(el.file_name);
+          out.push({ kind: "file", fileKey: key, ...(fileName ? { fileName } : {}) });
+        }
+      }
+    }
+  }
+  return out;
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> | undefined {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    return isRecordLike(parsed) ? parsed : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 解析图片/文件消息的资源信息（`image_key` / `file_key`）——**首个**附件（向后兼容）。
+ * 仅 image / file 两类；其余类型返回 undefined。多附件请用 `parseIncomingAttachments`。
  */
 export function parseIncomingAttachment(
   messageType: string,
   rawContent: string,
 ): IncomingAttachment | undefined {
   if (messageType !== "image" && messageType !== "file") return undefined;
-  let parsed: Record<string, unknown>;
-  try {
-    parsed = JSON.parse(rawContent) as Record<string, unknown>;
-  } catch {
-    return undefined;
-  }
-  if (!isRecordLike(parsed)) return undefined;
-  if (messageType === "image") {
-    const imageKey = str(parsed.image_key);
-    return imageKey ? { kind: "image", fileKey: imageKey } : undefined;
-  }
-  const fileKey = str(parsed.file_key);
-  if (!fileKey) return undefined;
-  const fileName = str(parsed.file_name);
-  return { kind: "file", fileKey, ...(fileName ? { fileName } : {}) };
+  return parseIncomingAttachments(messageType, rawContent)[0];
 }
 
 function isRecordLike(value: unknown): value is Record<string, unknown> {
@@ -143,7 +189,7 @@ export function parseIncomingMessage(data: unknown): IncomingMessage | undefined
   const sender = data.sender;
   const senderOpenId = isRecord(sender) && isRecord(sender.sender_id) ? str(sender.sender_id.open_id) : "";
 
-  const attachment = parseIncomingAttachment(messageType, rawContent);
+  const attachments = parseIncomingAttachments(messageType, rawContent);
   return {
     eventId: str(data.event_id),
     messageId,
@@ -151,7 +197,7 @@ export function parseIncomingMessage(data: unknown): IncomingMessage | undefined
     chatType: str(message.chat_type) || "p2p",
     messageType,
     text: extractMessageText(messageType, rawContent),
-    ...(attachment ? { attachment } : {}),
+    ...(attachments.length > 0 ? { attachment: attachments[0]!, attachments } : {}),
     senderOpenId,
     ...(str(message.create_time) ? { createTime: str(message.create_time) } : {}),
     ...(str(message.thread_id) ? { threadId: str(message.thread_id) } : {}),

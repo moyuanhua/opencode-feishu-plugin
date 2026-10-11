@@ -42,8 +42,13 @@ export interface IncomingMessage {
   readonly messageType: string;
   /** 已抽取并清理 @占位符 的文本；非文本消息为占位描述。 */
   readonly text: string;
-  /** 图片/文件消息的资源信息（其余类型 undefined）；`acceptAttachments` 时下载后挂进会话。 */
+  /** 图片/文件消息的资源信息（首个附件，向后兼容）；`acceptAttachments` 时下载后挂进会话。 */
   readonly attachment?: IncomingAttachment;
+  /**
+   * 全部附件（图片+文字一起发时的 `post` 富文本可含多张图）。
+   * 优先用这个；缺省时回退到 `attachment`。
+   */
+  readonly attachments?: readonly IncomingAttachment[];
   readonly senderOpenId: string;
   readonly createTime?: string;
   /** 话题 ID（`omt_`）。单聊里通过「创建话题」产生；普通消息为 undefined。 */

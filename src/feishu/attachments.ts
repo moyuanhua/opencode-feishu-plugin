@@ -70,6 +70,8 @@ export interface DownloadAttachmentInput {
   readonly log: Logger;
   /** true = 在目录内确保 `.gitignore`（`*`），默认落盘会话目录时用，避免污染 git status。 */
   readonly gitIgnore?: boolean;
+  /** 同一消息**多附件**时的去重后缀（如序号/fileKey），避免同名文件互相覆盖；单附件不传。 */
+  readonly uniqueSuffix?: string;
 }
 
 export type DownloadAttachmentOutcome =
@@ -190,7 +192,11 @@ export async function downloadAttachment(
       return { ok: false, reason: "资源接口未返回文件流" };
     }
     const name = buildAttachmentFileName(attachment, res.headers);
-    target = join(dir, `${messageId}-${name}`);
+    // 同一消息多附件时加后缀（由调用方给出），避免同名文件互相覆盖；单附件保持旧命名。
+    const suffix = input.uniqueSuffix
+      ? `${sanitizeAttachmentName(input.uniqueSuffix, "x").slice(0, 16)}-`
+      : "";
+    target = join(dir, `${messageId}-${suffix}${name}`);
     await res.writeFile(target);
     const info = await stat(target);
     if (info.size > maxBytes) {

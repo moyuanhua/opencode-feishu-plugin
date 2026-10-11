@@ -92,7 +92,7 @@ opencode 的 `delivery:"queue"` 消息会在**当前执行的下一个步骤**�
 ## 图片 / 文件接收
 
 - **权限**：需要应用开通 `im:message:readonly`（获取消息中的资源文件接口要求 `im:message` / `im:message:readonly` / `im:message.history:readonly` 任一）。未开通时下载失败，按降级处理，不影响文本消息。
-- **流程**：收到 image / file 消息 → 按 `image_key` / `file_key` 调 `im.messageResource.get` 下载 → 落盘到**附件目录**（默认 `<会话工作目录>/.opencode/temp/opencode-feishu-plugin/`，内置 `.gitignore` 避免污染 `git status`；可用 `attachmentsDir` 覆盖；无法确定会话目录时回退系统临时目录）→ 以 `file://` URI 作为附件挂进 `session.prompt`（文本末尾附保存路径提示）。
+- **流程**：收到 image / file 消息 → 按 `image_key` / `file_key` 调 `im.messageResource.get` 下载 → 落盘到**附件目录**（默认 `<会话工作目录>/.opencode/temp/opencode-feishu-plugin/`，内置 `.gitignore` 避免污染 `git status`；可用 `attachmentsDir` 覆盖；无法确定会话目录时回退系统临时目录）→ 以 `file://` URI 作为附件挂进 `session.prompt`（文本末尾附保存路径提示）。**图片+文字一起发**时飞书投递的是 `post`（富文本），插件会从内联元素里提取图片/文件（可多张，按 fileKey 后缀去重命名）。
 - **为什么不放系统临时目录**：文件在会话工作目录**内**，模型用 `read` 等工具再读是"工作区内读取"，**不会触发越目录审批**；放在目录外则每次读取都要人工批准。
 - **限制**：单附件默认 ≤20MB（`attachmentMaxBytes`，夹取 1–100MB）；超时默认 30s（`attachmentTimeoutMs`）；失败时消息照常投递，仅附「下载失败：原因」。
 - **边界**：音频 / 视频 / 表情包不下载（仍占位文本）；合并转发与卡片内资源飞书不支持直接下载。飞书侧单资源上限 100MB。

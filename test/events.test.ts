@@ -5,7 +5,9 @@ import {
   isP2PChat,
   parseCardAction,
   parseIncomingAttachment,
+  parseIncomingAttachments,
   parseIncomingMessage,
+  parsePostAttachments,
   stripMentionPlaceholders,
 } from "../src/feishu/events.js";
 
@@ -123,6 +125,47 @@ describe("附件解析（图片/文件）", () => {
     expect(msg?.attachment).toEqual({ kind: "file", fileKey: "file_v2_xyz", fileName: "报告.pdf" });
   });
 
+  test("post（富文本）：图片+文字一起发时提取内联图片（可多张）", () => {
+    const msg = parseIncomingMessage({
+      event_id: "evt_post",
+      sender: { sender_id: { open_id: "ou_1" } },
+      message: {
+        message_id: "om_post",
+        chat_id: "oc_1",
+        chat_type: "p2p",
+        message_type: "post",
+        content: JSON.stringify({
+          title: "",
+          content: [
+            [{ tag: "text", text: "给你发过来试试" }],
+            [
+              { tag: "img", image_key: "img_v2_a" },
+              { tag: "img", image_key: "img_v2_b" },
+            ],
+          ],
+        }),
+      },
+    });
+    expect(msg?.attachments).toEqual([
+      { kind: "image", fileKey: "img_v2_a" },
+      { kind: "image", fileKey: "img_v2_b" },
+    ]);
+    expect(msg?.attachment).toEqual({ kind: "image", fileKey: "img_v2_a" });
+    expect(msg?.text).toContain("给你发过来试试");
+    expect(msg?.text).toContain("[图片]");
+  });
+
+  test("parseIncomingAttachments：image / file / post；其余为空", () => {
+    expect(parseIncomingAttachments("image", JSON.stringify({ image_key: "i" }))).toEqual([
+      { kind: "image", fileKey: "i" },
+    ]);
+    expect(
+      parseIncomingAttachments("file", JSON.stringify({ file_key: "f", file_name: "a.md" })),
+    ).toEqual([{ kind: "file", fileKey: "f", fileName: "a.md" }]);
+    expect(parseIncomingAttachments("post", "{not json")).toEqual([]);
+    expect(parseIncomingAttachments("audio", JSON.stringify({ file_key: "k" }))).toEqual([]);
+  });
+
   test("无 key / 非法 JSON / 其它类型不产生附件", () => {
     expect(parseIncomingAttachment("image", JSON.stringify({}))).toBeUndefined();
     expect(parseIncomingAttachment("file", JSON.stringify({ file_name: "x" }))).toBeUndefined();
@@ -137,6 +180,60 @@ describe("附件解析（图片/文件）", () => {
       },
     });
     expect(msg?.attachment).toBeUndefined();
+  });
+});
+
+describe("parseIncomingAttachments / post 富文本（图片+文字一起发）", () => {
+  test("post 里提取内联图片（图片+文字）", () => {
+    const content = JSON.stringify({
+      title: "",
+      content: [
+        [{ tag: "text", text: "给你发过来试试" }],
+        [{ tag: "img", image_key: "img_v2_xxx" }],
+      ],
+    });
+    expect(parseIncomingAttachments("post", content)).toEqual([{ kind: "image", fileKey: "img_v2_xxx" }]);
+    expect(parsePostAttachments(content)).toEqual([{ kind: "image", fileKey: "img_v2_xxx" }]);
+  });
+
+  test("post 多张图 → 多个附件", () => {
+    const content = JSON.stringify({
+      content: [[{ tag: "img", image_key: "a" }], [{ tag: "img", image_key: "b" }]],
+    });
+    expect(parseIncomingAttachments("post", content)).toEqual([
+      { kind: "image", fileKey: "a" },
+      { kind: "image", fileKey: "b" },
+    ]);
+  });
+
+  test("image/file 单附件；其它类型为空", () => {
+    expect(parseIncomingAttachments("image", JSON.stringify({ image_key: "k" }))).toEqual([
+      { kind: "image", fileKey: "k" },
+    ]);
+    expect(
+      parseIncomingAttachments("file", JSON.stringify({ file_key: "f", file_name: "a.txt" })),
+    ).toEqual([{ kind: "file", fileKey: "f", fileName: "a.txt" }]);
+    expect(parseIncomingAttachments("audio", JSON.stringify({ file_key: "f" }))).toEqual([]);
+    expect(parseIncomingAttachments("post", "{not json")).toEqual([]);
+  });
+
+  test("parseIncomingMessage：post 同时给 attachment + attachments", () => {
+    const msg = parseIncomingMessage({
+      event_id: "evt_post",
+      sender: { sender_id: { open_id: "ou_1" } },
+      message: {
+        message_id: "om_post",
+        chat_id: "oc_1",
+        chat_type: "p2p",
+        message_type: "post",
+        content: JSON.stringify({
+          content: [[{ tag: "img", image_key: "img_a" }], [{ tag: "text", text: "hi" }]],
+        }),
+      },
+    });
+    expect(msg?.text).toContain("hi");
+    expect(msg?.attachments).toEqual([{ kind: "image", fileKey: "img_a" }]);
+    expect(msg?.attachment).toEqual({ kind: "image", fileKey: "img_a" });
   });
 });
 

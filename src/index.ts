@@ -1332,23 +1332,31 @@ async function start(
     const files: Array<{ uri: string }> = [];
     for (const message of batch.messages) {
       let text = message.text;
-      if (config.acceptAttachments && message.attachment) {
-        // 图片/文件：先下载到本地（默认落在会话工作目录），作为会话附件挂进 prompt；失败降级占位文本。
-        const outcome = await downloadAttachment({
-          client,
-          messageId: message.messageId,
-          attachment: message.attachment,
-          dir: resolveAttachmentDir(config.attachmentsDir, link?.dir),
-          maxBytes: config.attachmentMaxBytes,
-          timeoutMs: config.attachmentTimeoutMs,
-          log,
-          ...(config.attachmentsDir ? {} : { gitIgnore: true }),
-        });
-        if (outcome.ok) {
-          files.push({ uri: pathToFileURL(outcome.path).href });
-          text = `${text}\n\n${downloadedAttachmentPrompt(message.attachment, outcome)}`;
-        } else {
-          text = `${text}\n\n[附件] 下载失败：${outcome.reason}`;
+      // 附件（可能是多张：图片+文字的 post 富文本）。缺省回退到单个 attachment（向后兼容）。
+      const attachments =
+        message.attachments ?? (message.attachment ? [message.attachment] : []);
+      if (config.acceptAttachments) {
+        // 先下载到本地（默认落在会话工作目录），作为会话附件挂进 prompt；失败降级占位文本。
+        for (let i = 0; i < attachments.length; i++) {
+          const attachment = attachments[i]!;
+          const outcome = await downloadAttachment({
+            client,
+            messageId: message.messageId,
+            attachment,
+            dir: resolveAttachmentDir(config.attachmentsDir, link?.dir),
+            maxBytes: config.attachmentMaxBytes,
+            timeoutMs: config.attachmentTimeoutMs,
+            log,
+            // 同一消息多附件：加 fileKey 后缀避免同名覆盖。
+            ...(attachments.length > 1 ? { uniqueSuffix: attachment.fileKey } : {}),
+            ...(config.attachmentsDir ? {} : { gitIgnore: true }),
+          });
+          if (outcome.ok) {
+            files.push({ uri: pathToFileURL(outcome.path).href });
+            text = `${text}\n\n${downloadedAttachmentPrompt(attachment, outcome)}`;
+          } else {
+            text = `${text}\n\n[附件] 下载失败：${outcome.reason}`;
+          }
         }
       }
       if (text.trim()) texts.push(text);
