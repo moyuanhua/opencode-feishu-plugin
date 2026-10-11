@@ -57,6 +57,17 @@ interface OwnerInfo {
   readonly at: number;
 }
 
+/** 进程是否存活（`process.kill(pid, 0)`；EPERM 视为存活，ESRCH=已死）。 */
+function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as { code?: string }).code === "EPERM";
+  }
+}
+
 /** 获取网关领导权（best-effort；任何异常都降级为「非 leader」，绝不阻塞插件加载）。 */
 export async function acquireGatewayLeader(deps: GatewayLeaderDeps): Promise<GatewayLeadership> {
   const lockDir = deps.lockDir ?? gatewayLeaderLockDir();
@@ -89,8 +100,25 @@ export async function acquireGatewayLeader(deps: GatewayLeaderDeps): Promise<Gat
     return true;
   };
 
-  /** 现有锁是否仍然「新鲜」（owner 文件或锁目录 mtime 在 TTL 内）。 */
+  /** 读取 owner（缺失/损坏返回 undefined）。 */
+  const readOwner = async (): Promise<Partial<OwnerInfo> | undefined> => {
+    try {
+      return JSON.parse(await readFile(ownerFile, "utf8")) as Partial<OwnerInfo>;
+    } catch {
+      return undefined;
+    }
+  };
+
+  /**
+   * 现有锁是否仍然「新鲜」。
+   *
+   * **owner 进程已死 → 立即视为过期**（不等 TTL）：`opencode service restart` / 崩溃会杀掉
+   * 持有者但把锁文件留在磁盘上；只按 mtime 判断会让新进程在 TTL 内一直让位，叠加看门狗
+   * 20 分钟间隔 → 出现十几分钟的空窗（实测 17 分钟）。
+   */
   const isFresh = async (): Promise<boolean> => {
+    const owner = await readOwner();
+    if (typeof owner?.pid === "number" && !pidAlive(owner.pid)) return false;
     const t = now();
     for (const p of [ownerFile, lockDir]) {
       try {
