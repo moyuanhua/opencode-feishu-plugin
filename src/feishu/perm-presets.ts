@@ -5,7 +5,7 @@
  * | --- | --- | --- | --- |
  * | readonly 🔒 | 禁 `edit`/`shell`/`write` | off | 最安全，不弹审批 |
  * | edit ✏️ | allow `edit`，`shell`→ask | gate | 可改文件，执行命令需审批 |
- * | askHigh ⚠️ | 空（继承） | gate，对 `shell`/`edit`/`external_directory` 置 ask | 高风险动作逐次审批 |
+ * | askHigh ⚠️ | 放行常规 + 对 `shell`/`edit`/`external_directory` ask（自包含，不继承） | gate，对 `shell`/`edit`/`external_directory` 置 ask | 高风险动作逐次审批 |
  * | trust 🔓 | allow all | off | 完全放行 |
  *
  * 说明：OpenCode 实测的 shell 工具 action id 为 `bash`（见 OPENCODE_PERMISSION_API.md），
@@ -31,7 +31,7 @@ export const PERMISSION_PRESETS: readonly PresetInfo[] = [
     id: "askHigh",
     icon: "⚠️",
     label: "高风险审批",
-    description: "继承默认规则，对 shell / 编辑 / 外部目录逐次审批。",
+    description: "放行常规操作，仅对 shell / 编辑 / 外部目录逐次审批（自包含，不继承目录配置）。",
   },
   { id: "trust", icon: "🔓", label: "完全信任", description: "放行全部操作，请谨慎使用。" },
 ];
@@ -73,8 +73,16 @@ export function presetToRuleset(preset: PermissionPreset): PermissionRule[] {
         ...SHELL_ACTIONS.map((action) => ({ action, resource: "*", effect: "ask" as const })),
       ];
     }
-    case "askHigh":
-      return [];
+    case "askHigh": {
+      // 自包含（**不继承**目录/全局默认配置）：先放行常规操作，再对敏感动作逐次审批。
+      // 规则「最后匹配优先」→ ask 规则放在 `*:allow` 之后才会生效，行为不再依赖宿主配置。
+      return [
+        { action: "*", resource: "*", effect: "allow" },
+        { action: "edit", resource: "*", effect: "ask" },
+        { action: "external_directory", resource: "*", effect: "ask" },
+        ...SHELL_ACTIONS.map((action) => ({ action, resource: "*", effect: "ask" as const })),
+      ];
+    }
     case "trust":
       return [{ action: "*", resource: "*", effect: "allow" }];
     default:

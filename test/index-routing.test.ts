@@ -115,6 +115,8 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       quickNew: false,
       // 默认关闭消息缓冲，保持每条消息即时跑（缓冲有专门用例）。
       messageBatchMs: 0,
+      // 默认关闭跨 location leader 选举（避免测试写真实 state 目录）；有专门单测。
+      gatewayLeader: false,
       ...overrides,
     },
     storage: {

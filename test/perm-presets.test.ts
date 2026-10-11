@@ -30,8 +30,18 @@ describe("权限预设 → ruleset / gateMode", () => {
     expect(presetAskActions("edit")).toEqual(expect.arrayContaining(["shell", "bash"]));
   });
 
-  test("askHigh：ruleset 为空（继承），gate gate 且 ask shell/edit/external_directory", () => {
-    expect(presetToRuleset("askHigh")).toEqual([]);
+  test("askHigh：自包含 ruleset（先放行常规、再 ask shell/edit/external_directory），gate gate", () => {
+    const rules = presetToRuleset("askHigh");
+    // 第一条是「放行全部」，之后是 ask（最后匹配优先）
+    expect(rules[0]).toEqual({ action: "*", resource: "*", effect: "allow" });
+    expect(rules).toEqual(
+      expect.arrayContaining([
+        { action: "edit", resource: "*", effect: "ask" },
+        { action: "external_directory", resource: "*", effect: "ask" },
+        { action: "shell", resource: "*", effect: "ask" },
+        { action: "bash", resource: "*", effect: "ask" },
+      ]),
+    );
     expect(presetGateMode("askHigh")).toBe("gate");
     expect(presetAskActions("askHigh")).toEqual(
       expect.arrayContaining(["shell", "edit", "external_directory"]),

@@ -24,6 +24,7 @@ import {
   trackGatewayLocationSeen,
   waitForExactGateway,
 } from "./lifecycle.js";
+import { acquireGatewayLeader } from "./gateway-leader.js";
 import { OwnerPolicy } from "./security/allowlist.js";
 import { ReplayGuard, signApproval, signAllowSession, signStop, verifyApproval, verifyAllowSession, verifyStop } from "./security/token.js";
 import { startGateway } from "./feishu/gateway.js";
@@ -205,6 +206,25 @@ export default Plugin.define({
       }
     }
 
+    // 跨 location / 跨进程收敛：state 目录机器级 leader 选举，只让一个实例起网关 + 事件订阅。
+    // 事件是服务端全局的，leader 能服务所有 location；否则各 location 各起一条 WS，
+    // 回调落到非持有 pending 的实例 → 「表单失效 / Permission request not found」。
+    let releaseLeader: (() => Promise<void>) | undefined;
+    if (config.gatewayLeader) {
+      let leadership: Awaited<ReturnType<typeof acquireGatewayLeader>> | undefined;
+      try {
+        leadership = await acquireGatewayLeader({ log });
+      } catch (err) {
+        log.warn("网关 leader 选举失败，降级为本实例直接启动", { error: errorMessage(err) });
+      }
+      if (leadership && !leadership.isLeader) {
+        log.info("非网关 leader（其他实例持有），跳过启动");
+        if (!startedWatchdog) logSink?.close();
+        return async () => {};
+      }
+      releaseLeader = leadership?.release;
+    }
+
     if (!acquireProcessGuard()) {
       // 同进程重复 setup（opencode 按 location 加载全局插件）：只跳过，绝不能碰第一份的资源。
       // 注意：看门狗若由本实例启动，日志流要保留。
@@ -214,10 +234,11 @@ export default Plugin.define({
     }
 
     try {
-      return await start(ctx, config, log, logSink);
+      return await start(ctx, config, log, logSink, releaseLeader);
     } catch (err) {
       // 启动失败时释放占用，允许后续重试。
       releaseProcessGuard();
+      await releaseLeader?.().catch(() => undefined);
       logSink?.close();
       throw err;
     }
@@ -229,6 +250,7 @@ async function start(
   config: ReturnType<typeof resolveConfig>,
   log: ReturnType<typeof createLogger>,
   logSink: ReturnType<typeof createLogSink>,
+  releaseLeader?: () => Promise<void>,
 ): Promise<() => Promise<void>> {
   const storage: StorageLike = {
     get: (key) => ctx.storage.get(key),
@@ -1620,6 +1642,7 @@ async function start(
     await topicGuidanceRegistration?.dispose().catch((err) => log.warn("主题软引导 hook 释放失败", { error: errorMessage(err) }));
     gateway.stop();
     logSink?.close();
+    await releaseLeader?.();
     releaseProcessGuard();
   };
 }

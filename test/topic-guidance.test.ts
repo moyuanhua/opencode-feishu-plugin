@@ -130,6 +130,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
       stream: false,
       logFile: false,
       logLevel: "error",
+      gatewayLeader: false,
       ...overrides,
     },
     storage: {

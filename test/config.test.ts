@@ -479,6 +479,14 @@ describe("messageBatchMs（消息缓冲窗口）", () => {
   });
 });
 
+describe("gatewayLeader（跨 location 网关收敛）", () => {
+  const base = { appId: "a", appSecret: "b", logFile: false };
+  test("默认开启；可关闭", () => {
+    expect(resolveConfig(base, {}, noFile()).gatewayLeader).toBe(true);
+    expect(resolveConfig({ ...base, gatewayLeader: false }, {}, noFile()).gatewayLeader).toBe(false);
+  });
+});
+
 describe("gatewayMatchGraceMs（精确匹配宽限）", () => {
   const base = { appId: "a", appSecret: "b", logFile: false };
   test("默认 3000ms", () => {

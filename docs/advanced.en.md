@@ -170,7 +170,8 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 
 - `gatewayLocation`: start the gateway only at this location (or its **subdirectories** as fallback); `~` expands, relative paths / trailing slashes are normalized. **Empty = any location works**.
 - `gatewayMatchGraceMs` (default `3000`): **exact-match-first** grace window — subdirectory candidates wait this long; if a `here === gatewayLocation` instance appears it takes over (0 = no wait, subdirectory immediately falls back).
-- Inside one process, `acquireProcessGuard` guarantees **only one instance** holds the gateway; other instances skip during setup.
+- `gatewayLeader` (default `true`): **cross-location / cross-process** convergence. Each opencode location is an independent VM context, so the in-process `globalThis` guard does **not** work across locations → each opens a WS; and events are **server-global**, so a card callback may land on an instance that doesn't hold the pending form/approval ("form expired / Permission request not found"). This option elects a machine-wide leader via an **atomic directory lock** under `stateDir`, so only one instance runs the gateway + event subscription (the leader serves all locations). Set `false` to disable (for debugging).
+- Inside one process, `acquireProcessGuard` additionally guarantees **only one instance** holds the gateway; others skip during setup.
 
 **Debugging**: if `gatewayLocation` is configured but none of the loaded locations match, the plugin logs a `warn` after ~2 seconds — "已加载的 location 均未命中" (including the seen locations). You can temporarily set `logLevel: "debug"` to see "跳过非网关 location". If it still doesn't respond after checking, first **leave `gatewayLocation` empty** to rule it out.
 
@@ -196,6 +197,7 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | Log level |
 | `logFile` | string \| boolean | — | `true` = write `<stateDir>/opencode/feishu-plugin.log` (default `~/.local/state/opencode/`); **never put it inside the opencode config directory** — writing any file there counts as a config change and reloads the plugin (every log write reloads; self-amplifying during activity); recommended in server mode |
 | `gatewayLocation` | string | — | Only start the gateway at this location (or **subdirectories** as fallback); `~` expands, relative / trailing slash normalized. Empty = any location works |
+| `gatewayLeader` | boolean | `true` | Cross-location / cross-process gateway convergence: a machine-wide leader is elected via a state-dir lock so only one instance runs the Feishu long connection (events are global) |
 | `gatewayMatchGraceMs` | number | `3000` | **Exact-match-first** grace window: subdirectory candidates wait this long for a `here === gatewayLocation` instance (0 = no wait, immediate fallback) |
 | `approvalTtlMs` | number | `600000` | Approval token / card validity |
 | `staleExecutionMs` | number | `300000` | Watchdog threshold (clamped 0–60 min; **0 = disabled**; see "Watchdog staleness rules") |

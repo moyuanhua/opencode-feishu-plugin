@@ -32,6 +32,7 @@ function makeCtx(
       stream: false,
       logFile: false,
       logLevel: overrides.logLevel ?? "error",
+      gatewayLeader: false,
       ...(overrides.gatewayLocation ? { gatewayLocation: overrides.gatewayLocation } : {}),
       ...(overrides.gatewayMatchGraceMs !== undefined ? { gatewayMatchGraceMs: overrides.gatewayMatchGraceMs } : {}),
     },

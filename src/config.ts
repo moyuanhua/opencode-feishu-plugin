@@ -69,6 +69,17 @@ export interface ResolvedConfig {
    */
   readonly gatewayLocation: string | undefined;
   /**
+   * 跨 location / 跨进程网关收敛（默认 true）。
+   *
+   * opencode 每个 location 是独立 VM context，进程内 `globalThis` 单例**跨 location 无效** →
+   * 各起一条飞书长连接；而事件是**服务端全局**的，卡片回调会落到任意实例 → 落到非持有该
+   * pending 表单/审批的实例就报「表单失效 / Permission request not found」（issue #4 / 表单失效）。
+   *
+   * 开启后：在 `stateDir` 下用原子目录锁做**机器级 leader 选举**，只让一个实例起网关 +
+   * 事件订阅（leader 能服务所有 location）。`false` = 关闭（回到每个 location 各起一条，用于排障）。
+   */
+  readonly gatewayLeader: boolean;
+  /**
    * 网关「精确匹配」宽限窗口（毫秒，默认 3000，夹取 0–10000）。
    *
    * `gatewayLocation` 允许子目录兜底（修「填父目录不生效」），但精确匹配应优先：
@@ -307,6 +318,7 @@ export function resolveConfig(
   const domain = merged.domain === "lark" ? "lark" : "feishu";
   const logFile = resolveLogFile(merged.logFile, env, deps, warnings);
   const gatewayLocation = normalizeGatewayLocation(asString(merged.gatewayLocation));
+  const gatewayLeader = asBoolean(merged.gatewayLeader, true);
   const gatewayMatchGraceMs = clamp(asNumber(merged.gatewayMatchGraceMs, 3000), 0, 10_000);
 
   const signSecretRaw = expandEnv(asString(merged.signSecret), env);
@@ -341,6 +353,7 @@ export function resolveConfig(
     logLevel,
     logFile,
     gatewayLocation,
+    gatewayLeader,
     gatewayMatchGraceMs,
     approvalTtlMs,
     staleExecutionMs,

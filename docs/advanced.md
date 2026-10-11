@@ -167,7 +167,8 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 
 - `gatewayLocation`：只在该 location（或其**子目录**兜底）启动网关；`~` 自动展开、相对路径/尾斜杠会归一化。**留空 = 任意 location 生效**。
 - `gatewayMatchGraceMs`（默认 `3000`）：**精确匹配优先**的宽限窗口——子目录候选先等这么久，出现 `here === gatewayLocation` 就让位（0 = 不等待，子目录立即兜底）。
-- 同一进程内由 `acquireProcessGuard` 保证**只有一个实例**持有网关，其余实例在 setup 里直接跳过。
+- `gatewayLeader`（默认 `true`）：**跨 location / 跨进程**收敛。opencode 每个 location 是独立 VM context，进程内 `globalThis` 单例跨 location **无效** → 各起一条 WS；而事件是**服务端全局**的，卡片回调会落到非持有该 pending 表单/审批的实例（「表单失效 / Permission request not found」）。本项在 `stateDir` 下用**原子目录锁**做机器级 leader 选举，只让一个实例起网关 + 事件订阅（leader 能服务所有 location）。设 `false` 关闭（排障用）。
+- 同一进程内还由 `acquireProcessGuard` 兜底保证**只有一个实例**持有网关，其余实例在 setup 里直接跳过。
 
 **排查**：配置了 `gatewayLocation` 但已加载的 location 无一命中时，插件会在延迟约 2 秒后用 `warn` 打出「已加载的 location 均未命中」（含已见 location 列表）。可临时设 `logLevel: "debug"` 查看「跳过非网关 location」。确认无误仍无响应就先**留空** `gatewayLocation` 排除该项。
 
@@ -193,6 +194,7 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | 日志级别 |
 | `logFile` | string \| boolean | — | `true` = 写 `<stateDir>/opencode/feishu-plugin.log`（默认 `~/.local/state/opencode/`）；**切勿放进 opencode 配置目录**——在其中写任何文件都会被当成配置变更并触发插件重载（日志每次写入都会重载，活跃期自放大）；服务模式建议开启 |
 | `gatewayLocation` | string | — | 只在该 location（或其**子目录**兜底）启动网关；`~` 自动展开、相对路径/尾斜杠会归一化。留空 = 任意 location 生效 |
+| `gatewayLeader` | boolean | `true` | 跨 location / 进程网关收敛：state 目录机器级 leader 选举，只让一个实例起飞书长连接（事件全局） |
 | `gatewayMatchGraceMs` | number | `3000` | **精确匹配优先**的宽限窗口：子目录候选先等这么久，出现 `here === gatewayLocation` 就让位（0 = 不等待，子目录立即兜底） |
 | `approvalTtlMs` | number | `600000` | 审批 token / 卡片有效期 |
 | `staleExecutionMs` | number | `300000` | 看门狗阈值（夹取 0–60 分钟；**0 = 关闭**；见「看门狗判活规则」） |
