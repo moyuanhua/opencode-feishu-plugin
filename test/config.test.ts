@@ -479,6 +479,17 @@ describe("messageBatchMs（消息缓冲窗口）", () => {
   });
 });
 
+describe("staleMessageMs（入站消息时效窗口）", () => {
+  const base = { appId: "a", appSecret: "b", logFile: false };
+  test("默认 120000ms", () => {
+    expect(resolveConfig(base, {}, noFile()).staleMessageMs).toBe(120_000);
+  });
+  test("0 = 关闭；越界夹取到 0–600000", () => {
+    expect(resolveConfig({ ...base, staleMessageMs: 0 }, {}, noFile()).staleMessageMs).toBe(0);
+    expect(resolveConfig({ ...base, staleMessageMs: 99_999_999 }, {}, noFile()).staleMessageMs).toBe(600_000);
+  });
+});
+
 describe("gatewayLeader（跨 location 网关收敛）", () => {
   const base = { appId: "a", appSecret: "b", logFile: false };
   test("默认开启；可关闭", () => {

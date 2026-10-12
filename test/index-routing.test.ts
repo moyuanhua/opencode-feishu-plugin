@@ -354,6 +354,32 @@ describe("index 话题路由（集成）", () => {
     expect(promptCalls).toHaveLength(1);
   });
 
+  test("过期消息（晚到/重推）被忽略；新消息正常处理", async () => {
+    cleanup = await setup({ staleMessageMs: 60_000 });
+    // 5 分钟前的消息（模拟飞书重推的过期指令）→ 不应建会话、不 prompt
+    await deliver(
+      msg("很久以前的指令", {
+        messageId: "om_stale",
+        threadId: "omt_stale",
+        rootId: "omr_stale",
+        createTime: String(Date.now() - 5 * 60_000),
+      }),
+    );
+    expect(createSession).not.toHaveBeenCalled();
+    expect(promptCalls).toHaveLength(0);
+    // 新消息正常进入会话
+    await deliver(
+      msg("新指令", {
+        messageId: "om_fresh",
+        threadId: "omt_fresh",
+        rootId: "omr_fresh",
+        createTime: String(Date.now()),
+      }),
+    );
+    expect(createSession).toHaveBeenCalledTimes(1);
+    expect(promptCalls).toHaveLength(1);
+  });
+
   test("threadRouting=false 回退：即使带 threadId 也进当前会话，且主聊天流命令可用", async () => {
     cleanup = await setup({ threadRouting: false });
     await deliver(msg("主聊天流命令", { messageId: "om_f1" }));

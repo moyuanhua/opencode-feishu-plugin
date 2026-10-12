@@ -854,6 +854,24 @@ async function start(
       return;
     }
 
+    // 时效性：飞书长连接在首次未确认时会重推消息（可能晚到很久，甚至跨插件重启）。
+    // 按**消息创建时间**判活：超过 `staleMessageMs` 的视为过期，直接忽略——
+    // 避免 AI 收到并回复一条早已过时的指令（用户寻址的上下文可能已经变了）。
+    if (config.staleMessageMs > 0) {
+      const created = Number(message.createTime);
+      if (Number.isFinite(created) && created > 0) {
+        const ageMs = Date.now() - created;
+        if (ageMs > config.staleMessageMs) {
+          log.info("忽略过期消息（晚到/重推）", {
+            messageId: message.messageId,
+            ageMs,
+            thresholdMs: config.staleMessageMs,
+          });
+          return;
+        }
+      }
+    }
+
     // 回退开关：threadRouting=false 时完全回到 P3 行为（忽略 thread_id，普通文本进当前会话）。
     if (!config.threadRouting) {
       // 回退模式下把消息当作主聊天流处理：剥掉 threadId，避免话题命令矩阵误判。

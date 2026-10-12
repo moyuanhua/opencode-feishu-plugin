@@ -221,6 +221,13 @@ export interface ResolvedConfig {
    * 静默这么久）才合并提交。`0` = 关闭（每条消息各跑一次，与旧行为一致）。
    */
   readonly messageBatchMs: number;
+  /**
+   * 入站消息时效窗口（毫秒，默认 120000，夹取 0–600000；`0` = 关闭）。
+   *
+   * 飞书长连接在首次未确认时会**重推**消息，可能晚到很久（甚至跨插件重启）。超过该窗口的
+   * 消息视为**过期**直接忽略，避免 AI 回复一条早已过时的指令。按消息**创建时间**判定。
+   */
+  readonly staleMessageMs: number;
 }
 
 const DEFAULT_ALLOW_TOOLS = ["read", "glob", "grep", "webfetch"];
@@ -310,6 +317,7 @@ export function resolveConfig(
   const quickNew = asBoolean(merged.quickNew, true);
   const busyDelivery = merged.busyDelivery === "queue" ? "queue" : "steer";
   const messageBatchMs = clamp(asNumber(merged.messageBatchMs, 1500), 0, 10_000);
+  const staleMessageMs = clamp(asNumber(merged.staleMessageMs, 120_000), 0, 10 * 60 * 1000);
   const keepaliveIntervalMs = clamp(
     asNumber(merged.keepaliveIntervalMs, 20 * 60 * 1000),
     5 * 60 * 1000,
@@ -384,6 +392,7 @@ export function resolveConfig(
     quickNew,
     busyDelivery,
     messageBatchMs,
+    staleMessageMs,
   };
 }
 

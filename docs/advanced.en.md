@@ -204,6 +204,7 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `quickNew` | boolean | `true` | Main-chat "AI session management" (AI handles plain text and creation/management commands, judges intent + finds the dir; asks back in conversation when unsure); `false` disables |
 | `busyDelivery` | `steer`\|`queue` | `steer` | Delivery for new messages while busy: `steer` = cut in (default); `queue` = native queueing, see "Queued-card lifecycle" |
 | `messageBatchMs` | number | `1500` | Message buffer window (0–10000, 0=off): messages arriving within this window in the same session are merged into **one prompt / one receipt card** — the receipt card is sent right away on the first message, the prompt is submitted once the last message has been quiet for the window |
+| `staleMessageMs` | number | `120000` | Inbound message freshness window (0–600000, 0=off): judged by the message **creation time**; anything arriving later than this (Feishu redelivery / backfill after a restart) is ignored |
 | `maxResourcesShown` | number | `8` | Max resource rows shown on approval cards |
 | `sessionAllowButton` | boolean | `true` | Show the "allow this tool in this session" button |
 | `resumeSummary` | boolean | `true` | Show session summary on resume card |
