@@ -38,14 +38,19 @@ import { createSessionRecovery, type CancelQueuedResult } from "./feishu/session
 import { StopController } from "./feishu/run-stop.js";
 import { startWatchdog } from "./feishu/watchdog.js";
 import { FormRelay, type FormReplyInput } from "./feishu/form-relay.js";
-import { cancelFormOverHttp, replyFormOverHttp } from "./feishu/form-reply.js";
+import { cancelFormOverHttp, replyFormOverHttp, serviceConfigPath, serviceStatePath } from "./feishu/form-reply.js";
 import { replyPermissionOverHttp } from "./feishu/permission-http.js";
 import { listSessionsOverHttp } from "./session/session-list-http.js";
 import { ensureGatewayWatchdog, scheduleFastRevive, startKeepalive } from "./session/keepalive.js";
 import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, parseCommand, topicTitle, type CommandName } from "./feishu/commands.js";
 import { decideRoute } from "./feishu/routing.js";
-import { buildConsoleHintCard, buildFinalAnswerCard, buildStopNoticeCard } from "./feishu/cards.js";
+import {
+  buildConsoleAiUnavailableText,
+  buildConsoleHintCard,
+  buildFinalAnswerCard,
+  buildStopNoticeCard,
+} from "./feishu/cards.js";
 import {
   buildSessionOpenedCard,
   buildResumeCompactPendingCard,
@@ -1124,11 +1129,20 @@ async function start(
         candidates.push({ path: trimmed, ...(label ? { label } : {}) });
       };
       let entries: SessionListEntry[] = [];
+      // 会话枚举**是否成功**（区别于「成功但为空」）：失败时 fail-loud，不再静默回退。
+      let sessionsKnown = false;
       try {
         const raw = (await listAllSessionsRaw()) ?? (await listSessionsOverHttp({}, { log }));
-        entries = normalizeSessionList(raw) ?? [];
+        if (raw === undefined || raw === null) {
+          log.warn("console-ai 无法枚举本机会话：运行时接口与 HTTP 兜底均不可用", { chatId });
+        } else {
+          const normalized = normalizeSessionList(raw);
+          if (normalized) entries = normalized;
+          else log.warn("console-ai 会话列表形状无法识别", { chatId });
+          sessionsKnown = Boolean(normalized);
+        }
       } catch (err) {
-        log.debug("console-ai 会话列表读取失败", { error: errorMessage(err) });
+        log.warn("console-ai 会话列表读取失败", { chatId, error: errorMessage(err) });
       }
       const sessionLabelByDir = new Map<string, string>();
       for (const entry of entries) {
@@ -1150,7 +1164,18 @@ async function start(
       }
       const routingSessionID = entries[0]?.sessionID;
       if (!routingSessionID) {
-        log.debug("console-ai 无可用会话（生成通道缺少路由 sessionID），回退");
+        if (!sessionsKnown) {
+          // fail-loud：意图识别依赖「列一次会话取路由 sessionID」，列不到必须让用户看见原因
+          // （旧行为是静默回退成「管理台」卡，用户以为识别成功）。
+          log.warn("console-ai 无法定位路由会话：AI 主聊天流不可用，已提示用户", {
+            chatId,
+            statePath: serviceStatePath(),
+            configPath: serviceConfigPath(),
+          });
+          await sender.sendText(chatId, buildConsoleAiUnavailableText(serviceStatePath(), serviceConfigPath()));
+          return true;
+        }
+        log.debug("console-ai 无可用会话（本机暂无任何会话），回退");
         return false;
       }
       let models: QuickNewModelOption[] = [];

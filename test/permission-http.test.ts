@@ -11,7 +11,7 @@ describe("replyPermissionOverHttp", () => {
     return new Response(null, { status: 204 });
   }) as typeof fetch;
 
-  test("POST 到 /api/session/../permission/../reply，带 Basic 认证与目录头（URL 编码）", async () => {
+  test("POST 到 /api/session/../permission/../reply，带 Basic 认证与目录头（URL 编码），body 用 decision", async () => {
     calls.length = 0;
     await replyPermissionOverHttp(
       { sessionID: "ses_1", requestID: "per_1", reply: "once", directory: "/home/ubuntu/work" },
@@ -23,7 +23,7 @@ describe("replyPermissionOverHttp", () => {
     expect(headers["content-type"]).toBe("application/json");
     expect(headers["x-opencode-directory"]).toBe(encodeURIComponent("/home/ubuntu/work"));
     expect(headers.authorization).toBe(`Basic ${Buffer.from("opencode:pw", "utf8").toString("base64")}`);
-    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ reply: "once" });
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({ decision: "once" });
   });
 
   test("无目录头 / 无口令时不带对应头", async () => {

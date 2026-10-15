@@ -14,7 +14,14 @@
 import { mkdirSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve, sep } from "node:path";
 
-/** 常见系统目录：命中（含其子目录）即拒绝。 */
+/**
+ * 常见系统目录：命中（含其子目录）即拒绝。
+ *
+ * **例外**：某个系统目录**本身位于 `allowedRoots` 之下**时不再拦截（见 `isSystemPath`）。
+ * 因为 `allowedRoots` 才是唯一目录边界（见文件头）：以 root 运行时家目录就是 `/root`，
+ * 而 `/root` 同时是系统目录；若不例外，则默认配置下**没有任何目录合法**（表单永远报
+ * 「系统目录不可作为工作目录」），实操中表现为完全无法建会话。
+ */
 export const SYSTEM_DIRS: readonly string[] = [
   "/etc",
   "/usr",
@@ -70,8 +77,18 @@ export function isUnder(child: string, root: string): boolean {
   return child === normalizedRoot || child.startsWith(`${normalizedRoot}${sep}`);
 }
 
-function isSystemPath(path: string): boolean {
-  return SYSTEM_DIRS.some((dir) => isUnder(path, dir));
+/**
+ * 是否命中系统目录禁区。
+ *
+ * 被某个 `allowedRoots` 根**显式包含**的系统目录会被解锁：用户既然把允许根指到了
+ * `/root`（root 用户的家目录）或 `/usr/share` 这类目录，就不该再被系统目录规则否掉。
+ * 反之 `allowedRoots=["/"]` 时 `/etc` 之类仍照旧拒绝——禁区只在「同一个系统目录
+ * 之下存在允许根」时放行，不会因为根写得宽就整体失效。
+ */
+function isSystemPath(path: string, roots: readonly string[]): boolean {
+  return SYSTEM_DIRS.some(
+    (dir) => isUnder(path, dir) && !roots.some((root) => isUnder(root, dir)),
+  );
 }
 
 /** `validateDirectory` 选项。 */
@@ -118,7 +135,7 @@ export function validateDirectory(
   const mkdir = deps.mkdirSync ?? mkdirSync;
 
   // 先对逻辑路径做禁区 + 白名单判定，给出更明确的提示（创建前不得越界）。
-  const blocked = forbiddenReason(target);
+  const blocked = forbiddenReason(target, roots);
   if (blocked) return blocked;
   if (!roots.some((root) => isUnder(target, root))) {
     return err("outside_allowed", outsideMessage(roots));
@@ -149,7 +166,7 @@ export function validateDirectory(
   } catch {
     real = target;
   }
-  const blockedReal = forbiddenReason(real);
+  const blockedReal = forbiddenReason(real, roots);
   if (blockedReal) return blockedReal;
   if (!roots.some((root) => isUnder(real, root))) {
     return err("outside_allowed", outsideMessage(roots));
@@ -162,9 +179,9 @@ function outsideMessage(roots: readonly string[]): string {
 }
 
 /** `/`、文件系统根、系统目录 → 拒绝原因；其它返回 undefined。 */
-function forbiddenReason(path: string): DirValidationErr | undefined {
+function forbiddenReason(path: string, roots: readonly string[]): DirValidationErr | undefined {
   if (path === sep) return err("forbidden", "不能使用根目录 `/`，请选择具体的项目子目录。");
-  if (isSystemPath(path)) return err("system", `系统目录不可作为工作目录：\`${path}\`。`);
+  if (isSystemPath(path, roots)) return err("system", `系统目录不可作为工作目录：\`${path}\`。`);
   return undefined;
 }
 

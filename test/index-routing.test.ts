@@ -36,6 +36,8 @@ const h = vi.hoisted(() => ({
   compactCalls: [] as Array<{ sessionID: string }>,
   generateTextCalls: [] as string[],
   resourceGets: [] as unknown[],
+  /** 覆盖 `ctx.session.list` 原始返回值（默认 `{data: sessionListRaw}`）。 */
+  sessionListOverride: undefined as unknown,
 }));
 
 vi.mock("../src/feishu/gateway.js", () => ({
@@ -161,7 +163,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
         interruptCalls.push(input.sessionID);
         return undefined;
       },
-      list: async () => ({ data: sessionListRaw }),
+      list: async () => (h.sessionListOverride !== undefined ? h.sessionListOverride : { data: sessionListRaw }),
       get: async (input: { sessionID: string }) => {
         const found = sessionListRaw.find((s) => s.id === input.sessionID);
         if (!found) throw new Error("session not found");
@@ -267,6 +269,7 @@ describe("index 话题路由（集成）", () => {
     h.generateCalls.length = 0;
     h.compactCalls.length = 0;
     h.generateTextCalls.length = 0;
+    h.sessionListOverride = undefined;
     createSession.mockClear();
   });
 
@@ -449,6 +452,27 @@ describe("index 话题路由（集成）", () => {
     await deliver(msg("继续吧", { messageId: "om_hist_1", rootId: cardId, parentId: cardId }));
     expect(promptCalls.at(-1)).toEqual({ sessionID: "ses_hist", text: "继续吧" });
     expect((storage.raw("feishu:v2:thread:omt_from_get") as { sessionID: string }).sessionID).toBe("ses_hist");
+  });
+
+  test("会话枚举失败（本机服务发现不可用）→ fail-loud 文本提示，而非静默回退管理台卡", async () => {
+    // `{data: undefined}`：运行时接口形状不可识别，且不是「成功但为空」→ 视为枚举失败。
+    h.sessionListOverride = { data: undefined };
+    cleanup = await setup({ quickNew: true });
+    await deliver(msg("你好", { messageId: "om_al_1" }));
+    const last = JSON.stringify(h.created.at(-1));
+    expect(last).toContain("无法读取本机会话");
+    expect(last).toContain("service.json");
+    expect(last).not.toContain("管理台");
+    expect(promptCalls).toHaveLength(0);
+  });
+
+  test("会话枚举成功但本机暂无会话 → 仍回管理台卡（不算故障，不误报）", async () => {
+    sessionListRaw = [];
+    cleanup = await setup({ quickNew: true });
+    await deliver(msg("你好", { messageId: "om_al_2" }));
+    const last = JSON.stringify(h.created.at(-1));
+    expect(last).toContain("管理台");
+    expect(last).not.toContain("无法读取本机会话");
   });
 
   test("主聊天流普通文本回复未映射消息（root 未命中）→ 仍回管理台提示卡", async () => {

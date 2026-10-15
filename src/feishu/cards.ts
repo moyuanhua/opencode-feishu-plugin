@@ -173,6 +173,24 @@ export function buildConsoleHintCard(): object {
   };
 }
 
+/**
+ * 「AI 意图识别不可用」提示（fail-loud）。
+ *
+ * 主聊天流 AI 判意图前必须先列一次本机会话来挑路由 sessionID；列不到时旧行为是**静默**
+ * 回退成「管理台」卡，用户完全看不到失败原因（以为识别成功）。这里明确告知原因与排查方向。
+ */
+export function buildConsoleAiUnavailableText(statePath: string, configPath: string): string {
+  return [
+    "⚠️ 无法读取本机会话，AI 意图识别暂不可用。",
+    "",
+    "插件需要 opencode 的服务注册信息（本机端口 + 口令）才能枚举会话，已在以下位置查找：",
+    `- \`${statePath}\`（opencode 以 service 方式运行时会自动生成）`,
+    `- \`${configPath}\`（含 \`hostname\` + \`port\` 时可用）`,
+    "",
+    "请确认 opencode 服务正在运行；命令不受影响，可先用 `/help` 或 `/new`。",
+  ].join("\n");
+}
+
 /** 审批完成后的结果卡片（无按钮）。 */
 export function buildResolvedCard(input: ApprovalCardInput, outcome: ApprovalOutcome): object {
   const label =

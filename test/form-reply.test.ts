@@ -1,11 +1,13 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import {
   discoverLocalService,
+  parseLocalService,
   cancelFormOverHttp,
   replyFormOverHttp,
+  serviceConfigPath,
   serviceStatePath,
 } from "../src/feishu/form-reply.js";
 import { createLogger } from "../src/logger.js";
@@ -36,6 +38,47 @@ describe("serviceStatePath", () => {
   });
 });
 
+describe("serviceConfigPath", () => {
+  test("优先 OPENCODE_CONFIG_DIR（该变量直接指向 opencode 配置目录）", () => {
+    expect(serviceConfigPath({ OPENCODE_CONFIG_DIR: "/cfg/opencode" })).toBe("/cfg/opencode/service.json");
+  });
+
+  test("回退 XDG_CONFIG_HOME/opencode，再回退 ~/.config/opencode", () => {
+    expect(serviceConfigPath({ XDG_CONFIG_HOME: "/xdgcfg" })).toBe("/xdgcfg/opencode/service.json");
+    expect(serviceConfigPath({}).endsWith("/.config/opencode/service.json")).toBe(true);
+  });
+});
+
+describe("parseLocalService", () => {
+  test("运行态形态：url + password", () => {
+    expect(parseLocalService(JSON.stringify({ url: "http://127.0.0.1:3000/", password: "p" }))).toEqual({
+      url: "http://127.0.0.1:3000",
+      password: "p",
+    });
+  });
+
+  test("配置态形态：hostname + port 组合出 url（0.0.0.0 → 127.0.0.1）", () => {
+    expect(
+      parseLocalService(JSON.stringify({ hostname: "0.0.0.0", port: 4096, password: "p" })),
+    ).toEqual({ url: "http://127.0.0.1:4096", password: "p" });
+    expect(parseLocalService(JSON.stringify({ hostname: "127.0.0.1", port: 4096 }))).toEqual({
+      url: "http://127.0.0.1:4096",
+    });
+    // IPv6 字面量要加方括号才可拼接端口。
+    expect(parseLocalService(JSON.stringify({ hostname: "::1", port: 4096 }))).toEqual({
+      url: "http://[::1]:4096",
+    });
+  });
+
+  test("只有 port / 端口非法 / hostname 为空 → undefined（无法确定可达地址）", () => {
+    expect(parseLocalService(JSON.stringify({ port: 3000 }))).toBeUndefined();
+    expect(parseLocalService(JSON.stringify({ hostname: "127.0.0.1" }))).toBeUndefined();
+    expect(parseLocalService(JSON.stringify({ hostname: "127.0.0.1", port: "4096" }))).toBeUndefined();
+    expect(parseLocalService(JSON.stringify({ hostname: "127.0.0.1", port: 70000 }))).toBeUndefined();
+    expect(parseLocalService(JSON.stringify({ hostname: "  ", port: 4096 }))).toBeUndefined();
+  });
+});
+
 describe("discoverLocalService", () => {
   test("解析 url + password，并去掉尾部斜杠", async () => {
     const file = await tmpFile(JSON.stringify({ url: "http://127.0.0.1:3000/", password: "s3cret" }));
@@ -51,6 +94,42 @@ describe("discoverLocalService", () => {
     expect(await discoverLocalService(join(tmpdir(), "definitely-missing-xyz", "service.json"))).toBeUndefined();
     expect(await discoverLocalService(await tmpFile("{not json"))).toBeUndefined();
     expect(await discoverLocalService(await tmpFile(JSON.stringify({ port: 3000 })))).toBeUndefined();
+  });
+
+  test("运行态注册缺失 → 回退配置态服务信息（opencode serve 直跑场景）", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "form-reply-cfg-"));
+    dirs.push(dir);
+    const stateFile = join(dir, "state", "service.json"); // 不存在
+    const cfgFile = join(dir, "config", "service.json");
+    await mkdir(join(dir, "config"), { recursive: true });
+    await writeFile(cfgFile, JSON.stringify({ hostname: "0.0.0.0", port: 4096, password: "pw" }), "utf8");
+
+    const seen: string[] = [];
+    const service = await discoverLocalService(stateFile, {
+      fallback: true,
+      env: { OPENCODE_CONFIG_DIR: join(dir, "config") },
+      readFile: async (path: string) => {
+        seen.push(path);
+        return await readFile(path, "utf8");
+      },
+    });
+    expect(service).toEqual({ url: "http://127.0.0.1:4096", password: "pw" });
+    expect(seen).toEqual([stateFile, cfgFile]);
+  });
+
+  test("两处都不可读 → undefined；显式 file 默认不触发配置回退", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "form-reply-none-"));
+    dirs.push(dir);
+    expect(await discoverLocalService(join(dir, "missing.json"), { fallback: true })).toBeUndefined();
+    // 未开 fallback 时只读显式 file，绝不顺带读真实机器的配置目录。
+    let reads = 0;
+    await discoverLocalService(join(dir, "missing.json"), {
+      readFile: async () => {
+        reads += 1;
+        return JSON.stringify({ hostname: "127.0.0.1", port: 1 });
+      },
+    });
+    expect(reads).toBe(1);
   });
 });
 

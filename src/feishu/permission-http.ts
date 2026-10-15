@@ -5,9 +5,13 @@
  * 进程（TUI 内嵌 server + `opencode serve`）时，卡片回调可能落到非持有实例 →
  * `Permission request not found`，且此前被静默吞掉（issue #4）。
  *
- * 服务端提供 `POST /api/session/{sessionID}/permission/{requestID}/reply`（body `{ reply }`），
+ * 服务端提供 `POST /api/session/{sessionID}/permission/{requestID}/reply`（body `{ decision }`），
  * 插件与服务端同机：读取 `service.json` 发现本机 endpoint（含 Basic 口令），带上
  * `x-opencode-directory` 即可把答复投递到**持有该请求的 location**，无需公网/额外配置。
+ *
+ * ⚠️ payload 键名是 **`decision`**（枚举 `once|always|reject`），**不是** `reply`——
+ * 插件运行时域（`ctx.permission.reply`）用 `reply`，HTTP 路由用 `decision`，两者不同名。
+ * 曾因发送 `{reply}` 恒 400 `Missing key at ['decision']`（2.0.16 与 2.0.26 均如此）。
  *
  * 与飞书 SDK 解耦，纯 IO + 可注入依赖，便于单测。
  */
@@ -55,7 +59,7 @@ export async function replyPermissionOverHttp(
   const response = await doFetch(`${service.url}${path}`, {
     method: "POST",
     headers,
-    body: JSON.stringify({ reply: input.reply }),
+    body: JSON.stringify({ decision: input.reply }),
     signal: AbortSignal.timeout(deps.timeoutMs ?? 8000),
   });
   if (!response.ok) {

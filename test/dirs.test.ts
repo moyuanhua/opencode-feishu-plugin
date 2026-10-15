@@ -47,6 +47,30 @@ describe("validateDirectory（目录容错：空=允许根 / 不存在=创建）
     expect(validateDirectory("/", ROOTS, d)).toMatchObject({ ok: false, reason: "forbidden" });
     expect(validateDirectory("/etc", ROOTS, d)).toMatchObject({ ok: false, reason: "system" });
     expect(validateDirectory("/usr/bin", ROOTS, d)).toMatchObject({ ok: false, reason: "system" });
+    // 允许根是文件系统根时，系统目录禁区依旧生效（不会被放宽的根整体废掉）。
+    expect(validateDirectory("/etc", ["/"], deps({ "/etc": true }))).toMatchObject({
+      ok: false,
+      reason: "system",
+    });
+  });
+
+  test("以 root 运行：家目录即系统目录（/root），允许根之下的系统目录不再被拦", () => {
+    // 默认 allowedRoots = [homedir()] = ["/root"]；旧实现下 /root 命中 SYSTEM_DIRS → 无目录可用。
+    const d = deps({ "/root": true, "/root/ppt": true });
+    expect(validateDirectory("/root", ["/root"], d)).toEqual({ ok: true, path: "/root" });
+    expect(validateDirectory("/root/ppt", ["/root"], d)).toEqual({ ok: true, path: "/root/ppt" });
+    // 允许根之外的系统目录仍拒绝。
+    expect(validateDirectory("/etc", ["/root"], deps({ "/etc": true }))).toMatchObject({
+      ok: false,
+      reason: "system",
+    });
+  });
+
+  test("允许根位于系统目录之下（如 /usr/share）时，该子树放行", () => {
+    expect(validateDirectory("/usr/share/app", ["/usr/share"], deps({ "/usr/share": true }))).toEqual({
+      ok: true,
+      path: "/usr/share/app",
+    });
   });
 
   test("目录留空 → 使用允许根目录（allowedRoots[0]），不是错误", () => {
