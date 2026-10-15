@@ -181,7 +181,7 @@ When the agent asks via `question` or other form tools, the form becomes a Feish
 | `permissionGate` | `off`\|`notify`\|`gate`\|`lockdown` | `gate` | Global permission gate tier |
 | `allowTools` | string[] | `["read","glob","grep","webfetch"]` | No-approval allowlist, supports `prefix*` |
 | `denyTools` | string[] | `[]` | Forced deny (takes precedence over allowlist) |
-| `allowedRoots` | string[] | `[user home]` | Allowed working-directory roots; out-of-root / system dirs denied |
+| `allowedRoots` | string[] | `[user home]` | Allowed working-directory roots; out-of-root / system dirs denied (system dirs **under** an allowed root are exempt, e.g. `/root` for a root user) |
 | `stream` | boolean | `true` | Stream reply updates |
 | `threadRouting` | boolean | `true` | Topic routing master switch |
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | Log level |
@@ -234,6 +234,7 @@ Iterating from real usage feedback; current plan:
 
 | Version | Highlights |
 |---|---|
+| **v0.2.28** | Three real-world bug fixes: ① **HTTP approval replies always failed** — the fallback body used the key `reply` while the server requires `decision` (both 2.0.16 and 2.0.26), so every "Allow" click returned 400 `Missing key at ['decision']` and the card showed "❌ approval did not take effect"; ② **main-chat AI dead under non-service deployments** (`opencode serve` run directly, common in Docker) — service discovery only read the state-dir `service.json`, which a direct run never writes, so session listing was empty and the flow silently fell back to the "console" card; it now also reads the config-dir `service.json` (`hostname` + `port` + `password`, with wildcard addresses such as `0.0.0.0` rewritten to `127.0.0.1`) and **fails loud** with a visible notice instead of staying silent; ③ **running as root made every directory invalid** — `allowedRoots` defaults to the home dir (`/root`) which is also on the system-dir denylist, so no session could be created; system dirs **under an allowed root** are no longer blocked (system dirs outside the allowed roots are still denied) |
 | **v0.2.27** | New inbound **message freshness window** `staleMessageMs` (default 120s, `0`=off): the Feishu long connection **redelivers** unacked messages; anything arriving later than the window (redelivery / backfill after a restart) is treated as stale by **creation time** and ignored, so the AI never replies to an outdated instruction |
 | **v0.2.26** | Fix a **restart gap caused by the leader lock**: after `opencode service restart` / a crash the old lock file lingers (owner process dead but mtime not yet expired), so a new process keeps yielding within the TTL and, combined with the 20-min watchdog, leaves a ~17-minute gap. Now leadership is judged by **owner process liveness (pid)** — a dead owner is taken over immediately |
 | **v0.2.25** | Fix images **sent together with text** being dropped: Feishu delivers those as a `post` (rich text) message, which was previously ignored (only `image`/`file` were parsed), so the model saw only a `[图片]` placeholder. Inline images/files are now extracted from `post` (**multiple supported**) and attached; same-message attachments get a fileKey suffix so they no longer overwrite each other |

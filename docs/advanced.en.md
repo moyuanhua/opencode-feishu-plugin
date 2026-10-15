@@ -188,7 +188,7 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `permissionGate` | `off`\|`notify`\|`gate`\|`lockdown` | `gate` | Global permission gate tier |
 | `allowTools` | string[] | `["read","glob","grep","webfetch"]` | No-approval allowlist, supports `prefix*` |
 | `denyTools` | string[] | `[]` | Forced deny (takes precedence over allowlist) |
-| `allowedRoots` | string[] | `[user home]` | Allowed working-directory roots; out-of-root / system dirs denied; empty falls back to first root, auto-created if missing |
+| `allowedRoots` | string[] | `[user home]` | Allowed working-directory roots; out-of-root / system dirs denied (system dirs **under** an allowed root are exempt: with a root user whose home is `/root`, sessions still work); empty falls back to first root, auto-created if missing |
 | `stream` | boolean | `true` | Stream reply updates |
 | `streamThrottleMs` | number | `400` | Minimum card-update interval (floor 400ms) |
 | `threadRouting` | boolean | `true` | Topic routing master switch; `false` routes main-chat text into the current session |
