@@ -55,7 +55,23 @@ interface OwnerInfo {
   readonly id: string;
   readonly pid: number;
   readonly at: number;
+  /**
+   * 本进程的**启动时刻**（ms）。用于识别 **pid 复用**：`docker restart` 后容器内
+   * 依然是 PID 1，只按 `pidAlive(1)` 判断会把上一个进程留下的锁当成「活着」。
+   */
+  readonly startedAt: number;
 }
+
+/**
+ * 本进程启动时刻（模块加载时算一次，进程内恒定）。
+ *
+ * 用 `Date.now() - uptime` 而不是 `performance.timeOrigin`：跨平台一致，且**不随注入的
+ * 时钟漂移**。同一个 pid 但启动时刻不同的进程，就是 pid 被复用（旧 owner 早已不存在）。
+ */
+const PROCESS_START_MS = Date.now() - process.uptime() * 1000;
+
+/** 启动时刻比较容差（ms）：同一进程内恒定，故只留极小余量应对精度差异。 */
+const START_TOLERANCE_MS = 1_000;
 
 /** 进程是否存活（`process.kill(pid, 0)`；EPERM 视为存活，ESRCH=已死）。 */
 function pidAlive(pid: number): boolean {
@@ -79,7 +95,7 @@ export async function acquireGatewayLeader(deps: GatewayLeaderDeps): Promise<Gat
   const log = deps.log;
 
   const writeOwner = async (): Promise<void> => {
-    const info: OwnerInfo = { id, pid: process.pid, at: now() };
+    const info: OwnerInfo = { id, pid: process.pid, at: now(), startedAt: PROCESS_START_MS };
     await writeFile(ownerFile, JSON.stringify(info), "utf8");
   };
 
@@ -115,10 +131,23 @@ export async function acquireGatewayLeader(deps: GatewayLeaderDeps): Promise<Gat
    * **owner 进程已死 → 立即视为过期**（不等 TTL）：`opencode service restart` / 崩溃会杀掉
    * 持有者但把锁文件留在磁盘上；只按 mtime 判断会让新进程在 TTL 内一直让位，叠加看门狗
    * 20 分钟间隔 → 出现十几分钟的空窗（实测 17 分钟）。
+   *
+   * **pid 被复用 → 同样立即视为过期**：`docker restart` / 容器重建后进程还是 PID 1，
+   * `pidAlive(1)` 恒为真，只靠 TTL 会让**所有**新实例都让位，直到某个 location 重载
+   * 才恢复（实测容器重启后飞书长连接不会自动回来）。这里比对 owner 的进程启动时刻。
    */
   const isFresh = async (): Promise<boolean> => {
     const owner = await readOwner();
-    if (typeof owner?.pid === "number" && !pidAlive(owner.pid)) return false;
+    if (typeof owner?.pid === "number") {
+      if (!pidAlive(owner.pid)) return false;
+      if (
+        owner.pid === process.pid &&
+        typeof owner.startedAt === "number" &&
+        Math.abs(owner.startedAt - PROCESS_START_MS) > START_TOLERANCE_MS
+      ) {
+        return false;
+      }
+    }
     const t = now();
     for (const p of [ownerFile, lockDir]) {
       try {

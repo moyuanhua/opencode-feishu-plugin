@@ -43,6 +43,32 @@ describe("acquireGatewayLeader", () => {
     await c.release();
   });
 
+  test("pid 被复用（容器重启后仍是 PID 1）→ 旧锁立即接管，不等 TTL", async () => {
+    const lockDir = await tmpLock();
+    await mkdir(lockDir, { recursive: true });
+    // 模拟上一个进程留下的锁：pid 与本进程相同（容器里恒为 1），但启动时刻不同。
+    await writeFile(
+      join(lockDir, "owner.json"),
+      JSON.stringify({ id: "OLD", pid: process.pid, at: Date.now(), startedAt: Date.now() - 86_400_000 }),
+      "utf8",
+    );
+    const next = await acquireGatewayLeader({ lockDir, log, instanceId: "NEW", ttlMs: 600_000, heartbeatMs: 60_000 });
+    expect(next.isLeader).toBe(true);
+    const owner = JSON.parse(await readFile(join(lockDir, "owner.json"), "utf8")) as { id: string; startedAt: number };
+    expect(owner.id).toBe("NEW");
+    expect(typeof owner.startedAt).toBe("number");
+    await next.release();
+  });
+
+  test("同进程（pid 与启动时刻都一致）的锁仍视为新鲜 → 让位", async () => {
+    const lockDir = await tmpLock();
+    const a = await acquireGatewayLeader({ lockDir, log, instanceId: "A", ttlMs: 600_000, heartbeatMs: 60_000 });
+    expect(a.isLeader).toBe(true);
+    const b = await acquireGatewayLeader({ lockDir, log, instanceId: "B", ttlMs: 600_000, heartbeatMs: 60_000 });
+    expect(b.isLeader).toBe(false);
+    await a.release();
+  });
+
   test("过期锁可被接管；旧 leader 释放不误删新锁", async () => {
     const lockDir = await tmpLock();
     const a = await acquireGatewayLeader({ lockDir, log, instanceId: "A", ttlMs: 80, heartbeatMs: 100_000 });
