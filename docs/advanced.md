@@ -186,6 +186,7 @@ agent 调 `question` 等 form 类交互时，插件把它转成飞书卡片：
 | `allowTools` | string[] | `["read","glob","grep","webfetch"]` | 免审批白名单，支持 `prefix*` |
 | `denyTools` | string[] | `[]` | 强制拒绝（优先于白名单） |
 | `allowedRoots` | string[] | `[用户家目录]` | 会话工作目录允许根目录；越界 / 系统目录拒绝（**允许根之下**的系统目录除外：以 root 运行、家目录就是 `/root` 时仍可建会话）；留空回退第一个根，不存在自动创建 |
+| `defaultModel` | string | 无 | 建会话表单的默认模型：`"providerID/modelID"`（或 `{providerID,id}`）。留空 = 读 opencode 自己的默认模型（`ctx.model.default`）；再无则回退「最近用过 → 列表首个」。该模型会被并入表单下拉**并置顶预选**，不受 15 项候选上限影响 |
 | `stream` | boolean | `true` | 是否流式回填回复 |
 | `streamThrottleMs` | number | `400` | 卡片更新最小间隔（下限 400ms） |
 | `threadRouting` | boolean | `true` | 话题路由总开关；`false` 时主聊天流普通文本进当前会话 |

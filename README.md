@@ -182,6 +182,7 @@ agent 反问时表单会变成飞书卡片：**可自由输入的字段会直接
 | `allowTools` | string[] | `["read","glob","grep","webfetch"]` | 免审批白名单，支持 `prefix*` |
 | `denyTools` | string[] | `[]` | 强制拒绝（优先于白名单） |
 | `allowedRoots` | string[] | `[用户家目录]` | 允许的工作目录根；越界 / 系统目录拒绝（**允许根之下**的系统目录除外，如 root 用户的 `/root`） |
+| `defaultModel` | string | 无 | 建会话表单的默认模型，`"providerID/modelID"`（也接受 `{providerID,id}` 对象）。留空 = 用 opencode 自己的默认模型；都没有才回退「最近用过 → 列表首个」。无论排在第几位，它都会被并入下拉并置顶预选 |
 | `stream` | boolean | `true` | 流式回填回复 |
 | `threadRouting` | boolean | `true` | 话题路由总开关 |
 | `logLevel` | `debug`\|`info`\|`warn`\|`error` | `info` | 日志级别 |
@@ -234,6 +235,7 @@ agent 反问时表单会变成飞书卡片：**可自由输入的字段会直接
 
 | 版本 | 亮点 |
 |---|---|
+| **v0.2.29** | 修 **建会话表单选不到想要的模型**：旧实现的默认模型只看「最近用过 → 模型列表第 0 个」，**完全不读 `opencode.json` 的 `model`**，且候选被硬上限截断（`SETUP_FORM_MAX_MODELS=15`，`opencode-go/deepseek-v4.1-flash` 恰好排在第 16 位）→ 表单里根本没有它、默认还落到别的模型上。现在默认模型按 **`feishu.json` 的 `defaultModel` → opencode 自己的默认模型（`ctx.model.default`）→ 最近/首个** 解析，并且该模型**始终并入下拉并置顶预选**，排在第几位都不影响 |
 | **v0.2.28** | 修复三个真实环境 bug：① **HTTP 审批答复恒失败**——兜底请求体的键名写成了 `reply`，而服务端要求 `decision`（2.0.16 / 2.0.26 均如此），于是每次点「允许」都 400 `Missing key at ['decision']`、卡片显示「❌ 审批未生效」；② **非 service 部署（`opencode serve` 直跑，Docker 常见）下主聊天流 AI 恒失效**——服务发现只读 state 目录 `service.json`，直跑不生成该文件 → 列不出会话 → 静默回退「管理台」卡；现在回退读配置目录 `service.json`（`hostname`+`port`+`password`，`0.0.0.0` 等通配地址自动改写为 `127.0.0.1`），并且**列不出会话时 fail-loud** 发可见提示不再静默；③ **以 root 运行时任何目录都建不了会话**——`allowedRoots` 默认为家目录（`/root`）却又命中系统目录黑名单，现「允许根之下的系统目录」不再拦截（允许根之外的系统目录仍拒绝） |
 | **v0.2.27** | 新增**消息时效窗口** `staleMessageMs`（默认 120s，`0`=关）：飞书长连接首次未确认会**重推**消息，晚到/跨重启补发的按**创建时间**判定为过期后直接忽略，避免 AI 回复早已过时的指令 |
 | **v0.2.26** | 修复 **leader 锁导致的重启空窗**：`opencode service restart` / 崩溃后旧锁文件仍在（owner 进程已死但 mtime 未过期），新进程会在 TTL 内一直让位，叠加 20 分钟看门狗 → 空窗约 17 分钟。现按 **owner 进程存活（pid）** 判定，已死立即接管 |

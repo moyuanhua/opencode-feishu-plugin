@@ -189,6 +189,7 @@ The plugin is global and loads in every opened location; starting a WSClient eve
 | `allowTools` | string[] | `["read","glob","grep","webfetch"]` | No-approval allowlist, supports `prefix*` |
 | `denyTools` | string[] | `[]` | Forced deny (takes precedence over allowlist) |
 | `allowedRoots` | string[] | `[user home]` | Allowed working-directory roots; out-of-root / system dirs denied (system dirs **under** an allowed root are exempt: with a root user whose home is `/root`, sessions still work); empty falls back to first root, auto-created if missing |
+| `defaultModel` | string | none | Default model for the create-session form: `"providerID/modelID"` (or `{providerID,id}`). Empty = read opencode's own default model (`ctx.model.default`); only then fall back to "most recently used → first in list". The model is merged into the dropdown **and preselected**, unaffected by the 15-item candidate cap |
 | `stream` | boolean | `true` | Stream reply updates |
 | `streamThrottleMs` | number | `400` | Minimum card-update interval (floor 400ms) |
 | `threadRouting` | boolean | `true` | Topic routing master switch; `false` routes main-chat text into the current session |
