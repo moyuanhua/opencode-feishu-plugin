@@ -109,6 +109,27 @@ describe("resolveConfig", () => {
     expect(resolve({ appId: "a", appSecret: "s", sessionPageSize: 12 }, {}).sessionPageSize).toBe(12);
   });
 
+  test("defaultModel：`providerID/modelID` 字符串与 {providerID,id} 对象都支持；非法忽略并告警", () => {
+    const base = { appId: "a", appSecret: "s" };
+    expect(resolve(base, {}).defaultModel).toBeUndefined();
+    expect(resolve({ ...base, defaultModel: "opencode-go/deepseek-v4.1-flash" }, {}).defaultModel).toEqual({
+      providerID: "opencode-go",
+      id: "deepseek-v4.1-flash",
+    });
+    // id 里含 `/` 时按第一个 `/` 切分（provider 不含 `/`）。
+    expect(resolve({ ...base, defaultModel: "p/a/b" }, {}).defaultModel).toEqual({ providerID: "p", id: "a/b" });
+    expect(resolve({ ...base, defaultModel: { providerID: "p", id: "m", name: "M" } }, {}).defaultModel).toEqual({
+      providerID: "p",
+      id: "m",
+      name: "M",
+    });
+    for (const bad of ["", "no-slash", "/leading", "trailing/", { providerID: "p" }, 42]) {
+      const cfg = resolve({ ...base, defaultModel: bad }, {});
+      expect(cfg.defaultModel).toBeUndefined();
+      expect(cfg.warnings.some((w) => w.includes("defaultModel"))).toBe(true);
+    }
+  });
+
   test("threadRouting 默认 true，显式 false 可回退；字符串 'false' 也识别", () => {
     expect(resolve({ appId: "a", appSecret: "s" }, {}).threadRouting).toBe(true);
     expect(resolve({ appId: "a", appSecret: "s", threadRouting: false }, {}).threadRouting).toBe(false);

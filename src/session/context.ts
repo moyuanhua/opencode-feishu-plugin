@@ -76,6 +76,12 @@ export interface SessionCommandsDeps {
   /** 列出可用模型（P6，已归一化）。 */
   readonly listModels: () => Promise<readonly ModelEntry[]>;
   /**
+   * 解析建会话表单的**默认模型**（P6.3）。来源优先级：`feishu.json` 的 `defaultModel`
+   * → opencode 自己的默认模型（`ctx.model.default`）→ 无（由表单回退 recent/列表首个）。
+   * 缺失/失败返回 `undefined`，绝不抛错。
+   */
+  readonly defaultModel?: () => Promise<ModelRef | undefined>;
+  /**
    * 切换已存在会话的模型（含读回校验 + 记录 + 运行卡页脚）。
    * 返回 `undefined` 视为「无法校验」（兼容旧实现/测试替身），回执按成功处理。
    */

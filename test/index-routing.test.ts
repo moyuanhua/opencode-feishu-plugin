@@ -38,6 +38,8 @@ const h = vi.hoisted(() => ({
   resourceGets: [] as unknown[],
   /** 覆盖 `ctx.session.list` 原始返回值（默认 `{data: sessionListRaw}`）。 */
   sessionListOverride: undefined as unknown,
+  /** `ctx.model.default()` 原始返回值（默认 undefined = 运行时未暴露）。 */
+  modelDefaultRaw: undefined as unknown,
 }));
 
 vi.mock("../src/feishu/gateway.js", () => ({
@@ -149,6 +151,7 @@ function makeCtx(overrides: Record<string, unknown> = {}) {
           { providerID: "opencode-go", id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
         ],
       }),
+      default: async () => h.modelDefaultRaw,
     },
     session: {
       create: createSession,
@@ -270,6 +273,7 @@ describe("index 话题路由（集成）", () => {
     h.compactCalls.length = 0;
     h.generateTextCalls.length = 0;
     h.sessionListOverride = undefined;
+    h.modelDefaultRaw = undefined;
     createSession.mockClear();
   });
 
@@ -567,6 +571,49 @@ describe("index 话题路由（集成）", () => {
       | undefined;
     return { json: patch.data.content, fields: formEl?.elements ?? [] };
   };
+
+  /** 解析最近通过 create 发出的 setup_form 表单卡（`/new` 走 sendCard）。 */
+  const createdForm = (): { json: string; fields: Array<Record<string, unknown>> } => {
+    const payload = [...h.created].reverse().find((c) => JSON.stringify(c).includes("setup_form")) as {
+      data: { content: string };
+    };
+    const card = JSON.parse(payload.data.content) as { body: { elements: Array<Record<string, unknown>> } };
+    const formEl = card.body.elements.find((e) => e.name === "setup_form") as
+      | { elements?: Array<Record<string, unknown>> }
+      | undefined;
+    return { json: payload.data.content, fields: formEl?.elements ?? [] };
+  };
+
+  test("建会话表单默认模型：取 opencode 默认模型（不再取决于「最近用过」/列表首个）", async () => {
+    // deepseek 完全可能排在建会话表单 15 项候选之外；这里验证它仍出现在下拉并被预选。
+    h.modelDefaultRaw = {
+      location: { directory: QN_BASE },
+      data: { providerID: "opencode-go", id: "deepseek-v4.1-flash", name: "DeepSeek V4.1 Flash" },
+    };
+    cleanup = await setup();
+    await deliver(msg("/new", { messageId: "om_def_model" }));
+    await vi.waitFor(() => expect(JSON.stringify(h.created.at(-1))).toContain("setup_form"));
+    const sel = createdForm().fields.find((e) => e.name === "model") as { initial_option?: string };
+    expect(sel.initial_option).toBe("opencode-go/deepseek-v4.1-flash");
+  });
+
+  test("建会话表单默认模型：feishu.json 的 defaultModel 优先于 opencode 默认模型", async () => {
+    h.modelDefaultRaw = { location: {}, data: { providerID: "opencode-go", id: "glm-5.3-flash" } };
+    cleanup = await setup({ defaultModel: "opencode-go/deepseek-v4.1-flash" });
+    await deliver(msg("/new", { messageId: "om_def_model_cfg" }));
+    await vi.waitFor(() => expect(JSON.stringify(h.created.at(-1))).toContain("setup_form"));
+    const sel = createdForm().fields.find((e) => e.name === "model") as { initial_option?: string };
+    expect(sel.initial_option).toBe("opencode-go/deepseek-v4.1-flash");
+  });
+
+  test("建会话表单默认模型：opencode 无默认模型时回退为列表首个（旧行为保留）", async () => {
+    h.modelDefaultRaw = { location: {}, data: null };
+    cleanup = await setup();
+    await deliver(msg("/new", { messageId: "om_def_model_none" }));
+    await vi.waitFor(() => expect(JSON.stringify(h.created.at(-1))).toContain("setup_form"));
+    const sel = createdForm().fields.find((e) => e.name === "model") as { initial_option?: string };
+    expect(sel.initial_option).toBe("opencode-go/glm-5.3-flash");
+  });
 
   test("任务文本：AI 识别 → AI 预填表单（目录/权限）→ 提交建会话", async () => {
     sessionListRaw = [

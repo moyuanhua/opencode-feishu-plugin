@@ -79,6 +79,22 @@ export function extractSessionModel(raw: unknown): ModelRef | undefined {
 }
 
 /**
+ * 从 `ctx.model.default()` 的返回里取默认模型。
+ *
+ * 形态：`{ location, data: ModelInfo | null }`（HTTP `GET /api/model/default` 同形），
+ * 也容忍直接就是 `ModelInfo` 或 `{ data: ModelInfo }`。无默认/形状不符 → `undefined`。
+ */
+export function extractDefaultModel(raw: unknown): ModelRef | undefined {
+  if (!isRecord(raw)) return undefined;
+  const data = isRecord(raw.data) ? raw.data : raw;
+  const providerID = str(data.providerID);
+  const id = str(data.id) || str(data.modelID);
+  if (!providerID || !id) return undefined;
+  const name = str(data.name);
+  return { providerID, id, ...(name ? { name } : {}) };
+}
+
+/**
  * 模型切换结果（`switchSessionModel` 的返回值）。
  *
  * 语义：`switchModel` 只影响**后续** provider turn；`Session.Info.model` 是权威的

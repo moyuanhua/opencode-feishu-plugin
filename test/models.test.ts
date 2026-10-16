@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  extractDefaultModel,
   extractSessionModel,
   matchModel,
   modelLabel,
@@ -79,6 +80,24 @@ describe("modelLabel / sameModel / 错误文案", () => {
     expect(modelMatchErrorText("empty", [])).toContain("/model");
     expect(modelMatchErrorText("not_found", [])).toContain("没有匹配");
     expect(modelMatchErrorText("ambiguous", [models[0]!])).toContain("多个");
+  });
+});
+
+describe("extractDefaultModel（建会话表单默认模型）", () => {
+  test("ctx.model.default() 的 {location,data} 形态", () => {
+    expect(
+      extractDefaultModel({ location: { directory: "/w" }, data: { providerID: "opencode-go", id: "deepseek-v4.1-flash", name: "DeepSeek V4.1" } }),
+    ).toEqual({ providerID: "opencode-go", id: "deepseek-v4.1-flash", name: "DeepSeek V4.1" });
+  });
+
+  test("data 为 null（服务端没有默认模型）→ undefined", () => {
+    expect(extractDefaultModel({ location: { directory: "/w" }, data: null })).toBeUndefined();
+  });
+
+  test("直接 ModelInfo / modelID 字段也兼容", () => {
+    expect(extractDefaultModel({ providerID: "p", id: "m" })).toEqual({ providerID: "p", id: "m" });
+    expect(extractDefaultModel({ providerID: "p", modelID: "m" })).toEqual({ providerID: "p", id: "m" });
+    expect(extractDefaultModel(undefined)).toBeUndefined();
   });
 });
 

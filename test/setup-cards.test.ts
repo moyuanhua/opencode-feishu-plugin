@@ -218,6 +218,18 @@ describe("buildSetupFormCard（P6.1 表单卡）", () => {
     expect(perm.initial_option).toBe("edit");
   });
 
+  test("默认模型排在 cap 之外时仍出现在下拉并预选（deepseek 截断问题的回归用例）", () => {
+    const many = Array.from({ length: 40 }, (_, i) => ({ providerID: "p", id: `m${i}`, name: `M${i}` }));
+    // 默认模型 = 第 20 个（远超 SETUP_FORM_MAX_MODELS=15 的截断线）。
+    const card = buildSetupFormCard({ models: many, recent: [], defaultModel: many[20] });
+    const els = collectFormElements(formRoot(card).elements as Record<string, unknown>[]);
+    const model = els.find((e) => e.tag === "select_static" && e.name === SETUP_FORM_FIELDS.model)!;
+    const values = (model.options as Array<{ value: string }>).map((o) => o.value);
+    expect(values).toContain("p/m20");
+    expect(model.initial_option).toBe("p/m20");
+    expect(values.length).toBeLessThanOrEqual(SETUP_FORM_MAX_MODELS);
+  });
+
   test("错误说明 + 保留已填项（dir/perm）", () => {
     const card = buildSetupFormCard({
       models: MODELS,

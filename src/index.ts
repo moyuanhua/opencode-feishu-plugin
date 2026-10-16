@@ -72,6 +72,7 @@ import { scanRootSubdirs } from "./feishu/root-scan.js";
 import { WizardStore } from "./feishu/wizard.js";
 import { RecentStore } from "./feishu/recent.js";
 import {
+  extractDefaultModel,
   extractSessionModel,
   modelLabel,
   normalizeModelList,
@@ -455,6 +456,28 @@ async function start(
   }
 
   /**
+   * 建会话表单的默认模型（P6.3）：
+   * 1. `feishu.json` 的 `defaultModel`（显式配置，最高优先级）；
+   * 2. opencode 自己的默认模型 `ctx.model.default()`（返回 `{location, data}`，data 可能为 null）；
+   * 3. 都没有 → `undefined`，表单回退「最近用过 → 列表首个」。
+   *
+   * 为什么要读 opencode 的默认模型：旧实现只看 `recent`/列表第 0 个，**完全不看
+   * `opencode.json` 的 `model`**，于是默认值取决于「最近用过哪个」（甚至被表单 15 项候选
+   * 上限截断的模型永远选不到）。这里把它拉进来，并由表单把 defaultModel 置顶进候选。
+   */
+  async function resolveDefaultModel(): Promise<ModelRef | undefined> {
+    if (config.defaultModel) return config.defaultModel;
+    const api = (ctx.model as unknown as { default?: () => Promise<unknown> }).default;
+    if (typeof api !== "function") return undefined;
+    try {
+      return extractDefaultModel(await api());
+    } catch (err) {
+      log.debug("opencode 默认模型读取失败", { error: errorMessage(err) });
+      return undefined;
+    }
+  }
+
+  /**
    * 运行卡页脚 / `/current` 用：静默读回会话真实模型（`ctx.session.get`）。
    * 读回失败只 debug，返回 undefined 由调用方降级到插件记录值。
    */
@@ -764,6 +787,7 @@ async function start(
     promoteQueued: async (sessionID) =>
       promoteQueuedInbox(ctx, sessionID, await sessionMap.resolveBySession(sessionID), log),
     listModels,
+    defaultModel: resolveDefaultModel,
     switchSessionModel,
     getSessionModel: readSessionModelQuiet,
     applyPermissionPreset,

@@ -9,7 +9,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve, sep } from "node:path";
-import type { LogLevel, PermissionGate, RawOptions } from "./types.js";
+import type { LogLevel, ModelRef, PermissionGate, RawOptions } from "./types.js";
 
 /**
  * 默认日志文件：`<stateDir>/opencode/feishu-plugin.log`（默认 `~/.local/state/opencode/`）。
@@ -103,6 +103,12 @@ export interface ResolvedConfig {
    * 目录必须位于其中之一之下；`/`、家目录根、系统目录会被单独拒绝。
    */
   readonly allowedRoots: readonly string[];
+  /**
+   * 建会话表单的默认模型（`providerID/modelID`，也接受 `{providerID,id}`）。
+   * 留空 = 用 opencode 自己的默认模型（`ctx.model.default`）。不再让默认值
+   * 取决于「最近用过哪个」，也避免被表单候选截断挡掉。
+   */
+  readonly defaultModel?: ModelRef;
   /** 「最近使用目录」列表长度（P6，默认 5）。 */
   readonly recentDirsLimit: number;
   /** 「最近使用模型」列表长度（P6，默认 5）。 */
@@ -240,6 +246,30 @@ const VALID_LOG_LEVELS: readonly LogLevel[] = ["debug", "info", "warn", "error"]
 /** 配置文件相对 configDir 的位置：`<configDir>/plugins/feishu.json`。 */
 const CONFIG_FILE_RELATIVE = ["plugins", "feishu.json"] as const;
 
+/**
+ * 解析 `defaultModel` 配置：支持字符串 `"providerID/modelID"` 与对象 `{providerID,id}`。
+ * 非法（缺一半 / 类型不对）返回 `undefined`，由调用方记一条 warning 并忽略。
+ */
+function parseModelRef(raw: unknown): ModelRef | undefined {
+  if (typeof raw === "string") {
+    const text = raw.trim();
+    const slash = text.indexOf("/");
+    if (slash <= 0 || slash === text.length - 1) return undefined;
+    const providerID = text.slice(0, slash).trim();
+    const id = text.slice(slash + 1).trim();
+    return providerID && id ? { providerID, id } : undefined;
+  }
+  if (typeof raw === "object" && raw !== null && !Array.isArray(raw)) {
+    const record = raw as Record<string, unknown>;
+    const providerID = asString(record["providerID"]).trim();
+    const id = asString(record["id"]).trim();
+    if (!providerID || !id) return undefined;
+    const name = asString(record["name"]).trim();
+    return { providerID, id, ...(name ? { name } : {}) };
+  }
+  return undefined;
+}
+
 /** 读取配置文件的依赖注入点（测试可注入 configDir / readFile）。 */
 export interface ResolveConfigDeps {
   /** 显式覆盖 configDir；默认取 `OPENCODE_CONFIG_DIR` 或 `~/.config/opencode`。 */
@@ -290,6 +320,10 @@ export function resolveConfig(
   const allowedRootsRaw = asStringArray(merged.allowedRoots);
   const allowedRootsCandidates = (allowedRootsRaw.length > 0 ? allowedRootsRaw : [...DEFAULT_ALLOWED_ROOTS]).filter(isAbsolute);
   const allowedRoots = allowedRootsCandidates.length > 0 ? allowedRootsCandidates : [...DEFAULT_ALLOWED_ROOTS];
+  const defaultModel = parseModelRef(merged.defaultModel);
+  if (merged.defaultModel !== undefined && !defaultModel) {
+    warnings.push("defaultModel 非法（应为 `providerID/modelID`），已忽略。");
+  }
   const recentDirsLimit = clamp(asNumber(merged.recentDirsLimit, 5), 1, 20);
   const recentModelsLimit = clamp(asNumber(merged.recentModelsLimit, 5), 1, 20);
   const sessionPageSize = clamp(asNumber(merged.sessionPageSize, 8), 5, 20);
@@ -368,6 +402,7 @@ export function resolveConfig(
     signSecret,
     maxResourcesShown,
     allowedRoots,
+    ...(defaultModel ? { defaultModel } : {}),
     recentDirsLimit,
     recentModelsLimit,
     sessionPageSize,

@@ -600,6 +600,10 @@ async function renderFormCard(
 ): Promise<object> {
   const models = await ctx.loadModels();
   const recent = await ctx.deps.recent.listModels();
+  // 默认模型（P6.3）：向导已选 > 配置的 defaultModel / opencode 默认模型。
+  // 表单会把 defaultModel 并入候选并置顶，因此**不会被 15 项上限截掉**。
+  const configuredDefault = state?.model ? undefined : await resolveDefaultModel(ctx);
+  const defaultModel = state?.model ?? configuredDefault;
   const rootSubdirs = await scanRoot(ctx, ctx.deps.allowedRoots?.[0]);
   const values: SetupFormValuesInput =
     over?.values ?? {
@@ -609,13 +613,24 @@ async function renderFormCard(
   return buildSetupFormCard({
     models,
     recent,
-    ...(state?.model ? { defaultModel: state.model } : {}),
+    ...(defaultModel ? { defaultModel } : {}),
     ...(rootSubdirs.length > 0 ? { rootSubdirs } : {}),
     ...(ctx.deps.allowedRoots ? { allowedRoots: ctx.deps.allowedRoots } : {}),
     ...(over?.error ? { error: over.error } : {}),
     ...(over?.notice ? { notice: over.notice } : {}),
     values,
   });
+}
+
+/** 默认模型解析：注入缺失 / 抛错都降级为 `undefined`（绝不阻塞表单渲染）。 */
+async function resolveDefaultModel(ctx: SessionPrimitives): Promise<ModelRef | undefined> {
+  if (!ctx.deps.defaultModel) return undefined;
+  try {
+    return await ctx.deps.defaultModel();
+  } catch (err) {
+    ctx.deps.log.debug("默认模型解析失败", { error: errorMessage(err) });
+    return undefined;
+  }
 }
 
 /**
