@@ -17,8 +17,12 @@
  *   （用 `location[directory]` 查询参数或 `x-opencode-directory` 头绑定 location，二者均实测有效）。
  *
  * 因此：
- * 1. `touchLocationOverHttp` 以 **`GET /api/plugin` 为主力**（续期 + 重建），探针会话仅作辅助；
- * 2. `ensureGatewayWatchdog` 是**进程级**定时器：`globalThis` 槽位在本进程内跨 location 共享
+ * 1. `touchLocationOverHttp` **只发 `GET /api/plugin`**（实测唯一能续期 / 重建的通道）。
+ *    旧实现额外「创建 + 立即删除」一个探针会话（`__opencode_feishu_keepalive__`），
+ *    v0.2.31 已移除——原因见 `touchLocationOverHttp` 下方注释；
+ * 2. 保活**只有** `ensureGatewayWatchdog` 一个定时器：实例级的 `startKeepalive` 已删除，
+ *    否则每个 location 的实例各起一拍，同一进程里心跳翻倍（实测 :22 / :39 两组节拍）；
+ * 3. `ensureGatewayWatchdog` 是**进程级**定时器：`globalThis` 槽位在本进程内跨 location 共享
  *    （实测：另一个 location 的实例能看到首个实例的进程守卫），所以 **location 被回收、插件实例
  *    被卸载后，看门狗定时器仍然存活**；下一拍用 `/api/plugin` 把 location 拉起来 → 自愈。
  *    看门狗持有**独立的日志 sink**（不随实例 cleanup 关闭、也不会被后续实例的 logger 覆盖），
@@ -31,7 +35,7 @@ import { createLogger, createLogSink, errorMessage, type LogSink } from "../logg
 import { authHeaders, discoverLocalService, type LocalService } from "../feishu/form-reply.js";
 import type { Logger, LogLevel } from "../types.js";
 
-/** 探针会话标题（创建后立即删除，仅在极短窗口内可见）。 */
+/** 探针会话标题（仅为历史兼容保留常量；v0.2.31 起保活不再创建任何会话）。 */
 export const KEEPALIVE_SESSION_TITLE = "__opencode_feishu_keepalive__";
 
 export interface TouchLocationDeps {
@@ -45,16 +49,25 @@ export interface TouchLocationDeps {
 }
 
 /**
- * 产生一次保活活动：
+ * 产生一次保活活动：**只发 `GET /api/plugin`**（base location 路由，实测唯一能触发
+ * `locations.get()` 的通道）：
+ * - location 仍存活 → 续期 LayerMap idle TTL；
+ * - location 已被回收 → **重建**（`location services booted`，插件重新加载、长连接重连）。
+ * location 通过 `location[directory]` 查询参数 + `x-opencode-directory` 头**双重绑定**。
  *
- * 1. **主力：`GET /api/plugin`**（base location 路由，实测唯一能触发 `locations.get()` 的通道）：
- *    - location 仍存活 → 续期 LayerMap idle TTL；
- *    - location 已被回收 → **重建**（`location services booted`，插件重新加载、长连接重连）。
- *    location 通过 `location[directory]` 查询参数 + `x-opencode-directory` 头**双重绑定**。
- * 2. **辅助：探针会话**（创建 + 立即删除）：尽力让 `LocationActivity` 收到一次带 location
- *    的 durable 事件；即使不生效也不影响主力通道。
+ * 返回 `true` = 探针成功。
  *
- * 返回 `true` = 至少一个通道成功。
+ * ## 为什么不再建探针会话（v0.2.31 移除）
+ *
+ * 旧实现每次心跳都 `POST /api/session`（标题 `__opencode_feishu_keepalive__`）再立即 DELETE，
+ * 目的是「尝试让 LocationActivity 收到一次带 location 的 durable 事件」。实测这个假设不成立：
+ * `GET/POST /api/session*` **不**调用 `locations.get()`，既不能续期也不能重建 location；
+ * 真正起作用的只有 `GET /api/plugin`。
+ *
+ * 而副作用是实打实的：新建的会话会推送给桌面端（客户端）UI，UI 随即按 id 拉取该会话详情，
+ * 此时探针会话已被删除 → 404 → 桌面端弹出「请求失败 / Session not found: ses_…」。
+ * 默认每 20 分钟一次，location 卸载后的 `scheduleFastRevive`（1s/5s/20s）还会连爆三条。
+ * 因此这里只保留 `GET /api/plugin` 探针，不再创建任何会话。
  */
 export async function touchLocationOverHttp(
   directory: string,
@@ -78,8 +91,7 @@ export async function touchLocationOverHttp(
     ...dirHeader,
   };
 
-  // ── 主力：`GET /api/plugin`（续期 LayerMap；已回收则重建 location）─────────
-  let touched = false;
+  // ── `GET /api/plugin`（续期 LayerMap；已回收则重建 location）───────────────
   try {
     const params = new URLSearchParams();
     if (directory) params.set("location[directory]", directory);
@@ -90,66 +102,14 @@ export async function touchLocationOverHttp(
       signal: signal(),
     });
     if (res.ok) {
-      touched = true;
-    } else {
-      deps.log.debug("保活位置探针失败", { directory, status: res.status });
+      deps.log.debug("保活心跳已发送", { directory, probe: "(plugin)" });
+      return true;
     }
+    deps.log.debug("保活位置探针失败", { directory, status: res.status });
   } catch (err) {
     deps.log.debug("保活位置探针异常", { directory, error: errorMessage(err) });
   }
-
-  // ── 辅助：探针会话（尝试让 LocationActivity 收到一次带 location 的事件）──
-  let sessionID: string | undefined;
-  try {
-    const response = await doFetch(`${service.url}/api/session`, {
-      method: "POST",
-      headers: baseHeaders,
-      body: JSON.stringify({
-        title: KEEPALIVE_SESSION_TITLE,
-        ...(directory ? { location: { directory } } : {}),
-      }),
-      signal: signal(),
-    });
-    if (response.ok) {
-      const body = (await response.json().catch(() => undefined)) as
-        | { data?: { id?: string } }
-        | undefined;
-      sessionID = body?.data?.id;
-      touched = true;
-    } else {
-      deps.log.debug("保活探针创建失败", { status: response.status, directory });
-    }
-  } catch (err) {
-    deps.log.debug("保活探针创建异常", { directory, error: errorMessage(err) });
-  }
-
-  // 探针用完即删（best-effort；删除失败只留一条空会话，不影响保活）。
-  if (sessionID) {
-    try {
-      await doFetch(`${service.url}/api/session/${encodeURIComponent(sessionID)}`, {
-        method: "DELETE",
-        headers: baseHeaders,
-        signal: signal(),
-      });
-    } catch {
-      /* ignore */
-    }
-  }
-
-  if (touched) deps.log.debug("保活心跳已发送", { directory, probe: sessionID ?? "(plugin)" });
-  return touched;
-}
-
-export interface KeepaliveDeps {
-  readonly log: Logger;
-  /** 要保活的 location 目录（插件自身运行的目录）。 */
-  readonly directory: string;
-  /** 心跳间隔（默认 20 分钟；必须显著小于 opencode 的 60 分钟 TTL）。 */
-  readonly intervalMs: number;
-  /** 覆盖探针实现（测试用）。 */
-  readonly touch?: (directory: string) => Promise<boolean>;
-  readonly setIntervalImpl?: typeof setInterval;
-  readonly clearIntervalImpl?: typeof clearInterval;
+  return false;
 }
 
 /**
@@ -314,29 +274,6 @@ function clearWatchdogSlot(slot: unknown): void {
 export function resetGatewayWatchdogForTest(): void {
   const g = globalThis as unknown as Record<symbol, WatchdogSlot | undefined>;
   clearWatchdogSlot(g[WATCHDOG_SLOT]);
-}
-
-/**
- * 启动周期保活；返回停止函数。定时器 `unref()`，不阻止进程退出。
- * 首次心跳延迟一个间隔（启动当下已有活动，无需立即探针）。
- */
-export function startKeepalive(deps: KeepaliveDeps): () => void {
-  const setIntervalImpl = deps.setIntervalImpl ?? setInterval;
-  const clearIntervalImpl = deps.clearIntervalImpl ?? clearInterval;
-  const touch = deps.touch ?? ((dir: string) => touchLocationOverHttp(dir, { log: deps.log }));
-
-  const timer = setIntervalImpl(() => {
-    void touch(deps.directory).catch((err) => {
-      deps.log.debug("保活心跳异常", { error: errorMessage(err) });
-    });
-  }, deps.intervalMs);
-  // Node 定时器：不因保活阻止进程退出。
-  (timer as unknown as { unref?: () => void }).unref?.();
-
-  deps.log.info("位置保活已启动", { directory: deps.directory, intervalMs: deps.intervalMs });
-  return () => {
-    clearIntervalImpl(timer);
-  };
 }
 
 /**

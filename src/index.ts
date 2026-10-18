@@ -41,7 +41,7 @@ import { FormRelay, type FormReplyInput } from "./feishu/form-relay.js";
 import { cancelFormOverHttp, replyFormOverHttp, serviceConfigPath, serviceStatePath } from "./feishu/form-reply.js";
 import { replyPermissionOverHttp } from "./feishu/permission-http.js";
 import { listSessionsOverHttp } from "./session/session-list-http.js";
-import { ensureGatewayWatchdog, scheduleFastRevive, startKeepalive } from "./session/keepalive.js";
+import { ensureGatewayWatchdog, scheduleFastRevive } from "./session/keepalive.js";
 import { isP2PChat } from "./feishu/events.js";
 import { defaultSessionTitle, isCommand, parseCommand, topicTitle, type CommandName } from "./feishu/commands.js";
 import { decideRoute } from "./feishu/routing.js";
@@ -1655,6 +1655,10 @@ async function start(
    * 位置保活（P8）：opencode 对每个 location 有两条 60 分钟空闲回收路径（LayerMap /
    * LocationActivity），到期会卸载插件（飞书长连接被关闭）。周期性 `GET /api/plugin`
    * 续期；已被回收时该请求直接重建 location（看门狗随进程存活，装卸后仍能自愈）。
+   *
+   * 注意：保活**只有**进程级看门狗这一个定时器（见上）。旧实现还在这里起了一个
+   * 实例级 `startKeepalive`，同一个进程里每个 location 实例各跑一拍 → 心跳翻倍；
+   * v0.2.31 已删除该定时器（看门狗已覆盖同等职责）。
    */
   const here = (ctx.location as { directory?: string } | undefined)?.directory;
   const keepaliveDirectory = here ?? config.gatewayLocation;
@@ -1674,14 +1678,6 @@ async function start(
       log.warn("网关看门狗登记失败（已忽略）", { error: errorMessage(err) });
     }
   }
-  const stopKeepalive =
-    config.keepalive && keepaliveDirectory
-      ? startKeepalive({
-          log,
-          directory: keepaliveDirectory,
-          intervalMs: config.keepaliveIntervalMs,
-        })
-      : undefined;
 
   log.info("飞书插件已就绪");
 
@@ -1701,7 +1697,6 @@ async function start(
     }
     abort.abort();
     stopWatchdog();
-    stopKeepalive?.();
     await subscription.catch(() => undefined);
     // 丢弃未刷出的消息批次（连同定时器）。
     for (const batch of batches.values()) {
