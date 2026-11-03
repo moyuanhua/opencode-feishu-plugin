@@ -38,7 +38,10 @@ Either one disposes the plugin (Feishu long connection closes). **After that, if
 
 ### Two defenses (on by default, **no external script required**)
 
-1. **Gateway keep-alive** (every 20 min, `keepaliveIntervalMs`): `GET /api/plugin` (location-bound) → renews LayerMap; plus create + delete a probe session (auxiliary, to attempt a `LocationActivity` renewal).
+1. **Gateway keep-alive** (every 20 min, `keepaliveIntervalMs`): `GET /api/plugin` (location-bound) → renews LayerMap.
+   > Since v0.2.31 it **no longer** creates/deletes a probe session: session routes cannot renew the location (see "Measured locally" above),
+   > and "create + delete immediately" makes the desktop UI race to read the deleted probe session → "Request failed / Session not found" toasts.
+   > Keep-alive has **exactly one** timer (the process-level watchdog, see item 3).
 2. **Second-scale revive after eviction** (v0.2.20): on dispose the plugin immediately schedules three probes (+1s / +5s / +20s). Those timers live on the host process (they survive location teardown), so the location is re-created within **seconds** → plugin reloaded → WS reconnected. Outage per eviction drops from "up to one heartbeat (20 min)" to **~10 seconds** (hourly availability ~75% → ~99.7%).
 3. **Process-level gateway watchdog** (also every 20 min, one timer per process): every plugin instance in any location registers; the timer lives on process-wide `globalThis` and **survives the instance**. Effects:
    - After the gateway location is reclaimed (including the **single-location / headless** case), the next heartbeat uses `GET /api/plugin` to **rebuild the location** → the plugin reloads and the Feishu connection reconnects (self-heal within ≤ `keepaliveIntervalMs`);

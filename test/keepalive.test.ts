@@ -4,7 +4,6 @@ import {
   resetFastReviveForTest,
   resetGatewayWatchdogForTest,
   scheduleFastRevive,
-  startKeepalive,
   touchLocationOverHttp,
 } from "../src/session/keepalive.js";
 import { createLogger } from "../src/logger.js";
@@ -16,7 +15,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe("touchLocationOverHttp", () => {
-  test("主力位置通道：GET /api/plugin（query+头双重绑定）+ 辅助探针会话", async () => {
+  test("只发 GET /api/plugin（query+头双重绑定），不再创建/删除探针会话", async () => {
     const calls: Array<{ method: string; url: string; headers: Record<string, string>; body?: unknown }> = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
       const headers = (init?.headers ?? {}) as Record<string, string>;
@@ -26,9 +25,6 @@ describe("touchLocationOverHttp", () => {
         headers,
         ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}),
       });
-      if (init?.method === "POST" && url.endsWith("/api/session")) {
-        return jsonResponse({ data: { id: "ses_probe" } });
-      }
       return jsonResponse({ data: [{ id: "plugin-1" }] });
     }) as unknown as typeof fetch;
 
@@ -39,29 +35,24 @@ describe("touchLocationOverHttp", () => {
     });
 
     expect(ok).toBe(true);
-    // ① 主力：/api/plugin + location 绑定（query 参数 + x-opencode-directory 头，实测均有效）
+    // 唯一一次请求：/api/plugin + location 绑定（query 参数 + x-opencode-directory 头，实测均有效）
+    expect(calls).toHaveLength(1);
     expect(calls[0]!.method).toBe("GET");
     expect(calls[0]!.url).toBe(
       "http://127.0.0.1:3000/api/plugin?location%5Bdirectory%5D=%2Fhome%2Fubuntu",
     );
     expect(calls[0]!.headers["x-opencode-directory"]).toBe(encodeURIComponent("/home/ubuntu"));
     expect(calls[0]!.headers.authorization).toContain("Basic ");
-    // ② 辅助：探针会话创建（带 location 绑定头 + body location），随后删除
-    expect(calls[1]!.method).toBe("POST");
-    expect(calls[1]!.url).toBe("http://127.0.0.1:3000/api/session");
-    expect(calls[1]!.body).toMatchObject({ location: { directory: "/home/ubuntu" } });
-    expect(calls[1]!.headers["x-opencode-directory"]).toBe(encodeURIComponent("/home/ubuntu"));
-    expect(calls[2]!.method).toBe("DELETE");
-    expect(calls[2]!.url).toContain("/api/session/ses_probe");
+    // 回归保护：保活绝不能创建会话（旧实现会 POST /api/session 再 DELETE，导致桌面端
+    // 抢读已删除的会话 → 「请求失败 / Session not found」弹窗）。
+    expect(calls.some((c) => c.url.includes("/api/session"))).toBe(false);
   });
 
-  test("位置探针失败时仍可依赖探针会话（touched 取并集）", async () => {
+  test("位置探针失败 → false（不抛错，也不再有任何辅助通道）", async () => {
     const calls: string[] = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
       calls.push(`${init?.method ?? "GET"} ${url}`);
-      if (url.includes("/api/plugin")) return new Response("nope", { status: 503 });
-      if (init?.method === "POST") return jsonResponse({ data: { id: "ses_probe" } });
-      return new Response(null, { status: 204 });
+      return new Response("nope", { status: 503 });
     }) as unknown as typeof fetch;
 
     const ok = await touchLocationOverHttp("/home/ubuntu", {
@@ -69,11 +60,12 @@ describe("touchLocationOverHttp", () => {
       discover: async () => ({ url: "http://127.0.0.1:3000" }),
       fetchImpl,
     });
-    expect(ok).toBe(true);
-    expect(calls.some((c) => c.startsWith("POST"))).toBe(true);
+    expect(ok).toBe(false);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.startsWith("GET")).toBe(true);
   });
 
-  test("无 directory：不带 location 绑定（查询串/头/body 均为空）", async () => {
+  test("无 directory：不带 location 绑定（查询串/头均为空）", async () => {
     const calls: Array<{ url: string; headers: Record<string, string>; body?: unknown }> = [];
     const fetchImpl = (async (url: string, init?: RequestInit) => {
       calls.push({
@@ -90,12 +82,13 @@ describe("touchLocationOverHttp", () => {
       fetchImpl,
     });
     expect(ok).toBe(true);
+    expect(calls).toHaveLength(1);
     expect(calls[0]!.url).toBe("http://127.0.0.1:3000/api/plugin");
     expect(calls[0]!.headers["x-opencode-directory"]).toBeUndefined();
-    expect(calls[1]!.body).not.toHaveProperty("location");
+    expect(calls[0]!.body).toBeUndefined();
   });
 
-  test("全部请求失败 → false（不抛错）", async () => {
+  test("请求失败 → false（不抛错）", async () => {
     const ok = await touchLocationOverHttp("/home/ubuntu", {
       log,
       discover: async () => ({ url: "http://127.0.0.1:3000" }),
@@ -107,48 +100,6 @@ describe("touchLocationOverHttp", () => {
   test("未发现本机服务 → false（不抛错）", async () => {
     const ok = await touchLocationOverHttp("/home/ubuntu", { log, discover: async () => undefined });
     expect(ok).toBe(false);
-  });
-});
-
-describe("startKeepalive", () => {
-  test("按间隔触发 touch，停止后不再触发", async () => {
-    vi.useFakeTimers();
-    try {
-      const touch = vi.fn(async () => true);
-      const stop = startKeepalive({
-        log,
-        directory: "/home/ubuntu",
-        intervalMs: 1000,
-        touch,
-      });
-      await vi.advanceTimersByTimeAsync(3500);
-      expect(touch.mock.calls.length).toBeGreaterThanOrEqual(3);
-      expect(touch).toHaveBeenCalledWith("/home/ubuntu");
-      stop();
-      const callsAfterStop = touch.mock.calls.length;
-      await vi.advanceTimersByTimeAsync(5000);
-      expect(touch.mock.calls.length).toBe(callsAfterStop);
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  test("touch 抛错不影响后续心跳", async () => {
-    vi.useFakeTimers();
-    try {
-      let n = 0;
-      const touch = vi.fn(async () => {
-        n += 1;
-        if (n === 1) throw new Error("boom");
-        return true;
-      });
-      const stop = startKeepalive({ log, directory: "/home/ubuntu", intervalMs: 1000, touch });
-      await vi.advanceTimersByTimeAsync(2500);
-      expect(n).toBeGreaterThanOrEqual(2);
-      stop();
-    } finally {
-      vi.useRealTimers();
-    }
   });
 });
 

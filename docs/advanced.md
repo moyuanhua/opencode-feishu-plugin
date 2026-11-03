@@ -39,7 +39,10 @@ opencode 会**回收空闲的 location**，这会连带卸载插件、关闭飞�
 
 ### 两道防线（默认开启，**无需任何外部脚本**）
 
-1. **网关保活**（每 20 分钟，`keepaliveIntervalMs`）：`GET /api/plugin`（带 location 绑定）→ 续期 LayerMap；另创建 + 删除一个探针会话（辅助，尝试触发 `LocationActivity` 续期）。
+1. **网关保活**（每 20 分钟，`keepaliveIntervalMs`）：`GET /api/plugin`（带 location 绑定）→ 续期 LayerMap。
+   > v0.2.31 起**不再**创建/删除探针会话：会话路由不能续期 location（见上「本机实测」），
+   > 而「创建 + 立即删除」会让桌面端 UI 抢读已删除的探针会话 → 弹出「请求失败 / Session not found」。
+   > 保活**只有一个**定时器（进程级看门狗，见第 3 条）。
 2. **被驱逐后秒级复活**（v0.2.20）：插件被 dispose 时立刻安排 3 次探针（+1s / +5s / +20s）。这些定时器挂在 host 进程上（不随 location 销毁），因此能在**秒级**内重建 location → 插件重新加载 → 长连接重连；把单次空窗从「最多一个心跳间隔（20 分钟）」压到 **~10 秒**（小时可用性 ~75% → ~99.7%）。
 3. **进程级网关看门狗**（同样每 20 分钟，每进程仅一个定时器）：**任意** location 的插件实例都会登记；定时器挂在进程级 `globalThis` 上，**与进程同寿**。效果：
    - 网关 location 被回收后（含**单 location / headless** 场景），下一拍心跳即用 `GET /api/plugin` **重建 location** → 插件重新加载、飞书长连接重连（自愈间隔 ≤ `keepaliveIntervalMs`）；
